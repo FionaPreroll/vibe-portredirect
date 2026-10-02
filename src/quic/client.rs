@@ -121,7 +121,7 @@ where
     let fut = handle_incoming(Arc::clone(&config), connection);
     let task = tokio::spawn(async move {
         if let Err(e) = fut.await {
-            error!("connection failed: {reason}", reason = e.to_string())
+            error!("connection failed: {:#}", e)
         }
     });
 

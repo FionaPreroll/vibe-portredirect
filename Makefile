@@ -145,9 +145,9 @@ clean:
 # Run the portredirect_server binary. Pass extra arguments via ARGS.
 run_server:
 	@echo "Running portredirect_server, local port 1234 ..."
-	@cargo run --bin portredirect_server -- --quic-cert-hostname 127.0.0.1 --local-host 127.0.0.1 --local-port 1234 --quic-psk foo $(ARGS)
+	@cargo run --bin portredirect_server -- --quic-cert-hostname 127.0.0.1 --local-host 127.0.0.1 --allowed-client-ports 1234 --quic-psk foo $(ARGS)
 
 # Run the portredirect_client binary. Pass extra arguments via ARGS.
 run_client:
 	@echo "Running portredirect_client, destination port 2222 ..."
-	@cargo run --bin portredirect_client -- --destination-host 127.0.0.1 --destination-port 2222 --quic-remote-host 127.0.0.1 --quic-remote-port 4433 --quic-psk foo $(ARGS)
+	@cargo run --bin portredirect_client -- --destination-host 127.0.0.1 --destination-port 2222 --remote-listen-port 1234 --quic-remote-host 127.0.0.1 --quic-remote-port 4433 --quic-psk foo $(ARGS)

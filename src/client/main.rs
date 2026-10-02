@@ -22,6 +22,11 @@ struct Args {
     #[clap(long)]
     destination_port: u16,
 
+    /// TCP port the server should listen on for external connections.
+    /// Must be allowed by the server's --allowed-client-ports.
+    #[clap(long)]
+    remote_listen_port: u16,
+
     /// QUIC connection remote host (server).
     #[clap(long)]
     quic_remote_host: String,
@@ -101,7 +106,8 @@ async fn main() -> Result<()> {
         .context("resolving destination address")?;
 
     // Build the application configuration.
-    let app_config = ClientAppData::new(args.quic_psk, forward_destination);
+    let app_config =
+        ClientAppData::new(args.quic_psk, forward_destination, args.remote_listen_port);
 
     // Ensure the rustls crypto provider is installed.
     rustls::crypto::ring::default_provider()

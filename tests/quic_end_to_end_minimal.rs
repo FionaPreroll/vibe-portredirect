@@ -50,7 +50,7 @@ async fn test_quic_end_to_end_minimal() {
         );
     info!("Server config: {:?}", server_config);
 
-    let client_app_data = ClientAppData::new(test_psk_client, "0.0.0.0:0".parse().unwrap());
+    let client_app_data = ClientAppData::new(test_psk_client, "0.0.0.0:0".parse().unwrap(), 0);
     let client_config: client::ClientConfig<ClientAppData> =
         client::ClientConfig::create_default_config(
             config_dir,

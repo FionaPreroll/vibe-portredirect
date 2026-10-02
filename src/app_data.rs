@@ -51,15 +51,23 @@ pub struct ClientAppData {
 
     // The destination address to forward packets to.
     pub forward_destination: SocketAddr,
+
+    // TCP port the server should listen on for external connections.
+    pub remote_listen_port: u16,
 }
 
 impl ClientAppData {
-    pub fn new(connection_auth_psk: SecretString, forward_destination: SocketAddr) -> Self {
+    pub fn new(
+        connection_auth_psk: SecretString,
+        forward_destination: SocketAddr,
+        remote_listen_port: u16,
+    ) -> Self {
         ClientAppData {
             connection: Arc::new(Mutex::new(None)),
             connection_auth_psk,
 
             forward_destination,
+            remote_listen_port,
         }
     }
 }
@@ -67,6 +75,6 @@ impl ClientAppData {
 // Implementing the Display trait for ClientAppData.
 impl fmt::Display for ClientAppData {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "ClientAppData {{ connection: {:?}, connection_auth_psk: [REDACTED], destination: {} }}", self.connection, self.forward_destination)
+        write!(f, "ClientAppData {{ connection: {:?}, connection_auth_psk: [REDACTED], destination: {}, remote_listen_port: {} }}", self.connection, self.forward_destination, self.remote_listen_port)
     }
 }

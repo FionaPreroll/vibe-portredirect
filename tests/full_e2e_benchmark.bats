@@ -45,7 +45,7 @@ setup() {
 
     # Start portredirect server in background
     ./target/release/portredirect_server \
-        --local-host 127.0.0.1 --local-port 10001 \
+        --local-host 127.0.0.1 --allowed-client-ports 10001 \
         --quic-server-host 127.0.0.1 --quic-server-port 4433 --quic-psk ilovespezifisch \
         --print-metrics \
         >"$LOG_DIR/portredirect_server.log" 2>&1 &
@@ -56,7 +56,7 @@ setup() {
 
     # Start portredirect client in background
     ./target/release/portredirect_client \
-        --destination-host 127.0.0.1 --destination-port 5201 \
+        --destination-host 127.0.0.1 --destination-port 5201 --remote-listen-port 10001 \
         --quic-remote-host 127.0.0.1 --quic-remote-port 4433 \
         --quic-remote-hostname-match localhost --quic-psk ilovespezifisch \
         --provide-metrics \

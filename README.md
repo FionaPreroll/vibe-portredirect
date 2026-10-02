@@ -58,14 +58,15 @@ For example, if your public server (accessible on TCP port 443) should forward t
 
 ```sh
 portredirect_server \
-    --local-host 0.0.0.0 --local-port 443 \
+    --local-host 0.0.0.0 --allowed-client-ports 443 \
     --quic-server-host 10.0.0.1 --quic-server-port 12345 \
     --quic-psk your_psk_here
 ```
 
 **Parameters:**
 
-- **`--local-host` & `--local-port`:** Where to listen for incoming TCP connections.
+- **`--local-host`:** Where to listen for incoming TCP connections.
+- **`--allowed-client-ports`:** TCP ports clients may ask the server to listen on, e.g. `443` or `80,443,8000-8100`.
 - **`--quic-server-host` & `--quic-server-port`:** QUIC tunnel details.
 - **`--quic-psk`:** Pre-shared key for secure tunneling.
 
@@ -76,6 +77,7 @@ To forward traffic to a local service (e.g., an `nginx` server on `127.0.0.1:443
 ```sh
 portredirect_client \
     --destination-host 127.0.0.1 --destination-port 4433 \
+    --remote-listen-port 443 \
     --quic-remote-host 10.0.0.1 --quic-remote-port 12345 \
     --quic-remote-hostname-match localhost \
     --quic-psk your_psk_here
@@ -84,6 +86,7 @@ portredirect_client \
 **Parameters:**
 
 - **`--destination-host` & `--destination-port`:** The target TCP service.
+- **`--remote-listen-port`:** The TCP port the server should listen on for you. Must be one of the server's `--allowed-client-ports`.
 - **`--quic-remote-host` & `--quic-remote-port`:** The QUIC server’s address.
 - **`--quic-remote-hostname-match`:** Ensures the server's TLS certificate is valid.
 - **`--quic-psk`:** Must match the server’s PSK.

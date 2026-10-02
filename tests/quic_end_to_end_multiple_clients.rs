@@ -86,7 +86,7 @@ async fn test_quic_end_to_end_multiple_clients() {
     // Spawn multiple client tasks.
     let num_clients = 5;
     let mut client_handles = Vec::with_capacity(num_clients);
-    let client_app_data = ClientAppData::new(test_psk_client, "0.0.0.0:0".parse().unwrap());
+    let client_app_data = ClientAppData::new(test_psk_client, "0.0.0.0:0".parse().unwrap(), 0);
 
     for i in 0..num_clients {
         // Each client gets its own configuration. (Note that we clone the config directory.)

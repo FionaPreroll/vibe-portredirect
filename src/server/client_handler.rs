@@ -2,7 +2,7 @@
 //
 // License: GPL-3.0-only
 
-use crate::protocol::control::configure_quic_client;
+use crate::protocol::control::{configure_quic_client, confirm_client_configuration};
 use crate::protocol::keepalive::run_control_channel_loop;
 use crate::quic::server::ServerConfig;
 use crate::server::AllowedPorts;
@@ -59,7 +59,7 @@ pub async fn handle_quic_client_connection(
     };
 
     // 2. Receive config over control stream
-    let (requested_client_config, control_stream) = match timeout(
+    let (requested_client_config, mut control_stream) = match timeout(
         PortRedirectProtocol::CONFIGURATION_TIMEOUT,
         configure_quic_client(control_stream),
     )
@@ -112,6 +112,13 @@ pub async fn handle_quic_client_connection(
                 return Err(err).context(format!("Failed to bind TCP listener to {}", tcp_addr));
             }
         };
+
+        // Tell the client that the tunnel is ready.
+        let bound_port = listener.local_addr()?.port();
+        if let Err(err) = confirm_client_configuration(&mut control_stream, bound_port).await {
+            quic_conn.close(0u32.into(), b"ERR failed confirming configuration");
+            return Err(err);
+        }
 
         // Spawn the TCP listener in its own task.
         let tcp_config = Arc::clone(&config);

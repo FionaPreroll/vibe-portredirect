@@ -412,10 +412,7 @@ where
             let fut = handle_incoming_client(Arc::clone(&config), connection);
             tokio::spawn(async move {
                 if let Err(e) = fut.await {
-                    warn!(
-                        "Incoming connection dropped: {reason}",
-                        reason = e.to_string()
-                    )
+                    warn!("Incoming connection dropped: {:#}", e)
                 }
             });
         }
