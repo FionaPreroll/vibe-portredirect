@@ -17,7 +17,7 @@ authors = ["unspezifisch <unspezifisch@futurewidgets.eu>"]
 [dependencies]
 anyhow = "1.0.97"
 chrono = "0.4.40"
-clap = { version = "4.5.31", features = ["derive"] }
+clap = { version = "4.5.31", features = ["derive", "env"] }
 dirs = "6.0.0"
 getrandom = "0.3.1"
 hex = "0.4.3"

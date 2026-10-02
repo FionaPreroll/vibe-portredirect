@@ -12,6 +12,7 @@ pub mod forward;
 pub mod metrics_helper;
 pub mod private_files;
 pub mod protocol;
+pub mod psk;
 pub mod quic;
 pub mod server;
 

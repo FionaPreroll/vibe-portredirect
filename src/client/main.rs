@@ -3,11 +3,11 @@
 // License: GPL-3.0-only
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches, Parser};
 use portredirect::app_data::ClientAppData;
 use portredirect::client::run_client::run_client;
 use portredirect::get_config_dir;
-use secrecy::SecretString;
+use portredirect::psk::{warn_if_psk_on_command_line, PskArgs};
 use std::net::ToSocketAddrs;
 use tracing::{info, span, Level};
 
@@ -51,9 +51,8 @@ struct Args {
     #[clap(long)]
     quic_remote_hostname_match: Option<String>,
 
-    /// Pre-shared key for authentication over QUIC.
-    #[clap(long)]
-    quic_psk: SecretString,
+    #[command(flatten)]
+    psk: PskArgs,
 }
 
 #[tokio::main]
@@ -68,7 +67,10 @@ async fn main() -> Result<()> {
     let _enter = span!(Level::INFO, "prclient_main").entered();
 
     // Parse command-line arguments.
-    let args = Args::parse();
+    let matches = Args::command().get_matches();
+    let args = Args::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    warn_if_psk_on_command_line(&matches);
+    let psk = args.psk.load()?;
 
     // Get or create configuration directory.
     let config_dir = get_config_dir(None)?; // HACK None for now.
@@ -106,8 +108,7 @@ async fn main() -> Result<()> {
         .context("resolving destination address")?;
 
     // Build the application configuration.
-    let app_config =
-        ClientAppData::new(args.quic_psk, forward_destination, args.remote_listen_port);
+    let app_config = ClientAppData::new(psk, forward_destination, args.remote_listen_port);
 
     // Ensure the rustls crypto provider is installed.
     rustls::crypto::ring::default_provider()

@@ -60,7 +60,7 @@ For example, if your public server (accessible on TCP port 443) should forward t
 portredirect_server \
     --local-host 0.0.0.0 --allowed-client-ports 443 \
     --quic-server-host 10.0.0.1 --quic-server-port 12345 \
-    --quic-psk your_psk_here
+    --quic-psk-file /etc/portredirect/psk
 ```
 
 **Parameters:**
@@ -68,7 +68,7 @@ portredirect_server \
 - **`--local-host`:** Where to listen for incoming TCP connections.
 - **`--allowed-client-ports`:** TCP ports clients may ask the server to listen on, e.g. `443` or `80,443,8000-8100`.
 - **`--quic-server-host` & `--quic-server-port`:** QUIC tunnel details.
-- **`--quic-psk`:** Pre-shared key for secure tunneling.
+- **`--quic-psk-file`:** File containing the pre-shared key, see [PSK Best Practices](#psk-best-practices).
 
 ### Running the Backend Client
 
@@ -80,7 +80,7 @@ portredirect_client \
     --remote-listen-port 443 \
     --quic-remote-host 10.0.0.1 --quic-remote-port 12345 \
     --quic-remote-hostname-match localhost \
-    --quic-psk your_psk_here
+    --quic-psk-file /etc/portredirect/psk
 ```
 
 **Parameters:**
@@ -89,24 +89,24 @@ portredirect_client \
 - **`--remote-listen-port`:** The TCP port the server should listen on for you. Must be one of the server's `--allowed-client-ports`.
 - **`--quic-remote-host` & `--quic-remote-port`:** The QUIC server’s address.
 - **`--quic-remote-hostname-match`:** Ensures the server's TLS certificate is valid.
-- **`--quic-psk`:** Must match the server’s PSK.
+- **`--quic-psk-file`:** File containing the pre-shared key, must match the server’s PSK.
 
 > **Important:** Start the server first to generate its certificate, then copy **only the certificate** `~/.config/portredirect/cert.der` from the server to the same path on the client machine.
 > Never copy the private key `key.der`: anyone who has it can impersonate your server. The server creates it readable only by its owner (mode `0600`) and warns if it is accessible by others.
 
 ### PSK Best Practices
 
-Always use a long, random pre-shared key when operating over untrusted networks. For example:
+Always use a long, random pre-shared key when operating over untrusted networks. Generate it once and store it in a file that only the user running PortRedirect can read, then copy that file to the other machine via a secure channel:
 
 ```sh
-pwgen -s 32 1
+(umask 077 && openssl rand -hex 32 > /etc/portredirect/psk)
 ```
 
-or
+Both programs accept the PSK from one of these sources:
 
-```sh
-openssl rand -hex 32
-```
+- **`--quic-psk-file <PATH>`** (recommended): Reads the PSK from a file, trailing line breaks are ignored. PortRedirect warns if the file is accessible by other users.
+- **`PORTREDIRECT_QUIC_PSK`** environment variable: Useful for container or service managers that inject secrets.
+- **`--quic-psk <PSK>`**: Avoid this outside of testing. Command-line arguments are visible to every local user in the process list (`ps`, `/proc/<pid>/cmdline`) and end up in shell histories, so PortRedirect warns when it is used.
 
 ## Authentication & Certificate Verification
 
