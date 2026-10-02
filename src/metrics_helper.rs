@@ -24,4 +24,3 @@ impl MetricsCounter for DummyCounter {
         self.0.fetch_add(amount, Ordering::Relaxed);
     }
 }
-

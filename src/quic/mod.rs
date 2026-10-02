@@ -13,7 +13,7 @@ pub const ALPN_QUIC_PORTREDIRECT: &[&[u8]] = &[b"pr-2"];
 
 pub fn configure_transport_config(transport_config: &mut TransportConfig) {
     // QUIC connection advanced configuration
-    
+
     // Schedule streams in a round-robin fashion
     transport_config.send_fairness(true);
 

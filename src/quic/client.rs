@@ -10,7 +10,6 @@ use rustls::pki_types::CertificateDer;
 use std::{fs, io, net::SocketAddr, path::PathBuf, sync::Arc, time::Instant};
 use tracing::{debug, error, info, instrument};
 
-
 use super::ALPN_QUIC_PORTREDIRECT;
 
 #[derive(Debug)]

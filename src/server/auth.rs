@@ -30,7 +30,8 @@ pub async fn authenticate_quic_client(
     debug!("opened control channel with stream id {}", stream_id);
 
     // Convert the futures-based Quinn streams into Tokio-compatible streams.
-    let mut control_channel = BiStream::new(recv.compat(), send.compat_write(), stream_id.to_string());
+    let mut control_channel =
+        BiStream::new(recv.compat(), send.compat_write(), stream_id.to_string());
 
     match server_authenticate(
         &mut control_channel,
