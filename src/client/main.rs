@@ -47,7 +47,8 @@ struct Args {
     #[clap(long)]
     provide_metrics: bool,
 
-    /// QUIC remote hostname override for Subject Alt Name match in TLS cert.
+    /// Name the server's TLS certificate must be issued for (Subject Alt Name), if it differs
+    /// from --quic-remote-host. Must match the server's --quic-cert-hostname.
     #[clap(long)]
     quic_remote_hostname_match: Option<String>,
 
@@ -120,6 +121,7 @@ async fn main() -> Result<()> {
         app_config,
         quic_local_addr,
         quic_remote_addr,
+        args.quic_remote_hostname_match,
         args.provide_metrics,
     )
     .await?;

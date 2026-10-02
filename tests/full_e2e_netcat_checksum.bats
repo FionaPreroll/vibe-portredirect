@@ -36,7 +36,7 @@ setup() {
     ./target/release/portredirect_client \
         --destination-host 127.0.0.1 --destination-port 2222 --remote-listen-port 1111 \
         --quic-remote-host 127.0.0.1 --quic-remote-port 4433 \
-        --quic-remote-hostname-match localhost --quic-psk ilovespezifisch \
+        --quic-psk ilovespezifisch \
         --provide-metrics \
         >"$LOG_DIR/portredirect_client.log" 2>&1 &
     CLIENT_PID=$!

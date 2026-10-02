@@ -23,6 +23,7 @@ pub async fn run_client(
     app_config: ClientAppData,
     tcp_local_addr: SocketAddr,
     quic_remote_addr: SocketAddr,
+    quic_remote_hostname_match: Option<String>,
     metrics_enabled: bool,
 ) -> Result<()> {
     // Shared state for connection statistics.
@@ -66,8 +67,8 @@ pub async fn run_client(
         config_dir,
         tcp_local_addr,
         quic_remote_addr,
-        // You can choose to pass through a hostname match if needed:
-        None, // or Some(your_hostname) if desired.
+        // Name to verify the server certificate against, defaults to the remote IP address.
+        quic_remote_hostname_match,
         None,
         app_config,
     );
