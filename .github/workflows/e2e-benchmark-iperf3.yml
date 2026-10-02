@@ -1,0 +1,59 @@
+name: Full End-to-End Benchmark (iperf3)
+on:
+  push:
+    branches: ["main"]
+jobs:
+  load-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+      - name: Install packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bats figlet iperf3
+      - name: Install Pip dependencies
+        run: pip install -r utils/requirements.txt
+      - name: Cargo release build
+        run: |
+          echo "this is a CI run. delete this file if not. ./.github/workflows and ./tests are using this file." > .ci
+          cargo build --release
+      - name: Run BATS test(s)
+        run: bats --print-output-on-failure --gather-test-outputs-in ./bats-logs tests/full_e2e_benchmark.bats
+      - name: Run Data Cruncher for Plots
+        run: python3 ./utils/iperf_datacruncher.py testlogs/prrs_full_e2e_benchmark*/*.json --out-dir testplots
+      - name: Show Log Files
+        if: always()
+        run: |
+          echo "========== testlogs =========="
+          i=0
+          for subdir in ./testlogs/*; do
+              echo
+              figlet "LOG $i"
+              echo "Test log dir: $subdir"
+              tail -n+0 "$subdir"/* || true
+              i=$((i + 1))
+          done
+
+          echo
+          echo "========== bats-logs =========="
+          tail -n+0 ./bats-logs/* || true
+
+          echo
+          echo "========== testplots =========="
+          figlet "PLOTS"
+          ls -l ./testplots || true
+      - name: Upload Logs
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: portredirect-artifact-benchmark-iperf3
+          path: |
+            ./bats-logs
+            ./testlogs
+            ./testplots

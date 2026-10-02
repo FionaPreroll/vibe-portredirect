@@ -1,0 +1,10 @@
+{
+    "recommendations": [
+        "jetmartin.bats",
+        "foxundermoon.shell-format",
+        "editorconfig.editorconfig",
+        "bluebrown.yamlfmt",
+        "davidanson.vscode-markdownlint",
+        "ms-vscode.makefile-tools"
+    ]
+}

@@ -1,0 +1,44 @@
+name: Documentation (Build test only)
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+env:
+  CARGO_TERM_COLOR: always
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+      - name: Install Ubuntu dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y graphviz
+      - name: Install Pip dependencies
+        run: pip install -r ./utils/requirements.txt
+      - name: Install Cargo dependencies
+        run: cargo install cargo-modules
+      - name: Make checksums of current documentation files
+        run: |
+          ls -l docs/
+          sha256sum docs/* | tee checksums-1.txt
+      - name: Build documentation
+        run: make docs
+      - name: Make checksums of built documentation files
+        run: |
+          ls -l docs/
+          sha256sum docs/* | tee checksums-2.txt
+      - name: Compare generated documentation to repository
+        run: |
+          diff -u checksums-{1,2}.txt | tee docs/checksums.diff
+      - name: Upload documentation
+        uses: actions/upload-artifact@v4
+        with:
+          name: portredirect-artifact-docs-directory
+          path: docs/

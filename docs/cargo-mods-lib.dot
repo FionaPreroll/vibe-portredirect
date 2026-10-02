@@ -1,0 +1,77 @@
+digraph {
+
+    graph [
+        label="portredirect",
+        labelloc=t,
+
+        pad=0.4,
+
+        // Consider rendering the graph using a different layout algorithm, such as:
+        // [dot, neato, twopi, circo, fdp, sfdp]
+        layout=neato,
+        overlap=false,
+        splines="line",
+        rankdir=LR,
+
+        fontname="Helvetica", 
+        fontsize="36",
+    ];
+
+    node [
+        fontname="monospace",
+        fontsize="10",
+        shape="record",
+        style="filled",
+    ];
+
+    edge [
+        fontname="monospace",
+        fontsize="10",
+    ];
+
+    "portredirect" [label="crate|portredirect", fillcolor="#5397c8"]; // "crate" node
+    "portredirect::app_data" [label="pub mod|app_data", fillcolor="#81c169"]; // "mod" node
+    "portredirect::bi_stream" [label="pub mod|bi_stream", fillcolor="#81c169"]; // "mod" node
+    "portredirect::client" [label="pub mod|client", fillcolor="#81c169"]; // "mod" node
+    "portredirect::client::auth" [label="pub mod|client::auth", fillcolor="#81c169"]; // "mod" node
+    "portredirect::client::metrics" [label="pub mod|client::metrics", fillcolor="#81c169"]; // "mod" node
+    "portredirect::client::server_handler" [label="pub mod|client::server_handler", fillcolor="#81c169"]; // "mod" node
+    "portredirect::client::tcp_forwarder" [label="pub mod|client::tcp_forwarder", fillcolor="#81c169"]; // "mod" node
+    "portredirect::forward" [label="pub mod|forward", fillcolor="#81c169"]; // "mod" node
+    "portredirect::metrics_helper" [label="pub mod|metrics_helper", fillcolor="#81c169"]; // "mod" node
+    "portredirect::protocol" [label="pub mod|protocol", fillcolor="#81c169"]; // "mod" node
+    "portredirect::protocol::auth" [label="pub mod|protocol::auth", fillcolor="#81c169"]; // "mod" node
+    "portredirect::protocol::keepalive" [label="pub mod|protocol::keepalive", fillcolor="#81c169"]; // "mod" node
+    "portredirect::protocol::utils" [label="pub mod|protocol::utils", fillcolor="#81c169"]; // "mod" node
+    "portredirect::quic" [label="pub mod|quic", fillcolor="#81c169"]; // "mod" node
+    "portredirect::quic::client" [label="pub mod|quic::client", fillcolor="#81c169"]; // "mod" node
+    "portredirect::quic::server" [label="pub mod|quic::server", fillcolor="#81c169"]; // "mod" node
+    "portredirect::server" [label="pub mod|server", fillcolor="#81c169"]; // "mod" node
+    "portredirect::server::auth" [label="pub mod|server::auth", fillcolor="#81c169"]; // "mod" node
+    "portredirect::server::client_handler" [label="pub mod|server::client_handler", fillcolor="#81c169"]; // "mod" node
+    "portredirect::server::tcp_forwarder" [label="pub mod|server::tcp_forwarder", fillcolor="#81c169"]; // "mod" node
+    "portredirect::server::tcp_listener" [label="pub mod|server::tcp_listener", fillcolor="#81c169"]; // "mod" node
+
+    "portredirect" -> "portredirect::app_data" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge
+    "portredirect" -> "portredirect::bi_stream" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge
+    "portredirect" -> "portredirect::client" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge
+    "portredirect" -> "portredirect::forward" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge
+    "portredirect" -> "portredirect::metrics_helper" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge
+    "portredirect" -> "portredirect::protocol" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge
+    "portredirect" -> "portredirect::quic" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge
+    "portredirect" -> "portredirect::server" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge
+    "portredirect::client" -> "portredirect::client::auth" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge
+    "portredirect::client" -> "portredirect::client::metrics" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge
+    "portredirect::client" -> "portredirect::client::server_handler" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge
+    "portredirect::client" -> "portredirect::client::tcp_forwarder" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge
+    "portredirect::protocol" -> "portredirect::protocol::auth" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge
+    "portredirect::protocol" -> "portredirect::protocol::keepalive" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge
+    "portredirect::protocol" -> "portredirect::protocol::utils" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge
+    "portredirect::quic" -> "portredirect::quic::client" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge
+    "portredirect::quic" -> "portredirect::quic::server" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge
+    "portredirect::server" -> "portredirect::server::auth" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge
+    "portredirect::server" -> "portredirect::server::client_handler" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge
+    "portredirect::server" -> "portredirect::server::tcp_forwarder" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge
+    "portredirect::server" -> "portredirect::server::tcp_listener" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge
+
+}

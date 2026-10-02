@@ -1,0 +1,40 @@
+name: End-to-End Data Integrity Test (netcat/checksums)
+on:
+  push:
+    branches: ["main"]
+jobs:
+  load-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+      - name: Install bats
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bats pv
+      - name: Cargo release build
+        run: |
+          echo "this is a CI run. delete this file if not. ./.github/workflows and ./tests are using this file." > .ci
+          cargo build --release
+      - name: Run BATS test(s)
+        run: bats --print-output-on-failure --gather-test-outputs-in ./bats-logs tests/full_e2e_netcat_checksum.bats
+      - name: Show Log Files
+        if: always()
+        run: |
+          echo "========== testlogs =========="
+          tail -n+0 ./testlogs/*/* || true
+          echo "========== bats-logs =========="
+          tail -n+0 ./bats-logs/* || true
+      - name: Upload Logs
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: portredirect-artifact-benchmark-netcatmd5
+          path: |
+            ./testlogs
+            ./bats-logs

@@ -1,0 +1,20 @@
+digraph baseline_test {
+  // Global graph settings
+  graph [bgcolor=white, rankdir=LR, splines=true];
+  node  [fontname="Helvetica,Arial,sans-serif", shape=box, style="rounded,filled", fillcolor="#ecf0f1", color="#2c3e50", fontcolor="#2c3e50", fontsize=10, margin="0.2,0.1"];
+  edge  [fontname="Helvetica,Arial,sans-serif", color="#16a085", fontsize=9];
+
+  // Nodes with HTML labels for formatting
+  web_browser [label=<
+    <B>User</B><BR/>
+    <I>(Web Browser)</I>
+  >];
+  
+  web_server [label=<
+    <B>Big Server with Public IP</B><BR/>
+    <I>(listening on TCP Port 443)</I>
+  >];
+
+  // Edge
+  web_browser -> web_server [label="TCP Connection"];
+}

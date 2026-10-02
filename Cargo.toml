@@ -1,0 +1,50 @@
+[package]
+name = "portredirect"
+version = "0.3.0"
+edition = "2021"
+rust-version = "1.78.0"
+description = "PortRedirect is a tool that bridges your frontend and backend by redirecting TCP connections through a persistent QUIC connection. It provides both a server (accepting TCP connections and forwarding them via QUIC) and a client (relaying QUIC streams to a TCP destination)."
+license = "GPL-3.0-only"
+readme = "README.md"
+repository = "https://github.com/unspezifisch/portredirect"
+homepage = "https://github.com/unspezifisch/portredirect"
+documentation = "https://docs.rs/portredirect"
+keywords = ["tcp", "quic", "networking", "port-forwarding"]
+categories = ["network-programming", "command-line-utilities"]
+
+authors = ["unspezifisch <unspezifisch@futurewidgets.eu>"]
+
+[dependencies]
+anyhow = "1.0.97"
+chrono = "0.4.40"
+clap = { version = "4.5.31", features = ["derive"] }
+dirs = "6.0.0"
+env_logger = "0.11.6"
+getrandom = "0.3.1"
+hex = "0.4.3"
+lazy_static = "1.5.0"
+prometheus = "0.13.4"
+quinn = { version = "0.11.6", features = ["futures-io"] }
+rand = "0.9.0"
+rcgen = { version = "0.13.2", features = ["pem", "crypto"] }
+rustls = { version = "0.23.23", features = ["ring"] }
+rustls-pemfile = "2.2.0"
+secrecy = "0.10.3"
+sha2 = "0.10.8"
+tokio = { version = "1.43.0", features = ["full"] }
+tokio-test = "0.4.4"
+tokio-util = { version = "0.7.13", features = ["compat"] }
+tracing = "0.1.41"
+tracing-subscriber = "0.3.19"
+warp = "0.3.7"
+
+[dev-dependencies]
+tempfile = "3.17.1"
+
+[[bin]]
+name = "portredirect_server"
+path = "src/server/main.rs"
+
+[[bin]]
+name = "portredirect_client"
+path = "src/client/main.rs"

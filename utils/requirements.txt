@@ -1,0 +1,8 @@
+# for lint:
+black
+# for cst_datacruncher.py:
+scipy
+# variously used:
+click
+matplotlib
+pandas

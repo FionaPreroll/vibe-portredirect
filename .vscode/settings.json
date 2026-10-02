@@ -1,0 +1,17 @@
+{
+    "files.autoSave": "onFocusChange",
+    "editor.renderWhitespace": "selection",
+    "editor.formatOnSave": true,
+    "editor.formatOnSaveMode": "modificationsIfAvailable",
+    "cSpell.language": "en",
+    "cSpell.words": [
+        "addrs",
+        "Addrs",
+        "keepalive",
+        "portredirect",
+        "prserver",
+        "quic",
+        "quinn",
+        "rustls"
+    ]
+}

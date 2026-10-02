@@ -1,0 +1,76 @@
+name: Full End-to-End Custom Stress Test (python)
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+    inputs:
+      debug_enabled:
+        type: boolean
+        description: 'Run the build with tmate debugging enabled (https://github.com/marketplace/actions/debugging-with-tmate)'
+        required: false
+        default: false
+jobs:
+  load-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+      - name: Install Ubuntu packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bats figlet
+      - name: Install Pip dependencies
+        run: pip install -r utils/requirements.txt
+      # Enable tmate debugging of manually-triggered workflows if the input option was provided
+      - name: Setup tmate session
+        uses: mxschmitt/action-tmate@v3
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.debug_enabled }}
+        with:
+          limit-access-to-actor: true
+      # It has no sense to run this benchmark if its test is failing
+      - name: Run Python Unit Tests
+        run: make test_python
+      - name: Cargo release build
+        run: |
+          echo "this is a CI run. delete this file if not. ./.github/workflows and ./tests are using this file." > .ci
+          cargo build --release
+      - name: Run Big Benchmark
+        run: bats --print-output-on-failure --gather-test-outputs-in ./bats-logs tests/full_e2e_connection_stress_test.bats
+      - name: Run Data Cruncher for Plots
+        run: python3 ./utils/cst_datacruncher.py -o ./testplots ./testlogs/prrs_*/cst_*
+      - name: Show Log and Plot Files
+        if: always()
+        run: |
+          echo "========== testlogs =========="
+          i=0
+          for subdir in ./testlogs/*; do
+            echo
+            figlet "LOG $i"
+            echo "Test log dir: $subdir"
+            tail -n+0 "$subdir"/* || true
+            i=$((i + 1))
+          done
+
+          echo
+          echo "========== bats-logs =========="
+          figlet "BATS LOGS"
+          tail -n+0 ./bats-logs/* || true
+
+          echo
+          echo "========== testplots =========="
+          figlet "PLOTS"
+          ls -l ./testplots || true
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: portredirect-artifact-benchmark-custom
+          path: |
+            ./bats-logs
+            ./testlogs
+            ./testplots
