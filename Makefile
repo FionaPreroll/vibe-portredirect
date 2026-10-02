@@ -6,12 +6,12 @@
 #   docs          : Generate documentation by analyzing Cargo modules and rendering GraphViz graphs.
 #   build         : Build the Cargo project in debug mode.
 #   release       : Build the Cargo project in release mode and list the resulting binaries.
-#   lint          : Run Rust linter (cargo clippy) and check Python formatting (black) on utils and tests.
-#   lint_fix      : Automatically apply Rust suggestions and format Python files.
-#   test          : Run all tests: Cargo tests, Python unit tests, and BATS tests.
+#   lint          : Check Rust formatting (cargo fmt), run Rust linter (cargo clippy) and check Python formatting (black).
+#   lint_fix      : Automatically apply Rust suggestions, format Rust and Python files.
+#   test          : Run Cargo tests and Python unit tests.
 #   test_cargo    : Run Cargo tests.
 #   test_python   : Run Python unit tests (Data Cruncher and Connection Stress Test).
-#   test_bats     : Run BATS tests.
+#   test_bats     : Run BATS end-to-end tests (needs bats, iperf3, nc, pv, curl and Python dependencies).
 #   clean         : Clean build artifacts using Cargo's built-in clean command.
 #   run_server    : Run the 'portredirect_server' binary with extra arguments. Pass args via the ARGS variable.
 #   run_client    : Run the 'portredirect_client' binary with extra arguments. Pass args via the ARGS variable.
@@ -33,7 +33,7 @@
 #       Automatically fixes lint issues for Rust and Python code.
 #
 #   make test
-#       Runs all tests (Cargo, Python, and BATS).
+#       Runs Cargo and Python tests.
 #
 #   make clean
 #       Cleans build artifacts.
@@ -45,7 +45,7 @@
 #       Runs the client binary with additional arguments.
 #############################################
 
-.PHONY: all docs build release lint test test_cargo test_python clean run_server run_client
+.PHONY: all docs build release lint lint_fix test test_bats test_cargo test_cargo_debug test_python clean run_server run_client
 
 # Default target: build for release.
 all: test release
@@ -81,6 +81,8 @@ release:
 # Run Rust linter and Python code formatter checks.
 # * (This target is called by CI as well.)
 lint:
+	@echo "Checking Rust formatting (cargo fmt)..."
+	@cargo fmt --check
 	@echo "Running Rust linter (cargo clippy)..."
 	@cargo clippy --all-targets --all-features -- -D warnings
 	@echo "Running Python code formatter check (black) on utils and tests..."
@@ -94,6 +96,8 @@ lint:
 lint_fix:
 	@echo "Running cargo fix to automatically apply Rust suggestions..."
 	@cargo fix --allow-dirty --allow-staged
+	@echo "Running cargo fmt to format Rust files..."
+	@cargo fmt
 	@echo "Running black to auto-format Python files in utils and tests..."
 	@if command -v black >/dev/null 2>&1; then \
 		black utils/*.py; \
@@ -104,7 +108,7 @@ lint_fix:
 # ------------------------------
 # Test targets.
 # ------------------------------
-# Top-level test target: runs both Cargo and Python tests.
+# Top-level test target: runs both Cargo and Python tests (BATS tests: make test_bats).
 test: test_cargo test_python
 
 # Run BATS tests.

@@ -53,19 +53,15 @@ teardown() {
 }
 
 send_and_verify() {
-    #local size=$1
-    local filename="testfile_10GB"
+    local filename="testfile_1GB"
 
-    # Fetch huge test file, probably faster than our RNG with urandom
-    [ -e "$filename" ] || wget -qO "$filename" https://hil-speed.hetzner.com/10GB.bin
-
-    # Slice off file of specified size
-    #head -c ${size}M <10GB.bin >$filename
+    # Generate random test data locally, instead of depending on an external download
+    [ -e "$filename" ] || head -c 1G /dev/urandom >"$filename"
 
     # Compute original MD5 hash
     local original_md5=$(md5sum "$filename" | awk '{print $1}')
 
-    # Start netcat listener on port 5201 (bridged by portredirect)
+    # Start netcat listener on port 2222 (bridged by portredirect)
     nc -l -p 2222 >received_$filename &
     sleep 1 # Allow listener to start
 
