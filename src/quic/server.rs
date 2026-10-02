@@ -6,6 +6,7 @@
 
 use anyhow::{Context, Error, Result};
 use quinn::crypto::rustls::QuicServerConfig;
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use std::{fs, net::SocketAddr, path::PathBuf, sync::Arc, time::Instant};
 use tracing::{debug, info, instrument, warn};
@@ -195,15 +196,13 @@ pub fn load_quic_cert(
     let key = if key_path.extension().is_some_and(|x| x == "der") {
         PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key))
     } else {
-        rustls_pemfile::private_key(&mut &*key)
-            .context("malformed PKCS #1 private key")?
-            .ok_or_else(|| anyhow::Error::msg("no private keys found"))?
+        PrivateKeyDer::from_pem_slice(&key).context("malformed or missing PEM private key")?
     };
     let cert_chain = fs::read(cert_path.clone()).context("failed to read certificate chain")?;
     let cert_chain = if cert_path.extension().is_some_and(|x| x == "der") {
         vec![CertificateDer::from(cert_chain)]
     } else {
-        rustls_pemfile::certs(&mut &*cert_chain)
+        CertificateDer::pem_slice_iter(&cert_chain)
             .collect::<Result<_, _>>()
             .context("invalid PEM-encoded certificate")?
     };
@@ -421,4 +420,41 @@ where
     info!("PR QUIC server terminated after {:?}.", start.elapsed());
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_load_pem_encoded_cert_and_key() -> Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let cert_path = temp_dir.path().join("cert.pem");
+        let key_path = temp_dir.path().join("key.pem");
+
+        let generated = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
+        fs::write(&cert_path, generated.cert.pem())?;
+        fs::write(&key_path, generated.key_pair.serialize_pem())?;
+
+        let (cert_chain, key) = load_quic_cert(key_path, cert_path)?;
+
+        assert_eq!(cert_chain.len(), 1);
+        assert_eq!(cert_chain[0].as_ref(), generated.cert.der().as_ref());
+        assert_eq!(key.secret_der(), generated.key_pair.serialize_der());
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_pem_without_key_fails() -> Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let cert_path = temp_dir.path().join("cert.pem");
+        let key_path = temp_dir.path().join("key.pem");
+
+        let generated = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
+        fs::write(&cert_path, generated.cert.pem())?;
+        fs::write(&key_path, generated.cert.pem())?; // a certificate is not a key
+
+        assert!(load_quic_cert(key_path, cert_path).is_err());
+        Ok(())
+    }
 }

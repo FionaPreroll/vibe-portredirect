@@ -33,7 +33,9 @@ pub async fn run_client(
     // Start the metrics server if enabled.
     if metrics_enabled {
         tokio::spawn(async {
-            start_metrics_server(([0, 0, 0, 0], 9898)).await;
+            if let Err(e) = start_metrics_server(([0, 0, 0, 0], 9898)).await {
+                tracing::error!("Metrics server failed: {:#}", e);
+            }
         });
     }
 
