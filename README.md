@@ -11,7 +11,7 @@ PortRedirect is a lightweight user-space TCP forwarder that bridges your fronten
 - **Server:** Listens for incoming TCP connections (e.g., on port 443) and tunnels them over a persistent QUIC connection.
 - **Client:** Connects to the QUIC server, receives tunneled streams, and forwards them to the target TCP service (e.g., `localhost:4433`).
 
-Both use a pre-shared key (PSK) for authentication and auto-generate certificates on first run (stored in `~/.config/portredirect`).
+Both use a pre-shared key (PSK) for authentication. The server auto-generates a self-signed certificate and private key on first run (stored in `~/.config/portredirect`), which the client uses to verify the server.
 
 ### **Bling:**
 
@@ -91,7 +91,8 @@ portredirect_client \
 - **`--quic-remote-hostname-match`:** Ensures the server's TLS certificate is valid.
 - **`--quic-psk`:** Must match the server’s PSK.
 
-> **Important:** Start the server first to generate its certificate, then copy the contents of the server’s `~/.config/portredirect` directory to the client machine.
+> **Important:** Start the server first to generate its certificate, then copy **only the certificate** `~/.config/portredirect/cert.der` from the server to the same path on the client machine.
+> Never copy the private key `key.der`: anyone who has it can impersonate your server. The server creates it readable only by its owner (mode `0600`) and warns if it is accessible by others.
 
 ### PSK Best Practices
 

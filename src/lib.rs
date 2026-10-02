@@ -10,6 +10,7 @@ pub mod bi_stream;
 pub mod client;
 pub mod forward;
 pub mod metrics_helper;
+pub mod private_files;
 pub mod protocol;
 pub mod quic;
 pub mod server;
@@ -26,8 +27,8 @@ pub fn get_config_dir(override_config_dir: Option<String>) -> Result<PathBuf> {
         config_dir
     };
 
-    // Create the directory if it doesn't exist
-    std::fs::create_dir_all(&config_dir).context("create config dir")?;
+    // Create the directory if it doesn't exist. It holds the private key, so keep it private.
+    private_files::create_private_dir_all(&config_dir).context("create config dir")?;
 
     Ok(config_dir)
 }
