@@ -64,7 +64,7 @@ send_and_verify() {
     # Start netcat listener on port 2222 (bridged by portredirect)
     nc -l -p 2222 >received_$filename &
     NC_PID=$!
-    sleep 1 # Allow listener to start
+    wait_for_listener 2222
 
     # Send the file via netcat to port 1111, which is redirected to 2222
     time cat "$filename" | pv -rta | nc -N 127.0.0.1 1111

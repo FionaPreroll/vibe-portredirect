@@ -29,3 +29,20 @@ stop_processes() {
     wait "$@" 2>/dev/null || true
     return 1
 }
+
+wait_for_listener() {
+    # Wait until a process listens on TCP port $1, at most 10 seconds. Unlike a test connection,
+    # this doesn't use up a listener that accepts a single connection, like nc -l.
+    local port
+    port=$(printf '%04X' "$1")
+    for _ in $(seq 100); do
+        # The second column is the local address, the fourth the state: 0A means LISTEN.
+        if cat /proc/net/tcp /proc/net/tcp6 2>/dev/null |
+            awk -v port=":$port" '$2 ~ port "$" && $4 == "0A" { found = 1 } END { exit !found }'; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    echo "Nothing listens on TCP port $1 after 10 seconds"
+    return 1
+}
