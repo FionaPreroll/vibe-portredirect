@@ -15,6 +15,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+use tokio::time::timeout;
 use tracing::{debug, info, instrument, warn};
 
 use crate::limits::QuicAdmission;
@@ -27,6 +28,9 @@ const LIMIT_WARNING_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Time to wait for clients to be notified when the server shuts down.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Time a client has to complete the TLS handshake, see [`ServerConfig::handshake_timeout`].
+pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Configuration for the QUIC server.
 ///
@@ -42,6 +46,8 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 /// * `connection_limit` - Optional limit on the number of concurrent QUIC connections, including
 ///   connections that are not authenticated yet.
 /// * `admission` - Limits per client address and blocking after failed authentication attempts.
+/// * `handshake_timeout` - Time a client has to complete the TLS handshake. Longer handshakes,
+///   e.g. stalled on purpose, are aborted and count as failed attempts.
 /// * `app_data` - Application-specific data.
 #[derive(Debug)]
 pub struct ServerConfig<AppDataType> {
@@ -52,6 +58,7 @@ pub struct ServerConfig<AppDataType> {
     pub stateless_retry: bool,
     pub connection_limit: Option<usize>,
     pub admission: QuicAdmission,
+    pub handshake_timeout: Duration,
     pub app_data: AppDataType,
 }
 
@@ -86,6 +93,7 @@ impl<AppDataType> ServerConfig<AppDataType> {
             stateless_retry: true, // Be more secure by default
             connection_limit,
             admission: QuicAdmission::default(),
+            handshake_timeout: HANDSHAKE_TIMEOUT,
             app_data,
         }
     }
@@ -371,6 +379,7 @@ pub async fn run_quic_server<F, Fut, AppDataType>(
 where
     F: Fn(Arc<ServerConfig<AppDataType>>, quinn::Connection) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = Result<(), Error>> + Send + 'static,
+    AppDataType: Send + Sync + 'static,
 {
     run_quic_server_until(config, handle_incoming_client, std::future::pending()).await
 }
@@ -390,6 +399,7 @@ pub async fn run_quic_server_until<F, Fut, AppDataType>(
 where
     F: Fn(Arc<ServerConfig<AppDataType>>, quinn::Connection) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = Result<(), Error>> + Send + 'static,
+    AppDataType: Send + Sync + 'static,
 {
     info!("Starting PR QUIC server setup");
 
@@ -428,6 +438,7 @@ where
     // Handle incoming QUIC connections forever.
     let start = Instant::now();
     let config = Arc::from(config);
+    let handle_incoming_client = Arc::new(handle_incoming_client);
     let mut last_limit_warning: Option<Instant> = None;
     info!("QUIC server is ready and accepting connections");
     tokio::pin!(shutdown);
@@ -484,23 +495,35 @@ where
                 continue;
             };
 
-            let connection = match incoming.await {
-                Ok(connection) => connection,
-                Err(e) => {
-                    config.admission.record_failure(remote.ip());
-                    warn!(
-                        "Failed to accept incoming QUIC connection from {}: {}",
-                        remote, e
-                    );
-                    continue;
-                }
-            };
-
-            debug!(peer = %remote, "Accepting new QUIC client connection at {:?}", start.elapsed());
-
-            let fut = handle_incoming_client(Arc::clone(&config), connection);
+            // The TLS handshake runs in the connection's own task, so a client that stalls it
+            // can't hold up other clients.
+            let config = Arc::clone(&config);
+            let handle_incoming_client = Arc::clone(&handle_incoming_client);
             tokio::spawn(async move {
-                if let Err(e) = fut.await {
+                let handshake_timeout = config.handshake_timeout;
+                let connection = match timeout(handshake_timeout, incoming).await {
+                    Ok(Ok(connection)) => connection,
+                    Ok(Err(e)) => {
+                        config.admission.record_failure(remote.ip());
+                        warn!(
+                            "Failed to accept incoming QUIC connection from {}: {}",
+                            remote, e
+                        );
+                        return;
+                    }
+                    Err(_) => {
+                        // Dropping the handshake closes the connection.
+                        config.admission.record_failure(remote.ip());
+                        warn!(
+                            "TLS handshake with {} not completed within {:?}, closing the connection",
+                            remote, handshake_timeout
+                        );
+                        return;
+                    }
+                };
+
+                debug!(peer = %remote, "Accepting new QUIC client connection at {:?}", start.elapsed());
+                if let Err(e) = handle_incoming_client(Arc::clone(&config), connection).await {
                     warn!("Incoming connection dropped: {:#}", e)
                 }
                 // The connection no longer counts for its address.
