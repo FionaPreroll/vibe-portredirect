@@ -31,12 +31,12 @@ struct Args {
     destination_host: String,
 
     /// Destination port (currently TCP only).
-    #[clap(long)]
+    #[clap(long, value_parser = clap::value_parser!(u16).range(1..))]
     destination_port: u16,
 
     /// TCP port the server should listen on for external connections.
     /// Must be allowed by the server's --allowed-client-ports.
-    #[clap(long)]
+    #[clap(long, value_parser = clap::value_parser!(u16).range(1..))]
     remote_listen_port: u16,
 
     /// QUIC connection remote host (server).
@@ -44,7 +44,7 @@ struct Args {
     quic_remote_host: String,
 
     /// QUIC connection remote port (server).
-    #[clap(long)]
+    #[clap(long, value_parser = clap::value_parser!(u16).range(1..))]
     quic_remote_port: u16,
 
     /// QUIC connection local host to bind to (client).

@@ -110,7 +110,7 @@ LISTENPORT <port: u16>
 
 (no space; the literal `LISTENPORT` is followed directly by two bytes)
 
-The server checks the port against its `--allowed-client-ports`, binds a TCP listener on `--local-host` and that port, and answers with 11 bytes:
+The server checks the port against its `--allowed-client-ports` (port 0 is never allowed, the system would choose a random port), binds a TCP listener on `--local-host` and that port, and answers with 11 bytes:
 
 ```text
 LISTENING <bound port: u16>
