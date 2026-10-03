@@ -892,3 +892,27 @@ async fn programs_let_running_connections_finish_on_sigterm() -> Result<()> {
     assert_eq!(client.exit_code().await?, 0, "{}", client.output());
     Ok(())
 }
+
+#[tokio::test]
+async fn server_runs_without_its_metrics_endpoint() -> Result<()> {
+    let config_dir = tempfile::tempdir()?;
+    // Another program uses the metrics port.
+    let used = std::net::TcpListener::bind(localhost(0))?;
+    let used = used.local_addr()?.to_string();
+
+    let mut server = start_server_with(
+        config_dir.path(),
+        free_udp_port(),
+        free_tcp_port(),
+        &["--provide-metrics", "--metrics-listen", &used],
+    )
+    .await?;
+    server
+        .wait_for_output("Metrics server failed: failed to bind metrics server")
+        .await?;
+
+    // Tunnels matter more than metrics, so the server goes on.
+    server.terminate();
+    assert_eq!(server.exit_code().await?, 0, "{}", server.output());
+    Ok(())
+}

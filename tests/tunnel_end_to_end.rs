@@ -1346,6 +1346,48 @@ async fn server_metrics_count_per_client() -> Result<()> {
 }
 
 #[tokio::test]
+async fn server_resets_connections_for_which_the_client_accepts_no_stream() -> Result<()> {
+    let config_dir = setup();
+    let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
+    let config = server_config_with_clients(
+        config_dir.path(),
+        quic_port,
+        &[("no-streams", &[TEST_PSK], listen_port)],
+    );
+    let _server = spawn_server_with_handler(config, handle_quic_client_connection);
+    let metrics = METRICS.client(&"no-streams".parse().unwrap());
+
+    with_timeout(async {
+        // A client that lets the server open a single data stream, and never takes it.
+        let client_config = ClientConfig::create_default_config(
+            config_dir.path().to_path_buf(),
+            localhost(0),
+            localhost(quic_port),
+            Some(CERT_HOSTNAME.into()),
+            Some(1),
+            ClientAppData::new(TEST_PSK.into(), localhost(1), 1),
+        );
+        let client = QuicClient::new(client_config)?;
+        let connection = client.connect().await?;
+        let mut control_stream =
+            authenticated_control_stream_as(&connection, "no-streams", TEST_PSK).await?;
+        request_port(&mut control_stream, listen_port).await?;
+
+        let _first = TcpStream::connect(localhost(listen_port)).await?;
+        let mut second = TcpStream::connect(localhost(listen_port)).await?;
+        // The server waits 10 seconds for a stream, then resets the external connection.
+        assert_eq!(
+            tcp_end(&mut second, Duration::from_secs(15)).await,
+            TcpEnd::Reset
+        );
+        assert_eq!(metrics.forwarded_connections_failed.get(), 1);
+        assert_eq!(metrics.forwarded_connections.get(), 2);
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
 async fn responses_after_the_end_of_the_request_are_forwarded() -> Result<()> {
     let config_dir = setup();
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
@@ -1489,8 +1531,11 @@ async fn destination_can_speak_first() -> Result<()> {
 async fn unreachable_destination_resets_the_external_connection() -> Result<()> {
     let config_dir = setup();
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
-    // Nothing listens on the destination port yet.
-    let destination = localhost(free_tcp_port());
+    // Nothing listens on the destination port yet. The socket is bound, so no other test can
+    // listen on the port meanwhile.
+    let destination_socket = tokio::net::TcpSocket::new_v4()?;
+    destination_socket.bind(localhost(0))?;
+    let destination = destination_socket.local_addr()?;
 
     let _server = start_server(
         config_dir.path(),
@@ -1515,7 +1560,7 @@ async fn unreachable_destination_resets_the_external_connection() -> Result<()> 
         );
 
         // Once the destination is up, the same tunnel forwards connections to it.
-        tokio::spawn(serve_echo(TcpListener::bind(destination).await?));
+        tokio::spawn(serve_echo(destination_socket.listen(16)?));
         let stream = connect_through_tunnel(listen_port).await?;
         assert_eq!(echo_roundtrip(stream, b"hello".to_vec()).await?, b"hello");
         Ok(())

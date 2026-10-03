@@ -294,6 +294,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_invalid_requests_are_answered_with_an_error() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(serve_metrics_on(Registry::new(), listener));
+
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        stream.write_all(b"not http\r\n\r\n").await.unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).await.unwrap();
+        assert!(
+            response.starts_with("HTTP/1.1 400 Bad Request\r\n"),
+            "{}",
+            response
+        );
+    }
+
+    #[tokio::test]
     async fn test_binding_a_used_address_fails() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
