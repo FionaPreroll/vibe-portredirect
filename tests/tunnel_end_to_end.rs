@@ -9,21 +9,26 @@ use portredirect::bi_stream::BiStream;
 use portredirect::client::reconnect::Backoff;
 use portredirect::client::run_client::{run_client, ClientSettings};
 use portredirect::client::server_handler::handle_quic_server_connection;
-use portredirect::forward::forward_bidirectional;
+use portredirect::forward::forward_tcp_and_quic;
 use portredirect::limits::{BlockingPolicy, QuicAdmission};
 use portredirect::metrics_helper::DummyCounter;
-use portredirect::protocol::auth::{client_authenticate, session_binding};
+use portredirect::protocol::auth::{client_authenticate, session_binding, ClientName};
 use portredirect::protocol::close::CloseCode;
-use portredirect::protocol::control::request_listen_port;
+use portredirect::protocol::control::{receive_hello, send_welcome, SERVER_SOFTWARE};
+use portredirect::protocol::control::{request_listen_port, Greeting, CLIENT_SOFTWARE};
+use portredirect::protocol::message::{read_message, write_message, Message, MessageType};
 use portredirect::quic::client::{run_quic_client, ClientConfig, QuicClient};
 use portredirect::quic::server::{
     load_or_generate_quic_cert, run_quic_server, run_quic_server_until, ServerConfig,
 };
+use portredirect::server::auth::authenticate_quic_client;
 use portredirect::server::client_handler::handle_quic_client_connection;
+use portredirect::server::clients::{ClientEntry, ClientList};
 use portredirect::server::{ForwardingLimits, PortSpec};
 use portredirect::PortRedirectProtocol;
 use secrecy::SecretString;
 use std::future::Future;
+use std::io::ErrorKind;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::sync::Arc;
@@ -31,7 +36,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
-use tokio::time::{sleep, timeout, Duration, Instant};
+use tokio::time::{sleep, timeout, timeout_at, Duration, Instant};
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 const TEST_PSK: &str = "integration-test-psk";
@@ -157,6 +162,28 @@ fn server_config(
     )
 }
 
+/// Returns the configuration of a server that accepts `clients`, each given as name, PSKs and
+/// allowed port.
+fn server_config_with_clients(
+    config_dir: &Path,
+    quic_port: u16,
+    clients: &[(&str, &[&str], u16)],
+) -> ServerConfig<ServerAppData> {
+    let clients = ClientList::new(clients.iter().map(|&(name, psks, port)| ClientEntry {
+        name: name.parse().unwrap(),
+        psks: psks.iter().map(|&psk| psk.into()).collect(),
+        ports: vec![PortSpec::Single(port)],
+    }))
+    .expect("invalid client list");
+    ServerConfig::create_default_config(
+        config_dir.to_path_buf(),
+        CERT_HOSTNAME.into(),
+        localhost(quic_port),
+        None,
+        ServerAppData::with_clients(clients, "127.0.0.1".into()),
+    )
+}
+
 fn start_server_with_limits(
     config_dir: &Path,
     quic_port: u16,
@@ -272,6 +299,20 @@ fn start_client(
     ))
 }
 
+/// Starts a client named `name` with short reconnection delays.
+fn start_named_client(
+    config_dir: &Path,
+    quic_port: u16,
+    name: &str,
+    psk: &str,
+    destination: SocketAddr,
+    remote_listen_port: u16,
+) -> TestClient {
+    let mut settings = client_settings(config_dir, quic_port, psk, destination, remote_listen_port);
+    settings.app_data = settings.app_data.with_client_name(name.parse().unwrap());
+    spawn_client(settings)
+}
+
 /// Runs a client with `settings` in the background.
 fn spawn_client(settings: ClientSettings) -> TestClient {
     let (shutdown, shutdown_rx) = oneshot::channel();
@@ -341,17 +382,36 @@ fn refused<T>(result: &Result<T>) -> bool {
         .is_err_and(|e| format!("{:#}", e).contains("refused"))
 }
 
-/// Accepts the control stream of a raw connection and authenticates with the test PSK.
+/// Accepts the control stream of a raw connection and authenticates as the default client with
+/// the test PSK.
 async fn authenticated_control_stream(connection: &quinn::Connection) -> Result<ControlStream> {
+    authenticated_control_stream_as(connection, ClientName::DEFAULT, TEST_PSK).await
+}
+
+/// Like [`authenticated_control_stream`], as the client `name` with `psk`.
+async fn authenticated_control_stream_as(
+    connection: &quinn::Connection,
+    name: &str,
+    psk: &str,
+) -> Result<ControlStream> {
     let (send, recv) = connection.accept_bi().await?;
     let mut control_stream = BiStream::new(recv.compat(), send.compat_write(), "control".into());
     client_authenticate(
         &mut control_stream,
-        &SecretString::from(TEST_PSK),
+        &name.parse().map_err(|e: String| anyhow!(e))?,
+        &SecretString::from(psk),
         &session_binding(connection)?,
     )
     .await?;
     Ok(control_stream)
+}
+
+/// Asks the server to listen on `port` and returns the port it listens on.
+async fn request_port(control_stream: &mut ControlStream, port: u16) -> Result<u16> {
+    let hello = Greeting::new(CLIENT_SOFTWARE, port);
+    Ok(request_listen_port(control_stream, &hello)
+        .await?
+        .listen_port)
 }
 
 /// Waits until the server no longer accepts connections on `port`.
@@ -406,6 +466,47 @@ async fn closed_by_peer(stream: &mut TcpStream, within: Duration) -> bool {
         Ok(Ok(_)) => panic!("unexpected data from an idle connection"),
         Err(_) => false,
     }
+}
+
+/// How a TCP connection ended, as seen from one end.
+#[derive(Debug, PartialEq, Eq)]
+enum TcpEnd {
+    /// The peer closed the connection normally (FIN).
+    Normal,
+    /// The peer reset the connection (RST).
+    Reset,
+    /// The connection is still open.
+    Open,
+}
+
+/// Reads from `stream`, discarding the data, until it ends or `within` passed.
+async fn tcp_end(stream: &mut TcpStream, within: Duration) -> TcpEnd {
+    let deadline = Instant::now() + within;
+    let mut buf = [0u8; 1024];
+    loop {
+        match timeout_at(deadline, stream.read(&mut buf)).await {
+            Err(_) => return TcpEnd::Open,
+            Ok(Ok(0)) => return TcpEnd::Normal,
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) if e.kind() == ErrorKind::ConnectionReset => return TcpEnd::Reset,
+            Ok(Err(e)) => panic!("unexpected error reading from a TCP connection: {}", e),
+        }
+    }
+}
+
+/// Starts a backend service that hands each accepted connection to the test.
+async fn start_accepting_server() -> (SocketAddr, mpsc::UnboundedReceiver<TcpStream>) {
+    let listener = TcpListener::bind(localhost(0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (accepted, receiver) = mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            if accepted.send(stream).is_err() {
+                break;
+            }
+        }
+    });
+    (addr, receiver)
 }
 
 /// Sends `payload`, closes the sending side and returns everything received until EOF.
@@ -603,8 +704,11 @@ async fn idle_connections_are_closed() -> Result<()> {
             echo_once(&mut stream, b"still here").await?;
         }
 
-        // Without transfers, the server closes it.
-        assert!(closed_by_peer(&mut stream, Duration::from_secs(5)).await);
+        // Without transfers, the server closes it, normally: nothing was lost.
+        assert_eq!(
+            tcp_end(&mut stream, Duration::from_secs(5)).await,
+            TcpEnd::Normal
+        );
         Ok(())
     })
     .await
@@ -1014,7 +1118,7 @@ async fn destination_can_speak_first() -> Result<()> {
 }
 
 #[tokio::test]
-async fn unreachable_destination_closes_the_external_connection() -> Result<()> {
+async fn unreachable_destination_resets_the_external_connection() -> Result<()> {
     let config_dir = setup();
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
     // Nothing listens on the destination port yet.
@@ -1034,11 +1138,12 @@ async fn unreachable_destination_closes_the_external_connection() -> Result<()> 
     );
 
     with_timeout(async {
-        // The external client learns right away that there is nothing to talk to.
+        // The external client learns right away that there is nothing to talk to: the server
+        // resets the connection, as close as it gets to "connection refused".
         let mut stream = connect_through_tunnel(listen_port).await?;
-        assert!(
-            closed_by_peer(&mut stream, Duration::from_secs(5)).await,
-            "connection kept open although the destination is unreachable"
+        assert_eq!(
+            tcp_end(&mut stream, Duration::from_secs(5)).await,
+            TcpEnd::Reset
         );
 
         // Once the destination is up, the same tunnel forwards connections to it.
@@ -1148,32 +1253,23 @@ async fn connections_beyond_the_servers_limit_wait_in_the_backlog() -> Result<()
 }
 
 #[tokio::test]
-async fn client_waits_while_its_port_is_in_use() -> Result<()> {
+async fn client_waits_while_another_program_uses_its_port() -> Result<()> {
     let config_dir = setup();
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
     let echo_addr = start_echo_server().await;
+    let other_program = std::net::TcpListener::bind(localhost(listen_port))?;
 
     let _server = start_server(
         config_dir.path(),
         quic_port,
         vec![PortSpec::Single(listen_port)],
     );
-    let first = start_client(
-        config_dir.path(),
-        quic_port,
-        TEST_PSK,
-        echo_addr,
-        listen_port,
-    );
 
     with_timeout(async {
-        let stream = connect_through_tunnel(listen_port).await?;
-        assert_eq!(echo_roundtrip(stream, b"first".to_vec()).await?, b"first");
-
-        // The server can't listen on the port twice and says so.
+        // The server can't listen on the port and says so.
         let (_raw_client, raw) = connect_raw(config_dir.path(), quic_port).await?;
         let mut control_stream = authenticated_control_stream(&raw).await?;
-        assert!(request_listen_port(&mut control_stream, listen_port)
+        assert!(request_port(&mut control_stream, listen_port)
             .await
             .is_err());
         let end = raw.closed().await;
@@ -1184,9 +1280,8 @@ async fn client_waits_while_its_port_is_in_use() -> Result<()> {
             end
         );
 
-        // That is temporary, e.g. while the server still holds the port for a lost connection,
-        // so a second client keeps trying and gets the port once it is free.
-        let second = start_client(
+        // That may be temporary, so the client keeps trying and gets the port once it is free.
+        let client = start_client(
             config_dir.path(),
             quic_port,
             TEST_PSK,
@@ -1195,34 +1290,544 @@ async fn client_waits_while_its_port_is_in_use() -> Result<()> {
         );
         sleep(Duration::from_secs(1)).await;
         anyhow::ensure!(
-            !second.task.is_finished(),
-            "the second client gave up: {:?}",
-            second.result().await
+            !client.task.is_finished(),
+            "the client gave up: {:?}",
+            client.result().await
         );
-        first.stop().await?;
+        drop(other_program);
 
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let attempt = async {
                 let stream = connect_through_tunnel(listen_port).await?;
-                echo_roundtrip(stream, b"second".to_vec()).await
+                echo_roundtrip(stream, b"free".to_vec()).await
             };
             if let Ok(Ok(echoed)) = timeout(Duration::from_secs(2), attempt).await {
-                if echoed == b"second" {
+                if echoed == b"free" {
+                    break;
+                }
+            }
+            anyhow::ensure!(Instant::now() < deadline, "client did not get the port");
+            sleep(Duration::from_millis(100)).await;
+        }
+        client.stop().await
+    })
+    .await
+}
+
+#[tokio::test]
+async fn new_connection_of_a_client_replaces_its_old_one() -> Result<()> {
+    let config_dir = setup();
+    let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
+    let echo_addr = start_echo_server().await;
+
+    let _server = start_server(
+        config_dir.path(),
+        quic_port,
+        vec![PortSpec::Single(listen_port)],
+    );
+    let old_client = start_client(
+        config_dir.path(),
+        quic_port,
+        TEST_PSK,
+        echo_addr,
+        listen_port,
+    );
+
+    with_timeout(async {
+        let mut forwarded = connect_through_tunnel(listen_port).await?;
+        echo_once(&mut forwarded, b"old").await?;
+
+        // E.g. the client restarted while the server still holds the port for its old
+        // connection: the new connection gets the port right away.
+        let (_new_client, new) = connect_raw(config_dir.path(), quic_port).await?;
+        let mut control_stream = authenticated_control_stream(&new).await?;
+        assert_eq!(
+            request_port(&mut control_stream, listen_port).await?,
+            listen_port
+        );
+
+        // The old connection is closed, with its forwarded connections.
+        assert_eq!(
+            tcp_end(&mut forwarded, Duration::from_secs(5)).await,
+            TcpEnd::Reset
+        );
+        // The old client gives up: another instance with the same name is running.
+        let error = format!("{:#}", old_client.result().await.unwrap_err());
+        assert!(
+            error.contains("another client with the same name took over the port"),
+            "unexpected error: {}",
+            error
+        );
+
+        // External connections go to the new connection now.
+        let _external = connect_through_tunnel(listen_port).await?;
+        let (_send, _recv) = timeout(Duration::from_secs(5), new.accept_bi()).await??;
+        assert!(new.close_reason().is_none());
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn standby_client_takes_over_when_the_active_one_stops() -> Result<()> {
+    let config_dir = setup();
+    let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
+    let echo_addr = start_echo_server().await;
+
+    // Two clients may use the same port, with their own PSKs.
+    let config = server_config_with_clients(
+        config_dir.path(),
+        quic_port,
+        &[
+            ("active", &["active-psk"], listen_port),
+            ("standby", &["standby-psk"], listen_port),
+        ],
+    );
+    let _server = spawn_server_with_handler(config, handle_quic_client_connection);
+    let active = start_named_client(
+        config_dir.path(),
+        quic_port,
+        "active",
+        "active-psk",
+        echo_addr,
+        listen_port,
+    );
+
+    with_timeout(async {
+        let stream = connect_through_tunnel(listen_port).await?;
+        assert_eq!(echo_roundtrip(stream, b"active".to_vec()).await?, b"active");
+
+        // The standby client doesn't take the port from the active one, but keeps trying.
+        let standby = start_named_client(
+            config_dir.path(),
+            quic_port,
+            "standby",
+            "standby-psk",
+            echo_addr,
+            listen_port,
+        );
+        sleep(Duration::from_secs(1)).await;
+        anyhow::ensure!(
+            !standby.task.is_finished() && !active.task.is_finished(),
+            "a client gave up"
+        );
+        let stream = connect_through_tunnel(listen_port).await?;
+        assert_eq!(echo_roundtrip(stream, b"still".to_vec()).await?, b"still");
+
+        // Once the active client is gone, the standby client gets the port.
+        active.stop().await?;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let attempt = async {
+                let stream = connect_through_tunnel(listen_port).await?;
+                echo_roundtrip(stream, b"standby".to_vec()).await
+            };
+            if let Ok(Ok(echoed)) = timeout(Duration::from_secs(2), attempt).await {
+                if echoed == b"standby" {
                     break;
                 }
             }
             anyhow::ensure!(
                 Instant::now() < deadline,
-                "second client did not get the port"
+                "standby client did not take over"
             );
             sleep(Duration::from_millis(100)).await;
         }
-        second.stop().await
+        standby.stop().await
     })
     .await
 }
 
+#[tokio::test]
+async fn clients_need_their_own_psk_and_port() -> Result<()> {
+    let config_dir = setup();
+    let quic_port = free_udp_port();
+    let (home_port, office_port) = (free_tcp_port(), free_tcp_port());
+    let config = server_config_with_clients(
+        config_dir.path(),
+        quic_port,
+        &[
+            ("home", &["home-psk"], home_port),
+            // While changing its PSK, the client may use either one.
+            ("office", &["office-psk", "new-office-psk"], office_port),
+        ],
+    );
+    let _server = spawn_server_with_handler(config, handle_quic_client_connection);
+
+    /// Authenticates as `name` with `psk` and returns why the server closed the connection.
+    async fn rejection(
+        config_dir: &Path,
+        quic_port: u16,
+        name: &str,
+        psk: &str,
+    ) -> Result<quinn::ConnectionError> {
+        let (_client, connection) = connect_raw(config_dir, quic_port).await?;
+        let result = authenticated_control_stream_as(&connection, name, psk).await;
+        anyhow::ensure!(result.is_err(), "{} authenticated with {}", name, psk);
+        Ok(connection.closed().await)
+    }
+
+    with_timeout(async {
+        // The PSK of another client doesn't work, and an unknown name fails the same way, so the
+        // server doesn't reveal which names exist.
+        let wrong_psk = rejection(config_dir.path(), quic_port, "office", "home-psk").await?;
+        let unknown_name = rejection(config_dir.path(), quic_port, "lab", "home-psk").await?;
+        assert_eq!(
+            CloseCode::of(&wrong_psk),
+            Some(CloseCode::AuthenticationFailed),
+            "{}",
+            wrong_psk
+        );
+        assert_eq!(wrong_psk, unknown_name);
+
+        // A client may only use its own port.
+        let (_client, connection) = connect_raw(config_dir.path(), quic_port).await?;
+        let mut control_stream =
+            authenticated_control_stream_as(&connection, "home", "home-psk").await?;
+        assert!(request_port(&mut control_stream, office_port)
+            .await
+            .is_err());
+        let end = connection.closed().await;
+        assert_eq!(
+            CloseCode::of(&end),
+            Some(CloseCode::PortNotAllowed),
+            "{}",
+            end
+        );
+
+        for psk in ["office-psk", "new-office-psk"] {
+            let (_client, connection) = connect_raw(config_dir.path(), quic_port).await?;
+            let mut control_stream =
+                authenticated_control_stream_as(&connection, "office", psk).await?;
+            assert_eq!(
+                request_port(&mut control_stream, office_port).await?,
+                office_port
+            );
+            connection.close(0u32.into(), b"done");
+            connection.closed().await;
+            wait_until_closed(office_port).await?;
+        }
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn drain_stops_new_connections_but_keeps_running_ones() -> Result<()> {
+    let config_dir = setup();
+    let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
+    let _server = start_server(
+        config_dir.path(),
+        quic_port,
+        vec![PortSpec::Single(listen_port)],
+    );
+
+    with_timeout(async {
+        let (_draining_client, draining) = connect_raw(config_dir.path(), quic_port).await?;
+        let mut control_stream = authenticated_control_stream(&draining).await?;
+        request_port(&mut control_stream, listen_port).await?;
+        let mut external = connect_through_tunnel(listen_port).await?;
+        let (mut send, _recv) = draining.accept_bi().await?;
+
+        // After DRAIN, the server accepts no new connections on the port...
+        write_message(&mut control_stream, &Message::empty(MessageType::Drain)).await?;
+        wait_until_closed(listen_port).await?;
+
+        // ... but forwards the running ones and keeps the tunnel up.
+        send.write_all(b"still forwarded").await?;
+        let mut received = [0u8; 15];
+        external.read_exact(&mut received).await?;
+        assert_eq!(&received, b"still forwarded");
+        write_message(&mut control_stream, &Message::empty(MessageType::Ping)).await?;
+        let pong = read_message(&mut control_stream).await?.unwrap();
+        assert_eq!(pong.kind, MessageType::Pong);
+
+        // The port is free for another connection, which doesn't replace the draining one.
+        let (_next_client, next) = connect_raw(config_dir.path(), quic_port).await?;
+        let mut next_control_stream = authenticated_control_stream(&next).await?;
+        assert_eq!(
+            request_port(&mut next_control_stream, listen_port).await?,
+            listen_port
+        );
+        assert!(draining.close_reason().is_none());
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn external_reset_resets_the_destination_connection() -> Result<()> {
+    let config_dir = setup();
+    let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
+    let (destination, mut accepted) = start_accepting_server().await;
+
+    let _server = start_server(
+        config_dir.path(),
+        quic_port,
+        vec![PortSpec::Single(listen_port)],
+    );
+    let _client = start_client(
+        config_dir.path(),
+        quic_port,
+        TEST_PSK,
+        destination,
+        listen_port,
+    );
+
+    with_timeout(async {
+        let mut external = connect_through_tunnel(listen_port).await?;
+        external.write_all(b"hello").await?;
+        let mut destination_side = accepted.recv().await.unwrap();
+        let mut hello = [0u8; 5];
+        destination_side.read_exact(&mut hello).await?;
+
+        // E.g. a browser that cancels a download.
+        external.set_zero_linger()?;
+        drop(external);
+
+        assert_eq!(
+            tcp_end(&mut destination_side, Duration::from_secs(5)).await,
+            TcpEnd::Reset
+        );
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn destination_reset_resets_the_external_connection() -> Result<()> {
+    let config_dir = setup();
+    let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
+    let (destination, mut accepted) = start_accepting_server().await;
+
+    let _server = start_server(
+        config_dir.path(),
+        quic_port,
+        vec![PortSpec::Single(listen_port)],
+    );
+    let _client = start_client(
+        config_dir.path(),
+        quic_port,
+        TEST_PSK,
+        destination,
+        listen_port,
+    );
+
+    with_timeout(async {
+        let mut external = connect_through_tunnel(listen_port).await?;
+        external.write_all(b"hello").await?;
+        let mut destination_side = accepted.recv().await.unwrap();
+        let mut hello = [0u8; 5];
+        destination_side.read_exact(&mut hello).await?;
+        destination_side.write_all(b"partial response").await?;
+
+        // E.g. a backend that crashes in the middle of a response.
+        destination_side.set_zero_linger()?;
+        drop(destination_side);
+
+        assert_eq!(
+            tcp_end(&mut external, Duration::from_secs(5)).await,
+            TcpEnd::Reset
+        );
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn lost_tunnel_resets_forwarded_connections() -> Result<()> {
+    let config_dir = setup();
+    let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
+    let (destination, mut accepted) = start_accepting_server().await;
+
+    let _server = start_server(
+        config_dir.path(),
+        quic_port,
+        vec![PortSpec::Single(listen_port)],
+    );
+    let client = start_client(
+        config_dir.path(),
+        quic_port,
+        TEST_PSK,
+        destination,
+        listen_port,
+    );
+
+    with_timeout(async {
+        let mut external = connect_through_tunnel(listen_port).await?;
+        external.write_all(b"hello").await?;
+        let mut destination_side = accepted.recv().await.unwrap();
+        let mut hello = [0u8; 5];
+        destination_side.read_exact(&mut hello).await?;
+
+        // The tunnel ends while the connection is running, so its transfers are incomplete.
+        client.stop().await?;
+
+        assert_eq!(
+            tcp_end(&mut external, Duration::from_secs(5)).await,
+            TcpEnd::Reset
+        );
+        assert_eq!(
+            tcp_end(&mut destination_side, Duration::from_secs(5)).await,
+            TcpEnd::Reset
+        );
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn client_aborts_streams_with_invalid_headers() -> Result<()> {
+    let config_dir = setup();
+    let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
+    let echo_addr = start_echo_server().await;
+
+    // A server that sets up the tunnel normally, but starts a data stream with a malformed header.
+    let (stream_ends, mut stream_end) = mpsc::unbounded_channel();
+    let config = server_config(
+        config_dir.path(),
+        quic_port,
+        vec![PortSpec::Single(listen_port)],
+        ForwardingLimits::default(),
+    );
+    let _server = spawn_server_with_handler(config, move |config, connection| {
+        let stream_ends = stream_ends.clone();
+        async move {
+            let (mut control_stream, _client) =
+                authenticate_quic_client(config, connection.clone()).await?;
+            let hello = receive_hello(&mut control_stream).await?;
+            let welcome = Greeting::new(SERVER_SOFTWARE, hello.listen_port);
+            send_welcome(&mut control_stream, &welcome).await?;
+
+            let (mut send, mut recv) = connection.open_bi().await?;
+            // Three bytes of parameters, but a parameter needs at least four.
+            send.write_all(&[0, 3, 0, 3, 0]).await?;
+            let mut buf = [0u8; 16];
+            let _ = stream_ends.send(recv.read(&mut buf).await);
+            connection.closed().await;
+            Ok(())
+        }
+    });
+    let _client = start_client(
+        config_dir.path(),
+        quic_port,
+        TEST_PSK,
+        echo_addr,
+        listen_port,
+    );
+
+    with_timeout(async {
+        // The client aborts the stream instead of connecting to the destination.
+        let end = stream_end.recv().await.unwrap();
+        assert!(
+            matches!(&end, Err(quinn::ReadError::Reset(code)) if code.into_inner() == 1),
+            "{:?}",
+            end
+        );
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn client_closes_connections_with_protocol_violations() -> Result<()> {
+    let config_dir = setup();
+    let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
+    let echo_addr = start_echo_server().await;
+
+    // A server that answers HELLO with PONG on the first connection, and PING with WELCOME on
+    // the second one.
+    let (close_reasons, mut close_reason) = mpsc::unbounded_channel();
+    let connection_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let config = server_config(
+        config_dir.path(),
+        quic_port,
+        vec![PortSpec::Single(listen_port)],
+        ForwardingLimits::default(),
+    );
+    let _server = spawn_server_with_handler(config, move |config, connection| {
+        let close_reasons = close_reasons.clone();
+        let first = connection_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+        async move {
+            let (mut control_stream, _client) =
+                authenticate_quic_client(config, connection.clone()).await?;
+            let hello = receive_hello(&mut control_stream).await?;
+            if first {
+                write_message(&mut control_stream, &Message::empty(MessageType::Pong)).await?;
+            } else {
+                let welcome = Greeting::new(SERVER_SOFTWARE, hello.listen_port);
+                send_welcome(&mut control_stream, &welcome).await?;
+                let ping = read_message(&mut control_stream).await?;
+                anyhow::ensure!(ping.is_some_and(|m| m.kind == MessageType::Ping));
+                let welcome_again = Message::new(MessageType::Welcome, Vec::new());
+                write_message(&mut control_stream, &welcome_again).await?;
+            }
+            let _ = close_reasons.send(connection.closed().await);
+            Ok(())
+        }
+    });
+    let client = start_client(
+        config_dir.path(),
+        quic_port,
+        TEST_PSK,
+        echo_addr,
+        listen_port,
+    );
+
+    with_timeout(async {
+        for _ in 0..2 {
+            let end = close_reason.recv().await.unwrap();
+            assert_eq!(
+                CloseCode::of(&end),
+                Some(CloseCode::ProtocolViolation),
+                "{}",
+                end
+            );
+        }
+        // The server may get fixed or replaced, so the client keeps trying.
+        anyhow::ensure!(!client.task.is_finished(), "the client gave up");
+        client.stop().await
+    })
+    .await
+}
+
+#[tokio::test]
+async fn clients_of_other_protocol_versions_are_rejected() -> Result<()> {
+    let config_dir = setup();
+    let quic_port = free_udp_port();
+    let _server = start_server(config_dir.path(), quic_port, vec![]);
+
+    with_timeout(async {
+        // Clients of protocol version 4, and clients that offer no version at all, fail the TLS
+        // handshake, before they could send anything the server would misunderstand.
+        for alpn in [Some(b"pr-4".as_slice()), None] {
+            let certificate = std::fs::read(config_dir.path().join("cert.der"))?;
+            let mut roots = rustls::RootCertStore::empty();
+            roots.add(rustls::pki_types::CertificateDer::from(certificate))?;
+            let mut crypto = rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+            crypto.alpn_protocols = alpn.into_iter().map(Vec::from).collect();
+            let mut endpoint = quinn::Endpoint::client(localhost(0))?;
+            endpoint.set_default_client_config(quinn::ClientConfig::new(Arc::new(
+                quinn::crypto::rustls::QuicClientConfig::try_from(crypto)?,
+            )));
+
+            let result = endpoint.connect(localhost(quic_port), CERT_HOSTNAME)?.await;
+
+            let error = result.expect_err("handshake succeeded").to_string();
+            assert!(
+                error.contains("peer doesn't support any known protocol"),
+                "{:?}: {}",
+                alpn,
+                error
+            );
+        }
+        Ok(())
+    })
+    .await
+}
 #[tokio::test]
 async fn server_closes_stalled_connections() -> Result<()> {
     let config_dir = setup();
@@ -1269,28 +1874,30 @@ async fn server_closes_connections_with_protocol_violations() -> Result<()> {
     );
 
     with_timeout(async {
-        // A malformed listen port request.
-        let (_first_client, first) = connect_raw(config_dir.path(), quic_port).await?;
-        let mut control_stream = authenticated_control_stream(&first).await?;
-        control_stream.write_all(b"LISTENHERE\x01\xbb").await?;
-        control_stream.flush().await?;
-        let end = first.closed().await;
-        assert_eq!(
-            CloseCode::of(&end),
-            Some(CloseCode::ProtocolViolation),
-            "{}",
-            end
-        );
+        // A malformed HELLO, and a listen port request of protocol version 4.
+        for request in [&[1u8, 0, 3, 0, 2, 0][..], b"LISTENPORT\x01\xbb"] {
+            let (_client, connection) = connect_raw(config_dir.path(), quic_port).await?;
+            let mut control_stream = authenticated_control_stream(&connection).await?;
+            control_stream.write_all(request).await?;
+            control_stream.flush().await?;
+            let end = connection.closed().await;
+            assert_eq!(
+                CloseCode::of(&end),
+                Some(CloseCode::ProtocolViolation),
+                "{}",
+                end
+            );
+        }
 
         // An unexpected control message in an established tunnel.
         let (_second_client, second) = connect_raw(config_dir.path(), quic_port).await?;
         let mut control_stream = authenticated_control_stream(&second).await?;
         assert_eq!(
-            request_listen_port(&mut control_stream, listen_port).await?,
+            request_port(&mut control_stream, listen_port).await?,
             listen_port
         );
-        control_stream.write_all(b"HELLO\n").await?;
-        control_stream.flush().await?;
+        let hello_again = Message::new(MessageType::Hello, Vec::new());
+        write_message(&mut control_stream, &hello_again).await?;
         let end = second.closed().await;
         assert_eq!(
             CloseCode::of(&end),
@@ -1326,9 +1933,13 @@ async fn client_rejects_server_without_psk() -> Result<()> {
             let (mut send, mut recv) = connection.open_bi().await?;
             send.write_all(&[b"CHALLENGE".as_slice(), &[7u8; 32]].concat())
                 .await?;
-            let mut response = [0u8; 8 + 32];
+            // "RESPONSE", the name "default" with its length, and the proof.
+            let mut response = [0u8; 8 + 1 + 7 + 32];
             recv.read_exact(&mut response).await?;
-            anyhow::ensure!(response.starts_with(b"RESPONSE"), "unexpected response");
+            anyhow::ensure!(
+                response.starts_with(b"RESPONSE\x07default"),
+                "unexpected response"
+            );
             send.write_all(&[b"ACCEPTED".as_slice(), &[0u8; 32]].concat())
                 .await?;
             let _ = close_reasons.send(connection.closed().await);
@@ -1611,24 +2222,23 @@ async fn peer_dropping_a_stream_ends_forwarding_normally() -> Result<()> {
         let server_connection = server_connections.recv().await.unwrap();
 
         // The server forwards a TCP connection through a stream, as for an external connection.
+        let listener = TcpListener::bind(localhost(0)).await?;
+        let mut tcp_peer = TcpStream::connect(listener.local_addr()?).await?;
+        let (tcp_side, _) = listener.accept().await?;
         let (send, recv) = server_connection.open_bi().await?;
-        let mut quic_stream = BiStream::new(recv.compat(), send.compat_write(), "test".into());
-        let (mut tcp_peer, mut tcp_side) = tokio::io::duplex(1024);
-        let forwarding = tokio::spawn(async move {
-            forward_bidirectional(
-                &mut tcp_side,
-                &mut quic_stream,
-                "test",
-                DummyCounter::new(),
-                DummyCounter::new(),
-                None,
-            )
-            .await
-        });
+        let forwarding = tokio::spawn(forward_tcp_and_quic(
+            tcp_side,
+            send,
+            recv,
+            "test",
+            DummyCounter::new(),
+            DummyCounter::new(),
+            None,
+        ));
         tcp_peer.write_all(b"hello").await?;
 
-        // The client drops the stream without reading it to the end, as it does when it can't
-        // reach the destination. quinn then stops the stream with error code 0.
+        // The client drops the stream without reading it to the end, as it does after the
+        // idle timeout. quinn then stops the stream with error code 0.
         let (client_send, mut client_recv) = client_connection.accept_bi().await?;
         let mut hello = [0u8; 5];
         client_recv.read_exact(&mut hello).await?;

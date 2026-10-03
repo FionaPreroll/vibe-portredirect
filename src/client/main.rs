@@ -7,6 +7,7 @@ use clap::{CommandFactory, FromArgMatches, Parser};
 use portredirect::app_data::ClientAppData;
 use portredirect::client::reconnect::Backoff;
 use portredirect::client::run_client::{run_client, ClientSettings};
+use portredirect::protocol::auth::ClientName;
 use portredirect::psk::{warn_if_psk_on_command_line, PskArgs};
 use portredirect::PortRedirectProtocol;
 use portredirect::{get_config_dir, init_logging, shutdown_signal};
@@ -39,6 +40,11 @@ struct Args {
     /// Must be allowed by the server's --allowed-client-ports.
     #[clap(long, value_parser = clap::value_parser!(u16).range(1..))]
     remote_listen_port: u16,
+
+    /// Name to authenticate with, if the server knows several clients: 1 to 64 letters, digits,
+    /// dots, underscores or hyphens.
+    #[clap(long, default_value = ClientName::DEFAULT)]
+    client_name: ClientName,
 
     /// QUIC connection remote host (server).
     #[clap(long)]
@@ -142,7 +148,8 @@ async fn run(args: Args) -> Result<()> {
 
     // Run the client until a shutdown signal arrives.
     let settings = ClientSettings {
-        app_data: ClientAppData::new(psk, forward_destination, args.remote_listen_port),
+        app_data: ClientAppData::new(psk, forward_destination, args.remote_listen_port)
+            .with_client_name(args.client_name),
         config_dir,
         quic_local_addr,
         quic_remote_addr,

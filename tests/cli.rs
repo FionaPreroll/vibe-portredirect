@@ -272,6 +272,9 @@ async fn invalid_arguments_exit_with_code_2() -> Result<()> {
         "--quic-psk",
         PSK,
     ];
+    let mut client_with_invalid_name = client_with_port_0.to_vec();
+    client_with_invalid_name[5] = "443";
+    client_with_invalid_name.extend(["--client-name", "my client"]);
     let server_without_psk = ["--local-host", "127.0.0.1", "--allowed-client-ports", "443"];
     // Replaced by --allowed-client-ports.
     let server_with_local_port = [
@@ -288,6 +291,11 @@ async fn invalid_arguments_exit_with_code_2() -> Result<()> {
             CLIENT,
             client_with_port_0.as_slice(),
             "--remote-listen-port",
+        ),
+        (
+            CLIENT,
+            client_with_invalid_name.as_slice(),
+            "invalid client name \"my client\"",
         ),
         (SERVER, server_with_port_0.as_slice(), "random port"),
         (SERVER, server_without_psk.as_slice(), "--quic-psk"),

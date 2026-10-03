@@ -6,22 +6,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 Server and client must speak the same protocol version, see [docs/PROTOCOL.md](docs/PROTOCOL.md).
 When a version changes the protocol, update the server and all its clients together.
 
-Versions 0.4.0 to 0.6.0 were not published on crates.io; the latest published version is 0.3.0.
+Versions 0.4.0 to 0.7.0 were not published on crates.io; the latest published version is 0.3.0.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-03
+
+Protocol version 5 (`pr-5`), incompatible with 0.6.0. It is designed to stay compatible from 1.0 on, see [docs/PROTOCOL.md](docs/PROTOCOL.md#versions-and-compatibility).
+
 ### Added
 
+- Clients authenticate with a name, `--client-name` (default `default`). A server configured on the command line has a single client of that name. The server can tell several clients apart, each with its own PSKs and ports, e.g. an active and a standby client for the same port; configuring them follows with a configuration file.
+- A client that connects again while the server still holds the port for its previous connection, e.g. after a crash, replaces that connection right away instead of waiting up to 30 seconds. A second running instance with the same name exits with code 1.
+- Aborted connections are passed on: if one side resets its TCP connection, or the tunnel ends while connections are forwarded, the other side resets its connection, too, instead of closing it normally. Truncated transfers no longer look complete.
+- Messages on the control stream have a type and a length, and consist of parameters that receivers skip if they don't know them. So later versions can add optional features without breaking compatibility.
+- `DRAIN` messages, for shutting down without breaking running connections. Both programs understand them, but don't send them yet.
+- Server and client log each other's software and version.
 - `--version` for both programs.
 
 ### Changed
 
+- External connections that can't be forwarded, e.g. because the destination is unreachable, are reset instead of closed normally.
 - Logs go to stderr instead of stdout, with colors only on a terminal.
 - The `RUST_LOG` environment variable, if set, takes precedence over `--log-level` and can set levels per module, e.g. `RUST_LOG=info,portredirect::forward=debug`.
 
 ### Removed
 
 - The server's deprecated `--local-port`; use `--allowed-client-ports`.
+- The `BYE` message, which no client sent; closing the connection says the same.
 
 ## [0.6.0] - 2026-10-03
 

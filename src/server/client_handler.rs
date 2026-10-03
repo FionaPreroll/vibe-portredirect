@@ -2,25 +2,29 @@
 //
 // License: GPL-3.0-only
 
+use crate::protocol::auth::ClientName;
 use crate::protocol::close::CloseCode;
-use crate::protocol::control::{configure_quic_client, confirm_client_configuration};
+use crate::protocol::control::{receive_hello, send_welcome, Greeting, SERVER_SOFTWARE};
 use crate::protocol::keepalive::{run_control_channel_loop, ControlChannelEnd};
 use crate::quic::server::ServerConfig;
+use crate::quic::ProtocolVersion;
 use crate::server::metrics_counters::{
     CLIENT_CONNECTIONS_CLOSED_TOTAL, CLIENT_CONNECTIONS_TOTAL, KEEPALIVE_ERRORS,
 };
+use crate::server::port_registry::PortTaken;
 use crate::server::AllowedPorts;
 use crate::PortRedirectProtocol;
 use crate::{app_data::ServerAppData, server::tcp_listener::handle_tcp_listener};
 
 use super::auth::authenticate_quic_client;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use std::sync::Arc;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
-use tracing::debug;
+use tracing::{debug, info, info_span, Instrument};
 
 // Handles one PR QUIC client connection.
 // Called by run_quic_server.
@@ -32,18 +36,24 @@ pub async fn handle_quic_client_connection(
     let remote = quic_conn.remote_address();
     debug!("Handling QUIC client connection from {}", remote);
 
+    // QUIC requires the TLS handshake to agree on one of the protocol versions we offer (ALPN).
+    // Each version has its own handler; so far there is only one.
+    match ProtocolVersion::of(&quic_conn).context("no protocol version negotiated")? {
+        ProtocolVersion::V5 => {}
+    }
+
     // 1. Authenticate client.
-    let control_stream = match timeout(
+    let (control_stream, client) = match timeout(
         PortRedirectProtocol::AUTHENTICATION_TIMEOUT,
         authenticate_quic_client(Arc::clone(&config), quic_conn.clone()),
     )
     .await
     {
-        Ok(Ok(stream)) => {
+        Ok(Ok(authenticated)) => {
             // Auth succeeded. Continue with the control stream.
             config.admission.record_success(remote.ip());
             CLIENT_CONNECTIONS_TOTAL.inc();
-            stream
+            authenticated
         }
         Ok(Err(err)) => {
             config.admission.record_failure(remote.ip());
@@ -63,17 +73,36 @@ pub async fn handle_quic_client_connection(
         }
     };
 
-    // 2. Receive config over control stream
-    let (requested_client_config, mut control_stream) = match timeout(
+    // From now on, all log messages of this connection name the client.
+    let span = info_span!("client", name = client.name.as_str());
+    serve_client(config, quic_conn, control_stream, client.name)
+        .instrument(span)
+        .await
+}
+
+/// Sets up the tunnel for an authenticated client and keeps it up until the connection ends.
+async fn serve_client<S>(
+    config: Arc<ServerConfig<ServerAppData>>,
+    quic_conn: quinn::Connection,
+    mut control_stream: S,
+    client: ClientName,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let remote = quic_conn.remote_address();
+
+    // 2. Receive the client's HELLO.
+    let hello = match timeout(
         PortRedirectProtocol::CONFIGURATION_TIMEOUT,
-        configure_quic_client(control_stream),
+        receive_hello(&mut control_stream),
     )
     .await
     {
-        Ok(Ok(result)) => result,
+        Ok(Ok(hello)) => hello,
         Ok(Err(err)) => {
-            CloseCode::ProtocolViolation.close(&quic_conn, "invalid listen port request");
-            return Err(err).context(format!("failed to receive configuration from {}", remote));
+            CloseCode::ProtocolViolation.close(&quic_conn, "invalid HELLO");
+            return Err(err).context(format!("failed to receive HELLO from {}", remote));
         }
         Err(_) => {
             CloseCode::ConfigurationTimeout.close(&quic_conn, "configuration timed out");
@@ -81,59 +110,99 @@ pub async fn handle_quic_client_connection(
                 .context(format!("configuration timeout from {}", remote));
         }
     };
+    let port = hello.listen_port;
+    // The software is text from the client, so it is logged escaped.
+    info!(
+        "Client {:?} ({:?}) from {} asks for port {}",
+        client.as_str(),
+        hello.software(),
+        remote,
+        port
+    );
 
-    // Validate that the requested port is allowed.
-    let port = requested_client_config.port;
-    if !config.app_data.local_bind_ports.allows(port) {
+    // Validate that the client may use the requested port.
+    let allowed = config
+        .app_data
+        .clients
+        .get(&client)
+        .is_some_and(|entry| entry.ports.allows(port));
+    if !allowed {
         CloseCode::PortNotAllowed.close(&quic_conn, "port not allowed");
-        return Err(anyhow!("requested port {} is not allowed", port));
+        bail!("client {:?} may not use port {}", client.as_str(), port);
     }
 
-    // Create a cancellation token so the client can stop the TCP listener and end the QUIC connection.
-    let cancel_token = CancellationToken::new();
-
-    // 3. Create the TCP listener.
-    let tcp_handle = {
-        let tcp_addr = config.app_data.local_bind_ip.clone() + ":" + &port.to_string();
-        let listener = match TcpListener::bind(tcp_addr.clone()).await {
-            Ok(listener) => listener,
-            Err(err) => {
-                // Terminate the connection upon failure to bind the TCP listener.
-                CloseCode::PortUnavailable.close(&quic_conn, "failed to listen on port");
-                return Err(err).context(format!("Failed to bind TCP listener to {}", tcp_addr));
+    // 3. Take the port, replacing an older connection of the same client.
+    let lease = match config
+        .app_data
+        .ports
+        .acquire(port, &client, &quic_conn)
+        .await
+    {
+        Ok(lease) => lease,
+        Err(taken) => {
+            if let PortTaken::ByOtherClient(holder) = &taken {
+                debug!(
+                    "Client {:?} waits as standby for port {}, which client {:?} holds",
+                    client.as_str(),
+                    port,
+                    holder.as_str()
+                );
             }
-        };
-
-        // Tell the client that the tunnel is ready.
-        let confirmed = match listener.local_addr() {
-            Ok(bound_addr) => {
-                confirm_client_configuration(&mut control_stream, bound_addr.port()).await
-            }
-            Err(err) => Err(err.into()),
-        };
-        if let Err(err) = confirmed {
-            CloseCode::InternalError.close(&quic_conn, "failed to confirm configuration");
-            return Err(err);
+            CloseCode::PortUnavailable.close(&quic_conn, "port in use");
+            return Err(taken).context(format!("port {} is not available", port));
         }
-
-        // Spawn the TCP listener in its own task.
-        let tcp_config = Arc::clone(&config);
-        let quic_conn_clone = quic_conn.clone();
-        let cancel_token_clone = cancel_token.clone();
-        tokio::spawn(async move {
-            handle_tcp_listener(tcp_config, quic_conn_clone, listener, cancel_token_clone).await
-        })
     };
 
-    // 4. Run the control channel loop task.
-    let end = run_control_channel_loop(control_stream, cancel_token).await;
+    // 4. Create the TCP listener.
+    let tcp_addr = format!("{}:{}", config.app_data.local_bind_ip, port);
+    let listener = match TcpListener::bind(&tcp_addr).await {
+        Ok(listener) => listener,
+        Err(err) => {
+            // Terminate the connection upon failure to bind the TCP listener.
+            CloseCode::PortUnavailable.close(&quic_conn, "failed to listen on port");
+            return Err(err).context(format!("Failed to bind TCP listener to {}", tcp_addr));
+        }
+    };
+
+    // Tell the client that the tunnel is ready.
+    let confirmed = match listener.local_addr() {
+        Ok(bound_addr) => {
+            send_welcome(
+                &mut control_stream,
+                &Greeting::new(SERVER_SOFTWARE, bound_addr.port()),
+            )
+            .await
+        }
+        Err(err) => Err(err.into()),
+    };
+    if let Err(err) = confirmed {
+        CloseCode::InternalError.close(&quic_conn, "failed to confirm configuration");
+        return Err(err);
+    }
+
+    // Spawn the TCP listener in its own task. It releases the port when it ends: when the
+    // client sends DRAIN or the connection ends.
+    let listener_token = CancellationToken::new();
+    let tcp_handle = tokio::spawn(
+        handle_tcp_listener(
+            Arc::clone(&config),
+            quic_conn.clone(),
+            listener,
+            lease,
+            listener_token.clone(),
+        )
+        .in_current_span(),
+    );
+
+    // 5. Run the control channel loop.
+    let end = run_control_channel_loop(control_stream, listener_token).await;
 
     // Close the QUIC connection after the control channel finishes.
     debug!("Closing QUIC client connection from {}: {:?}", remote, end);
     let reason = match &end {
         ControlChannelEnd::Timeout => "keepalive timed out",
-        ControlChannelEnd::UnexpectedMessage(_) => "unexpected control message",
-        _ => "tunnel closed",
+        ControlChannelEnd::ProtocolViolation(_) => "unexpected control message",
+        ControlChannelEnd::StreamClosed(_) => "tunnel closed",
     };
     end.close_code().close(&quic_conn, reason);
     match end.close_code() {
@@ -142,18 +211,19 @@ pub async fn handle_quic_client_connection(
         _ => {}
     }
 
-    // Await the TCP listener task.
+    // Await the TCP listener task. It is only cancelled when the runtime shuts down at the end
+    // of the program, which is no error of this connection.
     debug!("Waiting for TCP listener task to finish");
-    tcp_handle.await??;
-
+    match tcp_handle.await {
+        Ok(result) => result?,
+        Err(e) if e.is_cancelled() => debug!("TCP listener task cancelled"),
+        Err(e) => return Err(e.into()),
+    }
     debug!("End of QUIC client connection from {}", remote);
 
     match end {
         ControlChannelEnd::Timeout => Err(anyhow!("keepalive timed out")),
-        ControlChannelEnd::UnexpectedMessage(message) => Err(anyhow!(
-            "unexpected control message {:?}",
-            String::from_utf8_lossy(&message)
-        )),
-        _ => Ok(()),
+        ControlChannelEnd::ProtocolViolation(violation) => Err(anyhow!(violation)),
+        ControlChannelEnd::StreamClosed(_) => Ok(()),
     }
 }

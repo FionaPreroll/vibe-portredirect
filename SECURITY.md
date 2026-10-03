@@ -28,15 +28,17 @@ The wire protocol is described in [docs/PROTOCOL.md](docs/PROTOCOL.md).
   They do get the clients' proofs of the PSK, though, so a weak PSK could be guessed offline.
 - The pre-shared key (PSK) is known only to the server and its clients, and is long and random (see the README).
   PortRedirect warns about PSKs shorter than 16 bytes, but accepts them.
+  Clients authenticate with a name and the PSK of that name. A server configured on the command line has a single client, `default`: all clients that know its PSK may use all allowed ports and can replace each other's connections.
 - Both machines themselves are trusted: anyone with access to the server process, the client process or their files can read the PSK and the forwarded data.
 
 **What the tunnel provides:**
 
 - Confidentiality and integrity of the forwarded data between client and server (QUIC with TLS 1.3).
-- Mutual authentication: the client only uses a server that has the private key of the certificate it holds and proves that it knows the PSK.
-  Only clients that know the PSK can make the server listen on a TCP port, and only on ports allowed by `--allowed-client-ports`.
+- Mutual authentication: the client only uses a server that has the private key of the certificate it holds and proves that it knows the client's PSK.
+  Only clients that know the PSK of their name can make the server listen on a TCP port, and only on the ports allowed for that name.
   Before authentication, a client cannot open streams or cause the server to open TCP ports.
-- The proofs of the PSK are HMACs bound to the TLS session, so they can't be replayed or relayed into another connection, and are verified in constant time.
+- The proofs of the PSK are HMACs bound to the TLS session and the client's name, so they can't be replayed or relayed into another connection, and are verified in constant time.
+  An unknown name fails like a wrong PSK, in the same time, so the server doesn't reveal which names exist.
 - Online guessing of the PSK is slow: an address is blocked for 10 minutes after 5 failed attempts within 10 minutes.
 - Limits on the resources a single host can use: QUIC connections, forwarded connections per client and per external address, and the time a forwarded connection may stay idle.
   See [Limits](docs/PROTOCOL.md#limits) for the defaults and options.
@@ -53,4 +55,3 @@ These are known weaknesses that are not fixed yet. Take them into account when y
 
 - **Distributed attacks:** the limits apply per address (IPv6: per /64 network). An attacker with many addresses can still use up the server's QUIC connections (`--max-quic-connections`) or a client's forwarded connections (`--max-connections`), and keep guessing the PSK online from each of them. A long random PSK makes guessing hopeless anyway.
 - **No rate limit for new forwarded connections:** the number of concurrent forwarded connections is limited, but not how fast new ones are opened. Each of them makes the client connect to the destination.
-- **Aborted connections look complete:** if a TCP connection is reset on one side, the other side sees a normal end of stream instead of a reset, so truncated transfers are not signalled as errors.
