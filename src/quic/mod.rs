@@ -7,12 +7,13 @@ use quinn::TransportConfig;
 pub mod client;
 pub mod server;
 
-// QUIC ALPN field: port redirect protocol v1
-pub const ALPN_QUIC_PORTREDIRECT: &[&[u8]] = &[b"pr-1"];
+// QUIC ALPN field: port redirect protocol v2.
+// Bump this whenever the protocol changes incompatibly (v2: LISTENPORT/LISTENING handshake).
+pub const ALPN_QUIC_PORTREDIRECT: &[&[u8]] = &[b"pr-2"];
 
 pub fn configure_transport_config(transport_config: &mut TransportConfig) {
     // QUIC connection advanced configuration
-    
+
     // Schedule streams in a round-robin fashion
     transport_config.send_fairness(true);
 

@@ -90,7 +90,10 @@ where
 /// incoming PING messages from the remote peer. When a PING is received,
 /// the server replies with a PONG. Any error (read/write, unexpected message,
 /// timeout, or connection close) causes the loop to exit gracefully.
-pub async fn run_control_channel_loop<T>(mut auth_stream: T, cancel_token: CancellationToken) -> Result<()>
+pub async fn run_control_channel_loop<T>(
+    mut auth_stream: T,
+    cancel_token: CancellationToken,
+) -> Result<()>
 where
     T: AsyncRead + AsyncWrite + Unpin,
 {
@@ -168,74 +171,15 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::error::Error;
     use std::io;
-    use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
-    use tokio::time::{self, timeout, Duration};
+    use tokio::io::duplex;
     use tokio_test::io::Builder;
 
-    // --- Protocol constants ---
+    // The tests run with paused time: when all tasks are idle, the clock jumps forward
+    // to the next timer, so the real intervals and timeouts don't slow them down.
+    // The mock streams panic on drop if not all expected reads and writes happened.
 
-    // For testing we use short durations.
-    pub struct DummyProtocol;
-    impl DummyProtocol {
-        pub const CONNECTION_KEEPALIVE_INTERVAL_SECONDS: Duration = Duration::from_millis(100);
-    }
-    const TEST_KEEP_ALIVE_INTERVAL: Duration = DummyProtocol::CONNECTION_KEEPALIVE_INTERVAL_SECONDS;
-    const TEST_READ_TIMEOUT: Duration = Duration::from_millis(200);
-
-    // --- Combined loop helper (for both client and server) ---
-
-    /// Runs a single-iteration keepalive loop. It writes a PING and expects a PONG.
-    async fn run_loop_with_test_interval<T>(mut stream: T) -> Result<(), Box<dyn Error>>
-    where
-        T: AsyncRead + AsyncWrite + Unpin,
-    {
-        let mut tick_interval = time::interval(TEST_KEEP_ALIVE_INTERVAL);
-        let mut pong_count = 0usize;
-
-        loop {
-            tick_interval.tick().await;
-
-            // Send a ping.
-            if stream.write_all(PING_MESSAGE).await.is_err() {
-                break;
-            }
-            if stream.flush().await.is_err() {
-                break;
-            }
-
-            // Read a response.
-            let mut response_buf = Vec::with_capacity(16);
-            let mut reader = BufReader::new(&mut stream);
-            match timeout(
-                TEST_READ_TIMEOUT,
-                reader.read_until(b'\n', &mut response_buf),
-            )
-            .await
-            {
-                Ok(Ok(0)) => break, // connection closed
-                Ok(Ok(_)) => {
-                    if response_buf == PONG_MESSAGE {
-                        pong_count += 1;
-                    } else {
-                        break;
-                    }
-                }
-                _ => break,
-            }
-
-            // For testing, exit after one successful ping-pong.
-            if pong_count >= 1 {
-                break;
-            }
-        }
-        Ok(())
-    }
-
-    // --- Dummy stream for simulating timeouts ---
-
-    /// A dummy stream that never returns any data on read.
+    /// A dummy stream that accepts all writes but never returns any data on read.
     struct NeverRead;
     impl AsyncRead for NeverRead {
         fn poll_read(
@@ -252,7 +196,6 @@ mod tests {
             _cx: &mut std::task::Context<'_>,
             buf: &[u8],
         ) -> std::task::Poll<io::Result<usize>> {
-            // Simulate that all bytes are “written.”
             std::task::Poll::Ready(Ok(buf.len()))
         }
         fn poll_flush(
@@ -269,100 +212,139 @@ mod tests {
         }
     }
 
-    // --- Helper functions to build mock streams ---
-
-    /// Builds a mock stream for a “good” keepalive interaction.
-    fn build_good_keepalive() -> tokio_test::io::Mock {
-        let mut builder = Builder::new();
-        // Only expect one ping: write PING, then read PONG.
-        builder.write(PING_MESSAGE);
-        builder.read(b"PONG\n");
-        builder.build()
-    }
-
-    /// Builds a mock stream that returns an incorrect response.
-    fn build_wrong_response() -> tokio_test::io::Mock {
-        let mut builder = Builder::new();
-        builder.write(PING_MESSAGE);
-        //builder.flush();
-        builder.read(b"WRONG\n");
-        builder.build()
-    }
-
-    /// Builds a mock stream that errors on write.
-    fn build_write_error() -> tokio_test::io::Mock {
-        let mut builder = Builder::new();
-        builder.write_error(io::Error::new(io::ErrorKind::Other, "write error"));
-        builder.build()
-    }
-
-    // --- Client-side tests ---
+    // --- Client side: run_keepalive_client_loop ---
 
     #[tokio::test(start_paused = true)]
-    async fn test_keepalive_client_good() {
-        let mock = build_good_keepalive();
-        let result = run_loop_with_test_interval(mock).await;
-        assert!(result.is_ok());
+    async fn test_client_keeps_pinging_until_write_fails() {
+        // Two successful rounds, then the third PING fails.
+        let mock = Builder::new()
+            .write(PING_MESSAGE)
+            .read(PONG_MESSAGE)
+            .write(PING_MESSAGE)
+            .read(PONG_MESSAGE)
+            .write_error(io::Error::other("connection lost"))
+            .build();
+        run_keepalive_client_loop(mock).await.unwrap();
     }
 
     #[tokio::test(start_paused = true)]
-    async fn test_keepalive_client_wrong_response() {
-        let mock = build_wrong_response();
-        let result = run_loop_with_test_interval(mock).await;
-        // The loop should exit gracefully on an unexpected response.
-        assert!(result.is_ok());
+    async fn test_client_stops_on_wrong_response() {
+        let mock = Builder::new().write(PING_MESSAGE).read(b"WRONG\n").build();
+        run_keepalive_client_loop(mock).await.unwrap();
     }
 
     #[tokio::test(start_paused = true)]
-    async fn test_keepalive_client_write_error() {
-        let mock = build_write_error();
-        let result = run_loop_with_test_interval(mock).await;
-        // The error should cause the loop to exit gracefully.
-        assert!(result.is_ok());
+    async fn test_client_stops_when_connection_closes() {
+        // After the PING, the read returns EOF.
+        let mock = Builder::new().write(PING_MESSAGE).build();
+        run_keepalive_client_loop(mock).await.unwrap();
     }
 
     #[tokio::test(start_paused = true)]
-    async fn test_keepalive_client_timeout() {
-        let stream = NeverRead;
-        let fut = run_loop_with_test_interval(stream);
-        // Advance time to trigger the tick and then the read timeout.
-        time::advance(TEST_KEEP_ALIVE_INTERVAL).await;
-        time::advance(TEST_READ_TIMEOUT).await;
-        let result = fut.await;
-        assert!(result.is_ok());
-    }
-
-    // --- Server-side tests ---
-    // (Using the same helper functions as above.)
-
-    #[tokio::test(start_paused = true)]
-    async fn test_keepalive_server_good() {
-        let mock = build_good_keepalive();
-        let result = run_loop_with_test_interval(mock).await;
-        assert!(result.is_ok());
+    async fn test_client_stops_on_write_error() {
+        let mock = Builder::new()
+            .write_error(io::Error::other("write error"))
+            .build();
+        run_keepalive_client_loop(mock).await.unwrap();
     }
 
     #[tokio::test(start_paused = true)]
-    async fn test_keepalive_server_wrong_response() {
-        let mock = build_wrong_response();
-        let result = run_loop_with_test_interval(mock).await;
-        assert!(result.is_ok());
+    async fn test_client_stops_on_pong_timeout() {
+        let start = tokio::time::Instant::now();
+        run_keepalive_client_loop(NeverRead).await.unwrap();
+        assert!(start.elapsed() >= READ_TIMEOUT);
+    }
+
+    // --- Server side: run_control_channel_loop ---
+
+    #[tokio::test(start_paused = true)]
+    async fn test_server_answers_pings_until_bye() {
+        let mock = Builder::new()
+            .read(PING_MESSAGE)
+            .write(PONG_MESSAGE)
+            .read(PING_MESSAGE)
+            .write(PONG_MESSAGE)
+            .read(CONNECTION_END_MESSAGE)
+            .build();
+        let cancel_token = CancellationToken::new();
+
+        run_control_channel_loop(mock, cancel_token.clone())
+            .await
+            .unwrap();
+
+        assert!(cancel_token.is_cancelled());
     }
 
     #[tokio::test(start_paused = true)]
-    async fn test_keepalive_server_write_error() {
-        let mock = build_write_error();
-        let result = run_loop_with_test_interval(mock).await;
-        assert!(result.is_ok());
+    async fn test_server_stops_on_unexpected_message() {
+        let mock = Builder::new().read(b"HELLO\n").build();
+        let cancel_token = CancellationToken::new();
+
+        run_control_channel_loop(mock, cancel_token.clone())
+            .await
+            .unwrap();
+
+        assert!(cancel_token.is_cancelled());
     }
 
     #[tokio::test(start_paused = true)]
-    async fn test_keepalive_server_timeout() {
-        let stream = NeverRead;
-        let fut = run_loop_with_test_interval(stream);
-        time::advance(TEST_KEEP_ALIVE_INTERVAL).await;
-        time::advance(TEST_READ_TIMEOUT).await;
-        let result = fut.await;
-        assert!(result.is_ok());
+    async fn test_server_stops_when_connection_closes() {
+        let mock = Builder::new()
+            .read(PING_MESSAGE)
+            .write(PONG_MESSAGE)
+            .build();
+        let cancel_token = CancellationToken::new();
+
+        run_control_channel_loop(mock, cancel_token.clone())
+            .await
+            .unwrap();
+
+        assert!(cancel_token.is_cancelled());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_server_stops_without_pings() {
+        let cancel_token = CancellationToken::new();
+        let start = tokio::time::Instant::now();
+
+        run_control_channel_loop(NeverRead, cancel_token.clone())
+            .await
+            .unwrap();
+
+        assert!(start.elapsed() >= KEEP_ALIVE_INTERVAL + READ_TIMEOUT);
+        assert!(cancel_token.is_cancelled());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_server_stops_when_cancelled() {
+        let cancel_token = CancellationToken::new();
+        cancel_token.cancel();
+
+        // Returns immediately, without reading anything.
+        run_control_channel_loop(NeverRead, cancel_token)
+            .await
+            .unwrap();
+    }
+
+    // --- Both sides together ---
+
+    #[tokio::test(start_paused = true)]
+    async fn test_client_and_server_keep_connection_alive() {
+        let (client_side, server_side) = duplex(64);
+        let cancel_token = CancellationToken::new();
+        let server = tokio::spawn(run_control_channel_loop(server_side, cancel_token.clone()));
+
+        // Run the client much longer than the server's PING timeout.
+        let client_runtime = (KEEP_ALIVE_INTERVAL + READ_TIMEOUT) * 3;
+        let client = tokio::time::timeout(client_runtime, run_keepalive_client_loop(client_side));
+        assert!(client.await.is_err(), "client loop ended early");
+        assert!(
+            !cancel_token.is_cancelled(),
+            "server ended the connection although the client sent PINGs"
+        );
+
+        // The client is gone now, so the server ends the connection.
+        server.await.unwrap().unwrap();
+        assert!(cancel_token.is_cancelled());
     }
 }

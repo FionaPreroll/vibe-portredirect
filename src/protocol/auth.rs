@@ -166,28 +166,23 @@ mod tests {
         let server_res = server.await.expect("server task panicked");
         let client_res = client.await.expect("client task panicked");
 
-        // In a bad authentication, we expect at least one of the two sides to error.
-        // Here, we check that if the server returned Ok, then the client must have failed;
-        // otherwise, if the server failed, we check its error.
-        if server_res.is_ok() {
-            let client_err = client_res.expect_err("client_authenticate should have failed");
-            assert!(
-                client_err
-                    .to_string()
-                    .contains("Authentication failed: response mismatch"),
-                "Unexpected client error message: {}",
-                client_err
-            );
-        } else {
-            let server_err = server_res.expect_err("server_authenticate should have failed");
-            assert!(
-                server_err
-                    .to_string()
-                    .contains("Authentication failed: response mismatch"),
-                "Unexpected server error message: {}",
-                server_err
-            );
-        }
+        // With different PSKs, the server must reject the response and tell the client.
+        let server_err = server_res.expect_err("server_authenticate should have failed");
+        assert!(
+            server_err
+                .to_string()
+                .contains("Authentication failed: response mismatch"),
+            "Unexpected server error message: {}",
+            server_err
+        );
+        let client_err = client_res.expect_err("client_authenticate should have failed");
+        assert!(
+            client_err
+                .to_string()
+                .contains("Server rejected authentication: BAD"),
+            "Unexpected client error message: {}",
+            client_err
+        );
         Ok(())
     }
 }

@@ -171,10 +171,7 @@ mod tests {
             _cx: &mut Context<'_>,
             _buf: &mut ReadBuf<'_>,
         ) -> Poll<Result<(), std::io::Error>> {
-            Poll::Ready(Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "read failure",
-            )))
+            Poll::Ready(Err(std::io::Error::other("read failure")))
         }
     }
 
@@ -184,10 +181,7 @@ mod tests {
             _cx: &mut Context<'_>,
             _buf: &[u8],
         ) -> Poll<Result<usize, std::io::Error>> {
-            Poll::Ready(Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "write failure",
-            )))
+            Poll::Ready(Err(std::io::Error::other("write failure")))
         }
 
         fn poll_flush(
@@ -269,8 +263,7 @@ mod tests {
             _cx: &mut Context<'_>,
             _buf: &mut ReadBuf<'_>,
         ) -> Poll<Result<(), std::io::Error>> {
-            Poll::Ready(Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            Poll::Ready(Err(std::io::Error::other(
                 "sending stopped by peer: error 0",
             )))
         }
@@ -282,8 +275,7 @@ mod tests {
             _cx: &mut Context<'_>,
             _buf: &[u8],
         ) -> Poll<Result<usize, std::io::Error>> {
-            Poll::Ready(Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            Poll::Ready(Err(std::io::Error::other(
                 "sending stopped by peer: error 0",
             )))
         }

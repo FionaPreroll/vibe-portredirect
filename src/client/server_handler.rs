@@ -4,8 +4,10 @@
 
 use crate::app_data::ClientAppData;
 use crate::bi_stream::BiStream;
+use crate::protocol::control::request_listen_port;
 use crate::protocol::keepalive::run_keepalive_client_loop;
 use crate::quic::client::ClientConfig;
+use crate::PortRedirectProtocol;
 
 use super::auth::handle_quic_auth_client_side;
 use super::metrics_counters::*;
@@ -13,6 +15,7 @@ use super::tcp_forwarder::forward_tcp_to_quic_stream;
 
 use anyhow::{Context, Result};
 use std::sync::Arc;
+use tokio::time::timeout;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tracing::{debug, info, instrument, warn};
 
@@ -27,9 +30,23 @@ pub async fn handle_quic_server_connection(
     SERVER_CONNECTIONS_OPENED_TOTAL.inc();
 
     // We need to prove we know the PSK to authenticate.
-    let auth_stream = handle_quic_auth_client_side(Arc::clone(&config), conn.clone())
+    let mut auth_stream = handle_quic_auth_client_side(Arc::clone(&config), conn.clone())
         .await
         .context("failed to authenticate against PR QUIC server")?;
+
+    // Ask the server to accept external TCP connections on our behalf.
+    let requested_port = config.app_data.remote_listen_port;
+    let bound_port = timeout(
+        PortRedirectProtocol::CONFIGURATION_TIMEOUT,
+        request_listen_port(&mut auth_stream, requested_port),
+    )
+    .await
+    .context("timed out waiting for the server to confirm the listen port")?
+    .with_context(|| format!("server did not listen on TCP port {}", requested_port))?;
+    info!(
+        "Tunnel established, server listens on TCP port {}",
+        bound_port
+    );
 
     // Start the keepalive loop to maintain the QUIC connection.
     // This loop periodically sends a PING and expects a PONG response.

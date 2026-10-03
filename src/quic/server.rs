@@ -6,10 +6,12 @@
 
 use anyhow::{Context, Error, Result};
 use quinn::crypto::rustls::QuicServerConfig;
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use std::{fs, net::SocketAddr, path::PathBuf, sync::Arc, time::Instant};
 use tracing::{debug, info, instrument, warn};
 
+use crate::private_files::{warn_if_accessible_by_others, write_private_file};
 use crate::quic::{configure_transport_config, ALPN_QUIC_PORTREDIRECT};
 
 /// Configuration for the QUIC server.
@@ -150,6 +152,7 @@ pub fn load_or_generate_quic_cert(
 /// otherwise PEM is assumed.
 ///
 /// Note: Ensure that the file paths provided are accessible and have the correct permissions.
+/// A warning is logged if the private key file is accessible by other users.
 ///
 /// # Arguments
 ///
@@ -192,18 +195,17 @@ pub fn load_quic_cert(
 ) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
     // Try loading
     let key = fs::read(key_path.clone()).context("failed to read private key")?;
+    warn_if_accessible_by_others(&key_path);
     let key = if key_path.extension().is_some_and(|x| x == "der") {
         PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key))
     } else {
-        rustls_pemfile::private_key(&mut &*key)
-            .context("malformed PKCS #1 private key")?
-            .ok_or_else(|| anyhow::Error::msg("no private keys found"))?
+        PrivateKeyDer::from_pem_slice(&key).context("malformed or missing PEM private key")?
     };
     let cert_chain = fs::read(cert_path.clone()).context("failed to read certificate chain")?;
     let cert_chain = if cert_path.extension().is_some_and(|x| x == "der") {
         vec![CertificateDer::from(cert_chain)]
     } else {
-        rustls_pemfile::certs(&mut &*cert_chain)
+        CertificateDer::pem_slice_iter(&cert_chain)
             .collect::<Result<_, _>>()
             .context("invalid PEM-encoded certificate")?
     };
@@ -215,8 +217,8 @@ pub fn load_quic_cert(
 ///
 /// This function generates a self-signed certificate using the provided alternative
 /// name for the certificate (e.g., a domain name or IP address). The generated files are saved
-/// to the specified paths. The function then loads the certificate and private key into
-/// QUIC-compatible formats.
+/// to the specified paths, the private key readable only by its owner (on Unix). The function
+/// then loads the certificate and private key into QUIC-compatible formats.
 ///
 /// Note: This function is suitable for development and testing purposes. For production,
 /// use a trusted certificate authority to issue certificates.
@@ -302,7 +304,7 @@ pub fn generate_quic_cert(
     // Write certificate and private key to files.
     let cert = CertificateDer::from(cert.cert);
     fs::write(&cert_path, &cert).context("failed to write certificate")?;
-    fs::write(&key_path, key.secret_pkcs8_der()).context("failed to write private key")?;
+    write_private_file(&key_path, key.secret_pkcs8_der()).context("failed to write private key")?;
 
     Ok((vec![cert], key.into()))
 }
@@ -412,10 +414,7 @@ where
             let fut = handle_incoming_client(Arc::clone(&config), connection);
             tokio::spawn(async move {
                 if let Err(e) = fut.await {
-                    warn!(
-                        "Incoming connection dropped: {reason}",
-                        reason = e.to_string()
-                    )
+                    warn!("Incoming connection dropped: {:#}", e)
                 }
             });
         }
@@ -424,4 +423,56 @@ where
     info!("PR QUIC server terminated after {:?}.", start.elapsed());
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_load_pem_encoded_cert_and_key() -> Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let cert_path = temp_dir.path().join("cert.pem");
+        let key_path = temp_dir.path().join("key.pem");
+
+        let generated = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
+        fs::write(&cert_path, generated.cert.pem())?;
+        fs::write(&key_path, generated.key_pair.serialize_pem())?;
+
+        let (cert_chain, key) = load_quic_cert(key_path, cert_path)?;
+
+        assert_eq!(cert_chain.len(), 1);
+        assert_eq!(cert_chain[0].as_ref(), generated.cert.der().as_ref());
+        assert_eq!(key.secret_der(), generated.key_pair.serialize_der());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_generated_private_key_is_owner_only() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::tempdir()?;
+        let cert_path = temp_dir.path().join("cert.der");
+        let key_path = temp_dir.path().join("key.der");
+
+        generate_quic_cert("localhost".into(), key_path.clone(), cert_path)?;
+
+        assert_eq!(fs::metadata(&key_path)?.permissions().mode() & 0o777, 0o600);
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_pem_without_key_fails() -> Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let cert_path = temp_dir.path().join("cert.pem");
+        let key_path = temp_dir.path().join("key.pem");
+
+        let generated = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
+        fs::write(&cert_path, generated.cert.pem())?;
+        fs::write(&key_path, generated.cert.pem())?; // a certificate is not a key
+
+        assert!(load_quic_cert(key_path, cert_path).is_err());
+        Ok(())
+    }
 }

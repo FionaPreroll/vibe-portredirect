@@ -5,6 +5,6 @@
 pub mod auth;
 pub mod metrics;
 pub mod metrics_counters;
+pub mod run_client;
 pub mod server_handler;
 pub mod tcp_forwarder;
-pub mod run_client;

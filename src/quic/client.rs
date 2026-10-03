@@ -10,7 +10,6 @@ use rustls::pki_types::CertificateDer;
 use std::{fs, io, net::SocketAddr, path::PathBuf, sync::Arc, time::Instant};
 use tracing::{debug, error, info, instrument};
 
-
 use super::ALPN_QUIC_PORTREDIRECT;
 
 #[derive(Debug)]
@@ -121,7 +120,7 @@ where
     let fut = handle_incoming(Arc::clone(&config), connection);
     let task = tokio::spawn(async move {
         if let Err(e) = fut.await {
-            error!("connection failed: {reason}", reason = e.to_string())
+            error!("connection failed: {:#}", e)
         }
     });
 

@@ -23,7 +23,7 @@ setup() {
 
     # Start portredirect server in background
     ./target/release/portredirect_server \
-        --local-host 127.0.0.1 --local-port 1111 \
+        --local-host 127.0.0.1 --allowed-client-ports 1111 \
         --quic-server-host 127.0.0.1 --quic-server-port 4433 --quic-psk ilovespezifisch \
         --print-metrics \
         >"$LOG_DIR/portredirect_server.log" 2>&1 &
@@ -34,9 +34,9 @@ setup() {
 
     # Start portredirect client in background
     ./target/release/portredirect_client \
-        --destination-host 127.0.0.1 --destination-port 2222 \
+        --destination-host 127.0.0.1 --destination-port 2222 --remote-listen-port 1111 \
         --quic-remote-host 127.0.0.1 --quic-remote-port 4433 \
-        --quic-remote-hostname-match localhost --quic-psk ilovespezifisch \
+        --quic-psk ilovespezifisch \
         --provide-metrics \
         >"$LOG_DIR/portredirect_client.log" 2>&1 &
     CLIENT_PID=$!
@@ -53,19 +53,15 @@ teardown() {
 }
 
 send_and_verify() {
-    #local size=$1
-    local filename="testfile_10GB"
+    local filename="testfile_1GB"
 
-    # Fetch huge test file, probably faster than our RNG with urandom
-    [ -e "$filename" ] || wget -qO "$filename" https://hil-speed.hetzner.com/10GB.bin
-
-    # Slice off file of specified size
-    #head -c ${size}M <10GB.bin >$filename
+    # Generate random test data locally, instead of depending on an external download
+    [ -e "$filename" ] || head -c 1G /dev/urandom >"$filename"
 
     # Compute original MD5 hash
     local original_md5=$(md5sum "$filename" | awk '{print $1}')
 
-    # Start netcat listener on port 5201 (bridged by portredirect)
+    # Start netcat listener on port 2222 (bridged by portredirect)
     nc -l -p 2222 >received_$filename &
     sleep 1 # Allow listener to start
 

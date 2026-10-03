@@ -5,6 +5,8 @@ name: End-to-End Simple Test (iperf3)
 on:
   push:
     branches: ["main"]
+  pull_request:
+    branches: ["main"]
   workflow_dispatch:
     inputs:
       debug_enabled:
@@ -12,6 +14,8 @@ on:
         description: 'Run the build with tmate debugging enabled (https://github.com/marketplace/actions/debugging-with-tmate)'
         required: false
         default: false
+permissions:
+  contents: read
 env:
   CARGO_TERM_COLOR: always
 jobs:
@@ -19,26 +23,27 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: Setup Rust
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
         with:
           toolchain: stable
-          override: true
       - name: Install packages
         run: |
           sudo apt-get update
           sudo apt-get install -y bats iperf3
       # Enable tmate debugging of manually-triggered workflows if the input option was provided
       - name: Setup tmate session
-        uses: mxschmitt/action-tmate@v3
+        uses: mxschmitt/action-tmate@35b54afac29c97fb54faba5b513f8fbd1882f113 # v3.24
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.debug_enabled }}
         with:
           limit-access-to-actor: true
       - name: Cargo release build
         run: |
           echo "this is a CI run. delete this file if not. ./.github/workflows and ./tests are using this file." > .ci
-          cargo build --release
+          cargo build --release --locked
       - name: Run BATS test(s)
         # show passing test's output because we only do one test, so no clutter
         run: bats --print-output-on-failure --show-output-of-passing-tests --gather-test-outputs-in ./bats-logs tests/full_e2e_test.bats
@@ -48,7 +53,7 @@ jobs:
           echo "========== testlogs =========="
           tail -n+0 ./testlogs/*/* || true
       - name: Upload Logs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: portredirect-artifact-logs-e2e-test

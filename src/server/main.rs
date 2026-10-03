@@ -3,14 +3,14 @@
 // License: GPL-3.0-only
 
 use anyhow::{anyhow, Context, Result};
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches, Parser};
 use portredirect::app_data::ServerAppData;
 use portredirect::get_config_dir;
+use portredirect::psk::{warn_if_psk_on_command_line, PskArgs};
 use portredirect::quic::server::{run_quic_server, ServerConfig};
 use portredirect::server::client_handler::handle_quic_client_connection;
 use portredirect::server::metrics_printer::print_metrics_loop;
 use portredirect::server::PortSpec;
-use secrecy::SecretString;
 use std::net::{SocketAddr, ToSocketAddrs};
 use tracing::{info, span, Level};
 
@@ -45,9 +45,8 @@ struct Args {
     #[clap(long, default_value = "127.0.0.1")]
     quic_cert_hostname: String,
 
-    /// Pre-shared key for authentication over QUIC.
-    #[clap(long)]
-    quic_psk: SecretString,
+    #[command(flatten)]
+    psk: PskArgs,
 
     /// Print metrics to stderr every second, if any value changes.
     #[clap(long)]
@@ -68,7 +67,10 @@ async fn main() -> Result<()> {
         .expect("Failed to install rustls crypto provider");
 
     // Parse command-line arguments.
-    let args = Args::parse();
+    let matches = Args::command().get_matches();
+    let args = Args::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    warn_if_psk_on_command_line(&matches);
+    let psk = args.psk.load()?;
 
     // Retrieve (or create) the configuration directory.
     let config_dir =
@@ -97,7 +99,7 @@ async fn main() -> Result<()> {
     .context("Failed to resolve QUIC bind address")?;
 
     // Set up QUIC server configuration.
-    let app_data = ServerAppData::new(args.quic_psk, args.local_host, allowed_client_ports);
+    let app_data = ServerAppData::new(psk, args.local_host, allowed_client_ports);
     info!("QUIC will listen on {}", quic_addr);
 
     let quic_config = ServerConfig::create_default_config(

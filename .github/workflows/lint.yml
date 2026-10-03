@@ -4,17 +4,23 @@ on:
     branches: ["main"]
   pull_request:
     branches: ["main"]
+permissions:
+  contents: read
 env:
   CARGO_TERM_COLOR: always
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: Setup Rust
-        uses: actions-rs/toolchain@v1
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          toolchain: stable
-          override: true
+          persist-credentials: false
+      - name: Setup Rust
+        # Pinned, so lints added in new Rust releases don't break unrelated changes.
+        # Bump deliberately and fix new findings in the same change.
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
+        with:
+          toolchain: "1.97.0"
+          components: clippy, rustfmt
       - name: Run linters
         run: make lint
