@@ -914,15 +914,12 @@ async fn requests_after_the_end_of_the_response_are_forwarded() -> Result<()> {
     let config_dir = setup();
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
 
-    // After the first message, the backend sends a greeting and closes its sending side, then
-    // reads the rest of the request.
+    // The backend sends a greeting and closes its sending side, then reads the request.
     let listener = TcpListener::bind(localhost(0)).await?;
     let backend_addr = listener.local_addr()?;
     let (request_tx, request_rx) = oneshot::channel();
     tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await?;
-        let mut hello = [0u8; 5];
-        stream.read_exact(&mut hello).await?;
         stream.write_all(b"greeting").await?;
         stream.shutdown().await?;
         let mut request = Vec::new();
@@ -946,7 +943,6 @@ async fn requests_after_the_end_of_the_response_are_forwarded() -> Result<()> {
 
     with_timeout(async {
         let mut stream = connect_through_tunnel(listen_port).await?;
-        stream.write_all(b"hello").await?;
         let mut greeting = Vec::new();
         stream.read_to_end(&mut greeting).await?;
         assert_eq!(greeting, b"greeting");
@@ -959,6 +955,59 @@ async fn requests_after_the_end_of_the_response_are_forwarded() -> Result<()> {
             .await
             .map_err(|_| anyhow!("the backend did not receive the request"))??;
         assert!(request == payload, "request differs from the sent data");
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn destination_can_speak_first() -> Result<()> {
+    let config_dir = setup();
+    let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
+
+    // Like an SMTP, POP3 or FTP server: the backend greets first, and the external client sends
+    // nothing before the greeting.
+    let listener = TcpListener::bind(localhost(0)).await?;
+    let backend_addr = listener.local_addr()?;
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                stream.write_all(b"220 ready\r\n").await?;
+                let mut command = [0u8; 6];
+                stream.read_exact(&mut command).await?;
+                anyhow::ensure!(&command == b"QUIT\r\n", "unexpected command");
+                stream.write_all(b"221 bye\r\n").await?;
+                stream.shutdown().await?;
+                Ok(())
+            });
+        }
+    });
+
+    let _server = start_server(
+        config_dir.path(),
+        quic_port,
+        vec![PortSpec::Single(listen_port)],
+    );
+    let _client = start_client(
+        config_dir.path(),
+        quic_port,
+        TEST_PSK,
+        backend_addr,
+        listen_port,
+    );
+
+    with_timeout(async {
+        let mut stream = connect_through_tunnel(listen_port).await?;
+        let mut greeting = [0u8; 11];
+        timeout(Duration::from_secs(5), stream.read_exact(&mut greeting))
+            .await
+            .map_err(|_| anyhow!("no greeting, the client did not learn about the connection"))??;
+        assert_eq!(&greeting, b"220 ready\r\n");
+
+        stream.write_all(b"QUIT\r\n").await?;
+        let mut reply = Vec::new();
+        stream.read_to_end(&mut reply).await?;
+        assert_eq!(reply, b"221 bye\r\n");
         Ok(())
     })
     .await
@@ -987,7 +1036,6 @@ async fn unreachable_destination_closes_the_external_connection() -> Result<()> 
     with_timeout(async {
         // The external client learns right away that there is nothing to talk to.
         let mut stream = connect_through_tunnel(listen_port).await?;
-        stream.write_all(b"hello").await?;
         assert!(
             closed_by_peer(&mut stream, Duration::from_secs(5)).await,
             "connection kept open although the destination is unreachable"

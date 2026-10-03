@@ -52,7 +52,7 @@ cargo install --locked --path .
 
 `--locked` uses the dependency versions from `Cargo.lock`, which are the ones tested and audited in CI.
 
-> **Note:** The latest `portredirect` package on crates.io, version 0.3.0, predates the current protocol version 3 (see [docs/PROTOCOL.md](docs/PROTOCOL.md)) and can't talk to this version. It will be updated once this version has proven stable in practice. Server and client must speak the same protocol version.
+> **Note:** The latest `portredirect` package on crates.io, version 0.3.0, predates the current protocol version 4 (see [docs/PROTOCOL.md](docs/PROTOCOL.md)) and can't talk to this version. It will be updated once this version has proven stable in practice. Server and client must speak the same protocol version.
 
 ## Usage
 

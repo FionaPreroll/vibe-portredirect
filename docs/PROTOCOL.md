@@ -1,4 +1,4 @@
-# PortRedirect Protocol (version 3)
+# PortRedirect Protocol (version 4)
 
 This document describes how `portredirect_client` and `portredirect_server` talk to each other.
 It reflects the implementation in `src/protocol/` and `src/quic/`; if they disagree, the code wins and this document needs fixing.
@@ -18,14 +18,15 @@ It reflects the implementation in `src/protocol/` and `src/quic/`; if they disag
 1. The client connects to the server via QUIC and verifies the server's certificate.
 2. The server opens the **control stream**. Client and server prove to each other that they know the pre-shared key (PSK).
 3. The client asks the server to listen on a TCP port; the server binds it and confirms.
-4. For every external TCP connection the server accepts, it opens a **data stream** to the client, which connects to the destination and forwards bytes in both directions.
+4. For every external TCP connection the server accepts, it opens a **data stream** to the client and names the external client in a header. The client connects to the destination and forwards bytes in both directions.
 5. The client sends keepalive messages on the control stream for as long as the tunnel should exist.
 6. A side that ends the connection closes it with a [close code](#close-codes) that tells why. The client connects again, unless the code means that connecting again would fail the same way.
 
 ## Transport
 
-- QUIC with TLS 1.3, ALPN protocol identifier `pr-3`.
+- QUIC with TLS 1.3, ALPN protocol identifier `pr-4`.
   The identifier changes with every incompatible protocol change; peers speaking a different version fail the TLS handshake ("peer doesn't support any known protocol").
+  Version 3 (`pr-3`, PortRedirect 0.5.0) started data streams without a header, so the client learned about a forwarded connection only when the external client sent data: protocols in which the server speaks first, e.g. SMTP, hung.
   Version 2 (`pr-2`, PortRedirect 0.4.0) authenticated only the client, without binding the proof to the TLS session, and closed all connections with code 0.
   Version 1 (`pr-1`, e.g. `portredirect` 0.3.0 on crates.io) had no listen port negotiation.
 - **Server authentication:** the server presents a certificate, by default a self-signed one it generates on first start (`cert.der`, `key.der` in its configuration directory).
@@ -135,11 +136,24 @@ On errors, the server closes the connection: with code 5 if the port is not allo
 
 ## Data streams
 
-For each external TCP connection the server accepts, it opens a new bidirectional stream.
-The client connects to its destination (`--destination-host`, `--destination-port`) and both sides copy bytes between the TCP connection and the stream until both directions are finished:
+For each external TCP connection the server accepts, it opens a new bidirectional stream and starts it with a header, server to client:
+
+```text
+CONNECTION <family: u8> <address: [4] or [16]> <port: u16>
+```
+
+(no spaces; 17 bytes for IPv4, 29 bytes for IPv6)
+
+- `<family>`: 4 for IPv4, 6 for IPv6. IPv4-mapped IPv6 addresses are sent as IPv4.
+- `<address>`, `<port>`: the external client's address and port, e.g. `192.0.2.1:50000` as `CONNECTION` followed by the bytes `04 c0 00 02 01 c3 50`.
+
+QUIC announces a new stream to the peer only with its first data. So the header also makes the client learn about the connection right away, even if the external client waits for the destination to speak first, as in SMTP.
+The client logs the external client's address (at debug level), but doesn't pass it on to the destination.
+
+Then the client connects to its destination (`--destination-host`, `--destination-port`), and both sides copy bytes between the TCP connection and the stream until both directions are finished:
 
 - When one side's TCP peer closes its sending direction (FIN), the stream direction is finished, and the other side shuts down the corresponding TCP sending direction. Half-closed connections are supported.
-- The stream carries only payload bytes; there is no framing or metadata such as the external client's address.
+- After the header, the stream carries only payload bytes, without any framing.
 - If the client accepts no further stream within 10 seconds, because it already forwards its `--max-connections`, the server closes the external connection.
 - If the client can't connect to the destination within 10 seconds, it closes the stream, and the server closes the external connection.
 - The server closes connections without data transfer in either direction for `--idle-timeout` seconds.
