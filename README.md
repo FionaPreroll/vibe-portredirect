@@ -79,6 +79,7 @@ portredirect_server \
 - **`--config-file`:** TOML file with settings, e.g. a list of clients, see [Configuration File](#configuration-file).
 - **`--config-dir`:** Where the certificate and private key are stored (default `~/.config/portredirect`). If only one of them is there, the server doesn't start, instead of generating a new pair that clients wouldn't trust.
 - **`--print-metrics`:** Print connection and traffic counters to stderr when they change.
+- **`--shutdown-timeout`:** Seconds that running forwarded connections may take to finish when the server shuts down (default 5), see [Shutting Down](#shutting-down).
 - **`--log-level`:** `off`, `error`, `warn`, `info` (default), `debug` or `trace`. Logs go to stderr. The `RUST_LOG` environment variable, if set, takes precedence and can set levels per module, e.g. `RUST_LOG=info,portredirect::forward=debug`.
 
 **Limits** for the resources a single host can use:
@@ -114,7 +115,7 @@ portredirect_client \
 - **`--config-dir`:** Where the server's certificate `cert.der` is read from (default `~/.config/portredirect`).
 - **`--max-connections`:** Maximum number of concurrently forwarded connections (default 512).
 - **`--provide-metrics`:** Serve Prometheus metrics at `http://127.0.0.1:9898/metrics`, or at the address given with `--metrics-listen`. The endpoint has no authentication, only make it reachable from trusted networks.
-- **`--log-level`:** As for the server.
+- **`--shutdown-timeout`** and **`--log-level`:** As for the server.
 
 > **Important:** Start the server first to generate its certificate, then copy **only the certificate** `~/.config/portredirect/cert.der` from the server to the client's configuration directory (by default the same path).
 > Never copy the private key `key.der`: anyone who has it can impersonate your server. The server creates it readable only by its owner (mode `0600`) and warns if it is accessible by others.
@@ -184,7 +185,7 @@ A client can only use its own ports, so it can't take over another client's port
 The client keeps the tunnel up on its own: whenever the connection to the server ends, it connects again, after 1 second at first and up to 60 seconds after repeated failures.
 It only exits:
 
-- with code 0 on `SIGINT` or `SIGTERM`, after closing the connection, so the server releases the port right away;
+- with code 0 on `SIGINT` or `SIGTERM`, after letting running connections finish, see [Shutting Down](#shutting-down);
 - with code 1 if connecting again would fail the same way until the configuration changes, e.g. because the server rejects the PSK or the port, or the server's certificate doesn't match `cert.der`;
 - with code 1 if another client with the same name took over the port, e.g. a second instance by mistake: otherwise, the two would take the port from each other in turns;
 - with code 2 on invalid command-line arguments or an invalid configuration file.
@@ -198,9 +199,20 @@ Restart=on-failure
 RestartSec=60
 ```
 
-On `SIGINT` or `SIGTERM`, the server closes all connections, so its clients notice right away and connect again once it is back.
+When the server shuts down, its clients notice right away and connect again once it is back.
 
 If the client connects again while the server still holds the port for its previous connection, e.g. after the client crashed, the new connection replaces the previous one right away.
+
+### Shutting Down
+
+On `SIGINT` or `SIGTERM`, both programs shut down gracefully, e.g. for an update:
+
+1. They start no new forwarded connections and tell the other side with `DRAIN`. The server closes its TCP listeners and refuses new clients. A client makes the server close its TCP listener and release the port right away, so another client can take it, e.g. a [standby client](#several-clients-and-standby) or a new instance.
+2. Running forwarded connections may finish, for at most `--shutdown-timeout` seconds (default 5). Idle connections, e.g. HTTP keep-alive connections, hold up the shutdown until the timeout, too.
+3. Then they close the rest, and the connection between them, so the other side notices right away.
+
+A second `SIGINT` or `SIGTERM` closes the running connections right away.
+Keep the timeout shorter than the time a service manager waits before it kills the program, e.g. `TimeoutStopSec` of systemd (90 seconds by default) or the stop timeout of Docker (10 seconds by default).
 
 ### PSK Best Practices
 

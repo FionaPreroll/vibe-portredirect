@@ -14,16 +14,23 @@ use super::auth::handle_quic_auth_client_side;
 use super::metrics_counters::*;
 use super::tcp_forwarder::forward_tcp_to_quic_stream;
 
+use crate::bi_stream::BiStream;
+
 use anyhow::{Context, Result};
 use std::sync::Arc;
 use tokio::time::timeout;
+use tokio_util::compat::Compat;
 use tracing::{debug, info, warn};
 
 /// Handles the connection to the QUIC server, authenticates and keeps it alive.
 /// Called directly by run_quic_client.
 ///
-/// Returns when the connection ends: `Ok` if the server ended the tunnel normally, otherwise an
-/// error describing why it ended.
+/// When `config.shutdown` drains, the keepalive sends DRAIN, so the server stops listening for
+/// new connections, the running forwarded connections may finish within the shutdown timeout,
+/// and then the connection is closed.
+///
+/// Returns when the connection ends: `Ok` if the server ended the tunnel normally or the client
+/// shut down, otherwise an error describing why it ended.
 #[cfg_attr(not(coverage), tracing::instrument(skip(config, conn)))]
 pub async fn handle_quic_server_connection(
     config: Arc<ClientConfig<ClientAppData>>,
@@ -31,36 +38,24 @@ pub async fn handle_quic_server_connection(
 ) -> Result<()> {
     // We have just connected to the QUIC server.
     SERVER_CONNECTIONS_OPENED_TOTAL.inc();
+    let shutdown = config.shutdown.clone();
 
-    // We need to prove we know the PSK to authenticate.
-    let mut auth_stream = handle_quic_auth_client_side(Arc::clone(&config), conn.clone())
-        .await
-        .context("failed to authenticate against PR QUIC server")?;
-
-    // Ask the server to accept external TCP connections on our behalf.
-    let requested_port = config.app_data.remote_listen_port;
-    let welcome = timeout(
-        PortRedirectProtocol::CONFIGURATION_TIMEOUT,
-        request_listen_port(
-            &mut auth_stream,
-            &Greeting::new(CLIENT_SOFTWARE, requested_port),
-        ),
-    )
-    .await
-    .context("timed out waiting for the server to confirm the listen port")?
-    .with_context(|| format!("server did not listen on TCP port {}", requested_port))?;
-    info!(
-        "Tunnel established, server ({:?}) listens on TCP port {}",
-        welcome.software(),
-        welcome.listen_port
-    );
+    // Set up the tunnel, unless the client shuts down meanwhile.
+    let control_stream = tokio::select! {
+        control_stream = set_up_tunnel(&config, &conn) => control_stream?,
+        () = shutdown.draining() => {
+            CloseCode::Ok.close(&conn, "client shutting down");
+            return Ok(());
+        }
+    };
 
     // Start the keepalive loop to maintain the QUIC connection.
     // This loop periodically sends a PING and expects a PONG response.
     // If the keepalive fails, close the connection, which ends this handler.
     let keepalive_conn = conn.clone();
+    let keepalive_shutdown = shutdown.clone();
     tokio::spawn(async move {
-        let Err(e) = run_keepalive_client_loop(auth_stream).await;
+        let Err(e) = run_keepalive_client_loop(control_stream, keepalive_shutdown).await;
         if keepalive_conn.close_reason().is_some() {
             return;
         }
@@ -74,11 +69,25 @@ pub async fn handle_quic_server_connection(
         }
     });
 
-    // Accept bidirectional QUIC streams for new forwarded connections, until the connection ends.
+    // Accept bidirectional QUIC streams for new forwarded connections, until the connection ends
+    // or the client finished shutting down. While draining, streams still arrive for
+    // connections the server accepted before it received DRAIN.
+    let finished = async {
+        shutdown.draining().await;
+        info!("Shutting down");
+        shutdown.finish_connections().await;
+    };
+    tokio::pin!(finished);
     let end = loop {
-        let (send, recv) = match conn.accept_bi().await {
-            Ok(stream) => stream,
-            Err(e) => break e,
+        let (send, recv) = tokio::select! {
+            accepted = conn.accept_bi() => match accepted {
+                Ok(stream) => stream,
+                Err(e) => break e,
+            },
+            () = &mut finished => {
+                CloseCode::Ok.close(&conn, "client shutting down");
+                return Ok(());
+            }
         };
         CONNECTIONS_ACCEPTED.inc();
 
@@ -88,8 +97,9 @@ pub async fn handle_quic_server_connection(
             stream_id
         );
 
+        // Draining the shutdown waits for the connection.
         let config = Arc::clone(&config);
-        tokio::spawn(async move {
+        shutdown.spawn(async move {
             if let Err(e) = forward_tcp_to_quic_stream(config, send, recv).await {
                 TCP_FORWARDING_ERRORS.inc();
                 info!(
@@ -106,4 +116,35 @@ pub async fn handle_quic_server_connection(
         return Ok(());
     }
     Err(anyhow::Error::new(end).context("connection to the server ended"))
+}
+
+/// Authenticates and asks the server to accept external TCP connections on the client's behalf.
+/// Returns the control stream.
+async fn set_up_tunnel(
+    config: &Arc<ClientConfig<ClientAppData>>,
+    conn: &quinn::Connection,
+) -> Result<BiStream<Compat<quinn::RecvStream>, Compat<quinn::SendStream>>> {
+    // We need to prove we know the PSK to authenticate.
+    let mut control_stream = handle_quic_auth_client_side(Arc::clone(config), conn.clone())
+        .await
+        .context("failed to authenticate against PR QUIC server")?;
+
+    // Ask the server to accept external TCP connections on our behalf.
+    let requested_port = config.app_data.remote_listen_port;
+    let welcome = timeout(
+        PortRedirectProtocol::CONFIGURATION_TIMEOUT,
+        request_listen_port(
+            &mut control_stream,
+            &Greeting::new(CLIENT_SOFTWARE, requested_port),
+        ),
+    )
+    .await
+    .context("timed out waiting for the server to confirm the listen port")?
+    .with_context(|| format!("server did not listen on TCP port {}", requested_port))?;
+    let (software, port) = (welcome.software(), welcome.listen_port);
+    info!(
+        "Tunnel established, server ({:?}) listens on TCP port {}",
+        software, port
+    );
+    Ok(control_stream)
 }

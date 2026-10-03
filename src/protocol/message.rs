@@ -131,6 +131,83 @@ where
     Ok(Some(Message::new(kind, payload)))
 }
 
+/// A stream of messages, e.g. the control stream once the tunnel is set up.
+///
+/// Reading is cancel safe: if a read is cancelled, e.g. in `tokio::select!` because a message
+/// has to be sent first, the bytes read so far are kept for the next read.
+pub struct MessageStream<S> {
+    stream: S,
+    /// Bytes of incomplete messages.
+    buffer: Vec<u8>,
+}
+
+impl<S> MessageStream<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    pub fn new(stream: S) -> Self {
+        Self {
+            stream,
+            buffer: Vec::new(),
+        }
+    }
+
+    /// Reads the next message, or returns `None` if the stream ended before it, see
+    /// [`read_message`]. Cancel safe.
+    pub async fn read(&mut self) -> Result<Option<Message>> {
+        loop {
+            if let Some(message) = self.take_message()? {
+                return Ok(Some(message));
+            }
+            let mut chunk = [0u8; 256];
+            // Cancel safe: if cancelled, nothing was read.
+            let n = self.stream.read(&mut chunk).await?;
+            if n == 0 {
+                if self.buffer.is_empty() {
+                    return Ok(None);
+                }
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "the stream ended within a message",
+                )
+                .into());
+            }
+            self.buffer.extend_from_slice(&chunk[..n]);
+        }
+    }
+
+    /// Sends `message`, see [`write_message`].
+    pub async fn write(&mut self, message: &Message) -> Result<()> {
+        write_message(&mut self.stream, message).await
+    }
+
+    /// Removes the first message from the buffer and returns it, if it is complete.
+    fn take_message(&mut self) -> Result<Option<Message>> {
+        let Some(&kind) = self.buffer.first() else {
+            return Ok(None);
+        };
+        let Some(kind) = MessageType::from_byte(kind) else {
+            bail!(ProtocolViolation(format!("unknown message type {}", kind)));
+        };
+        let Some(&[high, low]) = self.buffer.get(1..3) else {
+            return Ok(None);
+        };
+        let length = usize::from(u16::from_be_bytes([high, low]));
+        if length > MAX_PAYLOAD_LENGTH {
+            bail!(ProtocolViolation(format!(
+                "{:?} message of {} bytes, at most {} are allowed",
+                kind, length, MAX_PAYLOAD_LENGTH
+            )));
+        }
+        let Some(payload) = self.buffer.get(3..3 + length) else {
+            return Ok(None);
+        };
+        let message = Message::new(kind, payload.to_vec());
+        self.buffer.drain(..3 + length);
+        Ok(Some(message))
+    }
+}
+
 /// IDs of the parameters, see docs/PROTOCOL.md.
 pub mod param {
     /// The sender's software and version, e.g. `portredirect_client 1.0.0`. Only for logs.
@@ -294,6 +371,7 @@ fn invalid(id: u16, expected: &str) -> ProtocolViolation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
     use tokio::io::duplex;
 
     fn addr(s: &str) -> SocketAddr {
@@ -306,12 +384,19 @@ mod tests {
         read_message(&mut receiver).await.unwrap().unwrap()
     }
 
-    /// Returns the error of reading `bytes` as a message.
-    async fn read_error(bytes: &[u8]) -> anyhow::Error {
+    /// Returns the errors of reading `bytes` as a message, with [`read_message`] and with a
+    /// [`MessageStream`].
+    async fn read_errors(bytes: &[u8]) -> [anyhow::Error; 2] {
         let (mut sender, mut receiver) = duplex(4096);
         sender.write_all(bytes).await.unwrap();
         drop(sender);
-        read_message(&mut receiver).await.unwrap_err()
+        let read_message_error = read_message(&mut receiver).await.unwrap_err();
+
+        let (mut sender, receiver) = duplex(4096);
+        sender.write_all(bytes).await.unwrap();
+        drop(sender);
+        let stream_error = MessageStream::new(receiver).read().await.unwrap_err();
+        [read_message_error, stream_error]
     }
 
     #[tokio::test]
@@ -360,9 +445,10 @@ mod tests {
             (&[6, 0, 0], "unknown message type 6"),
             (&[1, 0x04, 0x01], "Hello message of 1025 bytes"),
         ] {
-            let err = read_error(bytes).await;
-            assert!(err.is::<ProtocolViolation>(), "{:?}: {:#}", bytes, err);
-            assert!(err.to_string().contains(expected), "{:?}: {:#}", bytes, err);
+            for err in read_errors(bytes).await {
+                assert!(err.is::<ProtocolViolation>(), "{:?}: {:#}", bytes, err);
+                assert!(err.to_string().contains(expected), "{:?}: {:#}", bytes, err);
+            }
         }
     }
 
@@ -370,9 +456,81 @@ mod tests {
     async fn test_truncated_messages_are_stream_errors() {
         // The stream ended in the middle of a message, e.g. because the connection was lost.
         for bytes in [&[3u8][..], &[3, 0], &[1, 0, 2, 0xaa]] {
-            let err = read_error(bytes).await;
-            assert!(!err.is::<ProtocolViolation>(), "{:?}: {:#}", bytes, err);
+            for err in read_errors(bytes).await {
+                assert!(!err.is::<ProtocolViolation>(), "{:?}: {:#}", bytes, err);
+                let io_error = err.downcast_ref::<std::io::Error>();
+                assert_eq!(
+                    io_error.map(std::io::Error::kind),
+                    Some(std::io::ErrorKind::UnexpectedEof),
+                    "{:?}: {:#}",
+                    bytes,
+                    err
+                );
+            }
         }
+    }
+
+    #[tokio::test]
+    async fn test_message_stream_reads_messages_split_and_joined() {
+        let messages = [
+            Message::empty(MessageType::Ping),
+            Message::new(MessageType::Hello, vec![1, 2, 3]),
+            Message::new(MessageType::Drain, vec![0; MAX_PAYLOAD_LENGTH]),
+            Message::empty(MessageType::Pong),
+        ];
+        let bytes: Vec<u8> = messages
+            .iter()
+            .flat_map(|message| message.encode().unwrap())
+            .collect();
+        // Byte by byte, and all at once.
+        for chunk_size in [1, bytes.len()] {
+            let (mut sender, receiver) = duplex(4096);
+            let mut stream = MessageStream::new(receiver);
+            let writer = tokio::spawn({
+                let bytes = bytes.clone();
+                async move {
+                    for chunk in bytes.chunks(chunk_size) {
+                        sender.write_all(chunk).await.unwrap();
+                        tokio::task::yield_now().await;
+                    }
+                }
+            });
+            for message in &messages {
+                assert_eq!(stream.read().await.unwrap().as_ref(), Some(message));
+            }
+            writer.await.unwrap();
+            assert_eq!(stream.read().await.unwrap(), None);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_message_stream_reads_are_cancel_safe() {
+        let (mut sender, receiver) = duplex(64);
+        let mut stream = MessageStream::new(receiver);
+        let hello = Message::new(MessageType::Hello, vec![0xaa, 0xbb])
+            .encode()
+            .unwrap();
+
+        // A read gets part of the message, and is cancelled while waiting for the rest.
+        sender.write_all(&hello[..4]).await.unwrap();
+        let cancelled = tokio::time::timeout(Duration::from_secs(1), stream.read()).await;
+        assert!(cancelled.is_err(), "{:?}", cancelled);
+
+        sender.write_all(&hello[4..]).await.unwrap();
+        let message = stream.read().await.unwrap().unwrap();
+        assert_eq!(message, Message::new(MessageType::Hello, vec![0xaa, 0xbb]));
+    }
+
+    #[tokio::test]
+    async fn test_message_stream_writes_messages() {
+        let (sender, mut receiver) = duplex(64);
+        let mut stream = MessageStream::new(sender);
+        stream
+            .write(&Message::empty(MessageType::Drain))
+            .await
+            .unwrap();
+        let message = read_message(&mut receiver).await.unwrap();
+        assert_eq!(message, Some(Message::empty(MessageType::Drain)));
     }
 
     #[test]

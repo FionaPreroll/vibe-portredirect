@@ -16,7 +16,8 @@ How client and server talk to each other is described in [docs/PROTOCOL.md](docs
 | `src/config.rs`        | Configuration files: reading them, their precedence and values, shared by both binaries.                     |
 | `src/psk.rs`           | Command-line options for the pre-shared key and loading it, shared by both binaries.                         |
 | `src/private_files.rs` | Creates and checks files and directories holding secrets.                                                    |
-| `src/lib.rs`           | Protocol constants, logging setup and signal handling, shared by both binaries.                              |
+| `src/shutdown.rs`      | Graceful shutdown on signals: draining, waiting for running forwarded connections, shared by both binaries. |
+| `src/lib.rs`           | Protocol constants and logging setup, shared by both binaries.                                               |
 | `tests/*.rs`           | Integration tests, `tunnel_end_to_end.rs` runs complete tunnels in-process, including the limits and reconnecting. |
 | `tests/*.bats`         | End-to-end tests and benchmarks of the release binaries with external tools.                                 |
 | `utils/`               | Benchmark, plotting and documentation tools.                                                                 |

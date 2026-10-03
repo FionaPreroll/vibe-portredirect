@@ -18,13 +18,12 @@ use portredirect::protocol::control::{receive_hello, send_welcome, SERVER_SOFTWA
 use portredirect::protocol::control::{request_listen_port, Greeting, CLIENT_SOFTWARE};
 use portredirect::protocol::message::{read_message, write_message, Message, MessageType};
 use portredirect::quic::client::{run_quic_client, ClientConfig, QuicClient};
-use portredirect::quic::server::{
-    load_or_generate_quic_cert, run_quic_server, run_quic_server_until, ServerConfig,
-};
+use portredirect::quic::server::{load_or_generate_quic_cert, run_quic_server, ServerConfig};
 use portredirect::server::auth::authenticate_quic_client;
 use portredirect::server::client_handler::handle_quic_client_connection;
 use portredirect::server::clients::{ClientEntry, ClientList};
 use portredirect::server::{ForwardingLimits, PortSpec};
+use portredirect::shutdown::Shutdown;
 use portredirect::PortRedirectProtocol;
 use secrecy::SecretString;
 use std::future::Future;
@@ -211,13 +210,13 @@ where
     })
 }
 
-/// Starts a server that shuts down when `shutdown` receives a value or is dropped.
+/// Starts a server that shuts down when `shutdown` asks it to.
 /// Retries for a while if the port is still in use, e.g. by a previous server.
 fn start_server_until(
     config_dir: &Path,
     quic_port: u16,
     allowed_ports: Vec<PortSpec>,
-    shutdown: oneshot::Receiver<()>,
+    shutdown: Shutdown,
 ) -> JoinHandle<Result<()>> {
     let config_dir = config_dir.to_path_buf();
     tokio::spawn(async move {
@@ -227,37 +226,32 @@ fn start_server_until(
             anyhow::ensure!(Instant::now() < deadline, "QUIC port stays in use");
             sleep(Duration::from_millis(50)).await;
         }
-        let config = server_config(
+        let mut config = server_config(
             &config_dir,
             quic_port,
             allowed_ports,
             ForwardingLimits::default(),
         );
-        run_quic_server_until(config, handle_quic_client_connection, async move {
-            let _ = shutdown.await;
-        })
-        .await
+        config.shutdown = shutdown;
+        run_quic_server(config, handle_quic_client_connection).await
     })
 }
 
 /// A client running `run_client` in the background, like `portredirect_client`.
 struct TestClient {
     task: JoinHandle<Result<()>>,
-    shutdown: oneshot::Sender<()>,
+    shutdown: Shutdown,
 }
 
 impl TestClient {
-    /// Waits until the client stops by itself, i.e. after a permanent error.
+    /// Waits until the client stops by itself, i.e. after a permanent error, or after a shutdown.
     async fn result(self) -> Result<()> {
-        let TestClient { task, shutdown } = self;
-        let result = task.await?;
-        drop(shutdown);
-        result
+        self.task.await?
     }
 
     /// Shuts the client down, like a SIGTERM does.
     async fn stop(self) -> Result<()> {
-        let _ = self.shutdown.send(());
+        self.shutdown.drain();
         self.task.await?
     }
 }
@@ -279,6 +273,7 @@ fn client_settings(
         max_connections: PortRedirectProtocol::DEFAULT_MAX_FORWARDED_CONNECTIONS,
         metrics_addr: None,
         reconnect_backoff: Backoff::new(Duration::from_millis(100), Duration::from_secs(1)),
+        shutdown: Shutdown::default(),
     }
 }
 
@@ -315,10 +310,8 @@ fn start_named_client(
 
 /// Runs a client with `settings` in the background.
 fn spawn_client(settings: ClientSettings) -> TestClient {
-    let (shutdown, shutdown_rx) = oneshot::channel();
-    let task = tokio::spawn(run_client(settings, async move {
-        let _ = shutdown_rx.await;
-    }));
+    let shutdown = settings.shutdown.clone();
+    let task = tokio::spawn(run_client(settings));
     TestClient { task, shutdown }
 }
 
@@ -876,12 +869,12 @@ async fn client_reconnects_after_server_restart() -> Result<()> {
     let echo_addr = start_echo_server().await;
     let allowed_ports = vec![PortSpec::Single(listen_port)];
 
-    let (stop_server, server_shutdown) = oneshot::channel();
+    let server_shutdown = Shutdown::default();
     let server = start_server_until(
         config_dir.path(),
         quic_port,
         allowed_ports.clone(),
-        server_shutdown,
+        server_shutdown.clone(),
     );
     let _client = start_client(
         config_dir.path(),
@@ -896,11 +889,14 @@ async fn client_reconnects_after_server_restart() -> Result<()> {
         assert_eq!(echo_roundtrip(stream, b"before".to_vec()).await?, b"before");
 
         // Stop the server, which closes the client's connection, and start it again.
-        let _ = stop_server.send(());
+        server_shutdown.drain();
         server.await??;
-        let (_keep_running, server_shutdown) = oneshot::channel();
-        let _server =
-            start_server_until(config_dir.path(), quic_port, allowed_ports, server_shutdown);
+        let _server = start_server_until(
+            config_dir.path(),
+            quic_port,
+            allowed_ports,
+            Shutdown::default(),
+        );
 
         // The client reconnects and the tunnel works again.
         let deadline = Instant::now() + Duration::from_secs(15);
@@ -972,6 +968,282 @@ async fn client_shuts_down_cleanly() -> Result<()> {
             anyhow::ensure!(Instant::now() < deadline, "port was not released");
             sleep(Duration::from_millis(100)).await;
         }
+        Ok(())
+    })
+    .await
+}
+
+/// Waits for `task` to end, for at most 10 seconds.
+async fn ended<T>(task: impl Future<Output = T>, what: &str) -> Result<T> {
+    timeout(Duration::from_secs(10), task)
+        .await
+        .map_err(|_| anyhow!("{} did not end", what))
+}
+
+#[tokio::test]
+async fn server_shutdown_lets_running_connections_finish() -> Result<()> {
+    let config_dir = setup();
+    let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
+    let echo_addr = start_echo_server().await;
+    let shutdown = Shutdown::new(Duration::from_secs(60));
+    let server = start_server_until(
+        config_dir.path(),
+        quic_port,
+        vec![PortSpec::Single(listen_port)],
+        shutdown.clone(),
+    );
+    let _client = start_client(
+        config_dir.path(),
+        quic_port,
+        TEST_PSK,
+        echo_addr,
+        listen_port,
+    );
+
+    with_timeout(async {
+        let mut running = connect_through_tunnel(listen_port).await?;
+        echo_once(&mut running, b"before").await?;
+
+        shutdown.drain();
+        // The server accepts no new connections: neither external ones nor clients.
+        wait_until_closed(listen_port).await?;
+        let result = connect_raw(config_dir.path(), quic_port).await;
+        assert!(refused(&result), "unexpected result: {:?}", result.err());
+
+        // The running connection goes on.
+        echo_once(&mut running, b"during").await?;
+        assert!(!server.is_finished());
+
+        // Once it ended, the server shuts down without waiting for the timeout.
+        drop(running);
+        ended(server, "server").await???;
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn server_shutdown_closes_running_connections_after_the_timeout_or_on_request() -> Result<()>
+{
+    let config_dir = setup();
+    let echo_addr = start_echo_server().await;
+
+    // After the timeout, or when asked to stop before.
+    for (shutdown_timeout, stop) in [
+        (Duration::from_millis(500), false),
+        (Duration::from_secs(60), true),
+    ] {
+        let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
+        let shutdown = Shutdown::new(shutdown_timeout);
+        let server = start_server_until(
+            config_dir.path(),
+            quic_port,
+            vec![PortSpec::Single(listen_port)],
+            shutdown.clone(),
+        );
+        let client = start_client(
+            config_dir.path(),
+            quic_port,
+            TEST_PSK,
+            echo_addr,
+            listen_port,
+        );
+
+        with_timeout(async {
+            let mut running = connect_through_tunnel(listen_port).await?;
+            echo_once(&mut running, b"before").await?;
+
+            let start = Instant::now();
+            shutdown.drain();
+            if stop {
+                sleep(Duration::from_millis(500)).await;
+                assert!(!server.is_finished());
+                shutdown.stop();
+            }
+            ended(server, "server").await???;
+            assert!(start.elapsed() >= Duration::from_millis(500));
+            // The tunnel ended, so the running connection is reset.
+            assert_eq!(
+                tcp_end(&mut running, Duration::from_secs(5)).await,
+                TcpEnd::Reset
+            );
+
+            // The client waits to connect again, and stops right away.
+            ended(client.stop(), "client").await??;
+            Ok(())
+        })
+        .await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn client_shutdown_lets_running_connections_finish() -> Result<()> {
+    let config_dir = setup();
+    let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
+    let echo_addr = start_echo_server().await;
+    let _server = start_server(
+        config_dir.path(),
+        quic_port,
+        vec![PortSpec::Single(listen_port)],
+    );
+    let mut settings = client_settings(
+        config_dir.path(),
+        quic_port,
+        TEST_PSK,
+        echo_addr,
+        listen_port,
+    );
+    settings.shutdown = Shutdown::new(Duration::from_secs(60));
+    let draining = spawn_client(settings);
+
+    with_timeout(async {
+        let mut running = connect_through_tunnel(listen_port).await?;
+        echo_once(&mut running, b"before").await?;
+
+        draining.shutdown.drain();
+        // The server released the port right away: e.g. a new instance of the client takes it,
+        // without replacing the draining one.
+        wait_until_closed(listen_port).await?;
+        let _new_instance = start_client(
+            config_dir.path(),
+            quic_port,
+            TEST_PSK,
+            echo_addr,
+            listen_port,
+        );
+        let stream = connect_through_tunnel(listen_port).await?;
+        assert_eq!(echo_roundtrip(stream, b"new".to_vec()).await?, b"new");
+
+        // The running connection goes on.
+        echo_once(&mut running, b"during").await?;
+        assert!(!draining.task.is_finished());
+
+        // Once it ended, the client shuts down without waiting for the timeout.
+        drop(running);
+        ended(draining.result(), "client").await??;
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn client_shutdown_closes_running_connections_after_the_timeout_or_on_request() -> Result<()>
+{
+    let config_dir = setup();
+    let echo_addr = start_echo_server().await;
+
+    // After the timeout, or when asked to stop before.
+    for (shutdown_timeout, stop) in [
+        (Duration::from_millis(500), false),
+        (Duration::from_secs(60), true),
+    ] {
+        let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
+        let _server = start_server(
+            config_dir.path(),
+            quic_port,
+            vec![PortSpec::Single(listen_port)],
+        );
+        let mut settings = client_settings(
+            config_dir.path(),
+            quic_port,
+            TEST_PSK,
+            echo_addr,
+            listen_port,
+        );
+        settings.shutdown = Shutdown::new(shutdown_timeout);
+        let client = spawn_client(settings);
+
+        with_timeout(async {
+            let mut running = connect_through_tunnel(listen_port).await?;
+            echo_once(&mut running, b"before").await?;
+
+            let start = Instant::now();
+            client.shutdown.drain();
+            if stop {
+                sleep(Duration::from_millis(500)).await;
+                assert!(!client.task.is_finished());
+                client.shutdown.stop();
+            }
+            ended(client.result(), "client").await??;
+            assert!(start.elapsed() >= Duration::from_millis(500));
+            // The client closed its connection, so the server resets the running one.
+            assert_eq!(
+                tcp_end(&mut running, Duration::from_secs(5)).await,
+                TcpEnd::Reset
+            );
+            Ok(())
+        })
+        .await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn client_shuts_down_while_connecting() -> Result<()> {
+    let config_dir = setup();
+    // Nothing answers the client's handshake.
+    let silent = std::net::UdpSocket::bind(localhost(0))?;
+    let client = start_client(
+        config_dir.path(),
+        silent.local_addr()?.port(),
+        TEST_PSK,
+        localhost(1),
+        free_tcp_port(),
+    );
+
+    with_timeout(async {
+        sleep(Duration::from_millis(500)).await;
+        assert!(!client.task.is_finished());
+        ended(client.stop(), "client").await??;
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn client_shuts_down_while_setting_up_the_tunnel() -> Result<()> {
+    let config_dir = setup();
+    let quic_port = free_udp_port();
+    // The server authenticates the client, but never confirms the port.
+    let (authenticated, authenticated_rx) = oneshot::channel::<()>();
+    let authenticated = Arc::new(std::sync::Mutex::new(Some(authenticated)));
+    let (closed, closed_rx) = oneshot::channel();
+    let closed = Arc::new(std::sync::Mutex::new(Some(closed)));
+    let config = server_config(
+        config_dir.path(),
+        quic_port,
+        vec![PortSpec::Single(free_tcp_port())],
+        ForwardingLimits::default(),
+    );
+    let _server = spawn_server_with_handler(config, move |config, connection| {
+        let (authenticated, closed) = (Arc::clone(&authenticated), Arc::clone(&closed));
+        async move {
+            let _control_stream = authenticate_quic_client(config, connection.clone()).await?;
+            if let Some(authenticated) = authenticated.lock().unwrap().take() {
+                let _ = authenticated.send(());
+            }
+            let reason = connection.closed().await;
+            if let Some(closed) = closed.lock().unwrap().take() {
+                let _ = closed.send(reason);
+            }
+            Ok(())
+        }
+    });
+    let client = start_client(
+        config_dir.path(),
+        quic_port,
+        TEST_PSK,
+        localhost(1),
+        free_tcp_port(),
+    );
+
+    with_timeout(async {
+        authenticated_rx.await?;
+        ended(client.stop(), "client").await??;
+        // The client closed the connection normally.
+        let reason = closed_rx.await?;
+        assert_eq!(CloseCode::of(&reason), Some(CloseCode::Ok), "{:?}", reason);
         Ok(())
     })
     .await

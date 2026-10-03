@@ -195,7 +195,8 @@ where
     );
 
     // 5. Run the control channel loop.
-    let end = run_control_channel_loop(control_stream, listener_token).await;
+    let end =
+        run_control_channel_loop(control_stream, listener_token, config.shutdown.clone()).await;
 
     // Close the QUIC connection after the control channel finishes.
     debug!("Closing QUIC client connection from {}: {:?}", remote, end);

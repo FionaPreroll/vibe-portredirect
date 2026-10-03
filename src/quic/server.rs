@@ -22,12 +22,13 @@ use crate::limits::QuicAdmission;
 use crate::private_files::{warn_if_accessible_by_others, write_private_file};
 use crate::protocol::close::CloseCode;
 use crate::quic::{configure_transport_config, ALPN_QUIC_PORTREDIRECT};
+use crate::shutdown::Shutdown;
 
 /// Minimum time between two warnings about the connection limit.
 const LIMIT_WARNING_INTERVAL: Duration = Duration::from_secs(60);
 
-/// Time to wait for clients to be notified when the server shuts down.
-const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+/// Time to wait for clients to be notified when the server closes all connections.
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Time a client has to complete the TLS handshake, see [`ServerConfig::handshake_timeout`].
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -59,6 +60,8 @@ pub struct ServerConfig<AppDataType> {
     pub connection_limit: Option<usize>,
     pub admission: QuicAdmission,
     pub handshake_timeout: Duration,
+    /// When to shut down, and the forwarded connections that may finish meanwhile.
+    pub shutdown: Shutdown,
     pub app_data: AppDataType,
 }
 
@@ -94,6 +97,7 @@ impl<AppDataType> ServerConfig<AppDataType> {
             connection_limit,
             admission: QuicAdmission::default(),
             handshake_timeout: HANDSHAKE_TIMEOUT,
+            shutdown: Shutdown::default(),
             app_data,
         }
     }
@@ -357,44 +361,23 @@ pub fn generate_quic_cert(
 
 /// Runs the QUIC server with the specified configuration and client handler.
 ///
-/// This function sets up and runs a QUIC server using the provided configuration and
-/// client connection handler. It handles incoming connections and spawns tasks to
-/// process them.
+/// The server accepts connections and runs `handle_incoming_client` for each in its own task,
+/// until `config.shutdown` drains. Then it accepts no new connections, and the handlers are
+/// expected to start no new forwarded connections, while running ones may finish within the
+/// shutdown timeout. Then, or when the shutdown stops, the server closes all connections, so
+/// clients notice right away.
 ///
 /// Prerequisite: A rustls CryptoProvider must be available before calling this function,
 /// call CryptoProvider::install_default() before this point.
 ///
-/// # Arguments
-///
-/// * `config` - The server configuration.
-/// * `handle_incoming_client` - A function to handle incoming client connections.
-///
-/// # Returns
-///
-/// TODO Returns a `Result` indicating the success or failure of the server operation.
+/// Fails if the certificate can't be loaded or generated, or the endpoint can't be bound.
+#[cfg_attr(
+    not(coverage),
+    tracing::instrument(skip(config, handle_incoming_client))
+)]
 pub async fn run_quic_server<F, Fut, AppDataType>(
     config: ServerConfig<AppDataType>,
     handle_incoming_client: F,
-) -> Result<()>
-where
-    F: Fn(Arc<ServerConfig<AppDataType>>, quinn::Connection) -> Fut + Send + Sync + 'static,
-    Fut: std::future::Future<Output = Result<(), Error>> + Send + 'static,
-    AppDataType: Send + Sync + 'static,
-{
-    run_quic_server_until(config, handle_incoming_client, std::future::pending()).await
-}
-
-/// Runs the QUIC server like [`run_quic_server`] until `shutdown` completes.
-///
-/// On shutdown, all connections are closed, so clients notice right away.
-#[cfg_attr(
-    not(coverage),
-    tracing::instrument(skip(config, handle_incoming_client, shutdown))
-)]
-pub async fn run_quic_server_until<F, Fut, AppDataType>(
-    config: ServerConfig<AppDataType>,
-    handle_incoming_client: F,
-    shutdown: impl std::future::Future<Output = ()>,
 ) -> Result<()>
 where
     F: Fn(Arc<ServerConfig<AppDataType>>, quinn::Connection) -> Fut + Send + Sync + 'static,
@@ -440,20 +423,15 @@ where
     let config = Arc::from(config);
     let handle_incoming_client = Arc::new(handle_incoming_client);
     let mut last_limit_warning: Option<Instant> = None;
+    let shutdown = config.shutdown.clone();
     info!("QUIC server is ready and accepting connections");
-    tokio::pin!(shutdown);
     loop {
         let incoming = tokio::select! {
             incoming = endpoint.accept() => match incoming {
                 Some(incoming) => incoming,
                 None => break,
             },
-            () = &mut shutdown => {
-                info!("Shutting down, closing all connections");
-                endpoint.close(CloseCode::Ok.code(), b"server shutting down");
-                let _ = tokio::time::timeout(SHUTDOWN_TIMEOUT, endpoint.wait_idle()).await;
-                break;
-            }
+            () = shutdown.draining() => break,
         };
         let remote = incoming.remote_address();
 
@@ -532,9 +510,28 @@ where
         }
     }
 
+    if shutdown.is_draining() {
+        info!("Shutting down, accepting no new connections");
+        // Clients that connect meanwhile notice right away, and try again later.
+        let refusing = tokio::spawn(refuse_connections(endpoint.clone()));
+        shutdown.finish_connections().await;
+        refusing.abort();
+        endpoint.close(CloseCode::Ok.code(), b"server shutting down");
+        let _ = tokio::time::timeout(CLOSE_TIMEOUT, endpoint.wait_idle()).await;
+    }
+
     info!("PR QUIC server terminated after {:?}.", start.elapsed());
 
     Ok(())
+}
+
+/// Refuses all new connections, e.g. while the server shuts down.
+async fn refuse_connections(endpoint: quinn::Endpoint) {
+    while let Some(incoming) = endpoint.accept().await {
+        let remote = incoming.remote_address();
+        debug!("Refusing connection from {}: shutting down", remote);
+        incoming.refuse();
+    }
 }
 
 #[cfg(test)]

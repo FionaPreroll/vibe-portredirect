@@ -1,21 +1,20 @@
 // PortRedirect Protocol Module - Keepalive on the control stream
 //
 // Once the tunnel is set up, the client sends PING and the server answers with PONG. Either side
-// may send DRAIN to announce that it starts no new forwarded connections. The message format is
-// described in protocol::message and docs/PROTOCOL.md.
+// sends DRAIN when it shuts down, to announce that it starts no new forwarded connections. The
+// message format is described in protocol::message and docs/PROTOCOL.md.
 //
 // License: GPL-3.0-only
 
 use crate::protocol::close::CloseCode;
-use crate::protocol::message::{
-    read_message, write_message, Message, MessageType, ProtocolViolation,
-};
+use crate::protocol::message::{Message, MessageStream, MessageType, ProtocolViolation};
+use crate::shutdown::Shutdown;
 use crate::PortRedirectProtocol;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use std::convert::Infallible;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::time::{interval, timeout, timeout_at, Duration, Instant};
+use tokio::time::{interval, sleep_until, timeout_at, Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -27,46 +26,65 @@ const KEEP_ALIVE_INTERVAL: Duration = PortRedirectProtocol::CONNECTION_KEEPALIVE
 /// Runs the keepalive loop on the client side.
 ///
 /// Every `KEEP_ALIVE_INTERVAL` the function sends a PING and then waits (up to `READ_TIMEOUT`)
-/// for the PONG. A DRAIN from the server is logged.
+/// for the PONG. When `shutdown` starts draining, it sends DRAIN, so the server stops listening
+/// for new connections. A DRAIN from the server is logged.
 /// It only returns when the keepalive fails: on a write error, an unexpected message, a closed
 /// stream or a timeout. The error describes the failure.
-pub async fn run_keepalive_client_loop<T>(mut control_stream: T) -> Result<Infallible>
+pub async fn run_keepalive_client_loop<T>(
+    control_stream: T,
+    shutdown: Shutdown,
+) -> Result<Infallible>
 where
     T: AsyncRead + AsyncWrite + Unpin,
 {
+    let mut stream = MessageStream::new(control_stream);
     let mut tick_interval = interval(KEEP_ALIVE_INTERVAL);
+    // When the PONG for the last PING is due, while waiting for it.
+    let mut pong_deadline: Option<Instant> = None;
+    let mut drain_sent = false;
     let mut pong_count = 0usize;
 
     loop {
-        // Wait for the next tick.
-        tick_interval.tick().await;
-
-        write_message(&mut control_stream, &Message::empty(MessageType::Ping))
-            .await
-            .context("failed to send PING")?;
-        debug!("Sent PING");
-
-        // Wait for the PONG, the server may send other messages before it.
-        let deadline = Instant::now() + READ_TIMEOUT;
-        loop {
-            let message = timeout_at(deadline, read_message(&mut control_stream))
-                .await
-                .map_err(|_| anyhow!("no PONG within {:?}", READ_TIMEOUT))?
-                .context("failed to read PONG")?;
-            match message.map(|message| message.kind) {
-                Some(MessageType::Pong) => break,
-                Some(MessageType::Drain) => {
-                    info!("The server starts no new forwarded connections, e.g. because it is shutting down");
-                }
-                Some(other) => bail!(ProtocolViolation(format!(
-                    "unexpected {:?} message instead of PONG",
-                    other
-                ))),
+        tokio::select! {
+            biased;
+            () = shutdown.draining(), if !drain_sent => {
+                stream
+                    .write(&Message::empty(MessageType::Drain))
+                    .await
+                    .context("failed to send DRAIN")?;
+                info!("Told the server to start no new forwarded connections");
+                drain_sent = true;
+            }
+            // Cancel safe, so sending a message doesn't lose one being read.
+            message = stream.read() => match message.context("failed to read PONG")? {
+                Some(message) => match message.kind {
+                    MessageType::Pong if pong_deadline.is_some() => {
+                        pong_deadline = None;
+                        pong_count += 1;
+                        debug!("Received PONG, count: {}", pong_count);
+                    }
+                    MessageType::Drain => {
+                        info!("The server starts no new forwarded connections, e.g. because it is shutting down");
+                    }
+                    other => bail!(ProtocolViolation(format!(
+                        "unexpected {:?} message on the control stream",
+                        other
+                    ))),
+                },
                 None => bail!("failed to read PONG: the control stream ended"),
+            },
+            () = sleep_until(pong_deadline.unwrap_or_else(Instant::now)), if pong_deadline.is_some() => {
+                bail!("no PONG within {:?}", READ_TIMEOUT);
+            }
+            _ = tick_interval.tick(), if pong_deadline.is_none() => {
+                stream
+                    .write(&Message::empty(MessageType::Ping))
+                    .await
+                    .context("failed to send PING")?;
+                debug!("Sent PING");
+                pong_deadline = Some(Instant::now() + READ_TIMEOUT);
             }
         }
-        pong_count += 1;
-        debug!("Received PONG, count: {}", pong_count);
     }
 }
 
@@ -96,22 +114,38 @@ impl ControlChannelEnd {
 /// Runs the control channel loop on the server side.
 ///
 /// The server waits for messages from the client and answers each PING with a PONG. On DRAIN, it
-/// cancels `listener_token`, which stops the TCP listener, and goes on. The loop ends on an
+/// cancels `listener_token`, which stops the TCP listener, and goes on. When `shutdown` starts
+/// draining, it sends DRAIN to the client and cancels `listener_token`, too. The loop ends on an
 /// unexpected message, a timeout or a closed stream, and then cancels `listener_token`, too.
 pub async fn run_control_channel_loop<T>(
-    mut control_stream: T,
+    control_stream: T,
     listener_token: CancellationToken,
+    shutdown: Shutdown,
 ) -> ControlChannelEnd
 where
     T: AsyncRead + AsyncWrite + Unpin,
 {
+    let mut stream = MessageStream::new(control_stream);
+    let mut deadline = Instant::now() + KEEP_ALIVE_INTERVAL + READ_TIMEOUT;
+    let mut drain_sent = false;
+
     let end = loop {
-        let message = match timeout(
-            KEEP_ALIVE_INTERVAL + READ_TIMEOUT,
-            read_message(&mut control_stream),
-        )
-        .await
-        {
+        let read = tokio::select! {
+            biased;
+            () = shutdown.draining(), if !drain_sent => {
+                drain_sent = true;
+                info!("Shutting down, stopping the TCP listener and telling the client");
+                listener_token.cancel();
+                if let Err(e) = stream.write(&Message::empty(MessageType::Drain)).await {
+                    debug!("Failed to send DRAIN: {:#}", e);
+                    break ControlChannelEnd::StreamClosed(Some(e));
+                }
+                continue;
+            }
+            // Cancel safe, so sending DRAIN doesn't lose a message being read.
+            read = timeout_at(deadline, stream.read()) => read,
+        };
+        let message = match read {
             Ok(Ok(Some(message))) => message,
             Ok(Ok(None)) => {
                 debug!("Control stream closed by the client");
@@ -130,12 +164,13 @@ where
                 break ControlChannelEnd::Timeout;
             }
         };
+        deadline = Instant::now() + KEEP_ALIVE_INTERVAL + READ_TIMEOUT;
 
         match message.kind {
             MessageType::Ping => {
                 debug!("Received PING, sending PONG");
                 let pong = Message::empty(MessageType::Pong);
-                if let Err(e) = write_message(&mut control_stream, &pong).await {
+                if let Err(e) = stream.write(&pong).await {
                     debug!("Failed to send PONG: {:#}", e);
                     break ControlChannelEnd::StreamClosed(Some(e));
                 }
@@ -223,7 +258,7 @@ mod tests {
 
     /// Runs the client loop and returns its error message.
     async fn client_error<T: AsyncRead + AsyncWrite + Unpin>(stream: T) -> String {
-        let Err(e) = run_keepalive_client_loop(stream).await;
+        let Err(e) = run_keepalive_client_loop(stream, Shutdown::default()).await;
         format!("{:#}", e)
     }
 
@@ -246,7 +281,7 @@ mod tests {
         let mock = Builder::new().write(PING).read(&[2, 0, 0]).build();
         let error = client_error(mock).await;
         assert!(
-            error.contains("unexpected Welcome message instead of PONG"),
+            error.contains("unexpected Welcome message on the control stream"),
             "{}",
             error
         );
@@ -287,6 +322,65 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn test_client_stops_on_pong_without_ping() {
+        let mock = Builder::new().write(PING).read(PONG).read(PONG).build();
+        let error = client_error(mock).await;
+        assert!(
+            error.contains("unexpected Pong message on the control stream"),
+            "{}",
+            error
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_client_sends_drain_when_shutting_down() {
+        let (mut server_side, client_side) = duplex(64);
+        let shutdown = Shutdown::default();
+        let client = tokio::spawn(run_keepalive_client_loop(client_side, shutdown.clone()));
+
+        let mut message = [0u8; 3];
+        server_side.read_exact(&mut message).await.unwrap();
+        assert_eq!(message, PING);
+        // Also while the client waits for the PONG.
+        shutdown.drain();
+        server_side.read_exact(&mut message).await.unwrap();
+        assert_eq!(message, DRAIN);
+
+        // The client keeps the connection alive for the running connections.
+        server_side.write_all(PONG).await.unwrap();
+        server_side.read_exact(&mut message).await.unwrap();
+        assert_eq!(message, PING);
+        server_side.write_all(PONG).await.unwrap();
+        // DRAIN only once.
+        server_side.read_exact(&mut message).await.unwrap();
+        assert_eq!(message, PING);
+        assert!(!client.is_finished());
+
+        drop(server_side);
+        let Err(e) = client.await.unwrap();
+        assert!(
+            format!("{:#}", e).contains("failed to read PONG"),
+            "{:#}",
+            e
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_client_stops_when_drain_fails() {
+        let shutdown = Shutdown::default();
+        shutdown.drain();
+        let mock = Builder::new()
+            .write_error(io::Error::other("connection lost"))
+            .build();
+        let Err(e) = run_keepalive_client_loop(mock, shutdown).await;
+        assert!(
+            format!("{:#}", e).contains("failed to send DRAIN"),
+            "{:#}",
+            e
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn test_client_stops_when_connection_closes() {
         // After the PING, the read returns EOF.
         let mock = Builder::new().write(PING).build();
@@ -321,7 +415,7 @@ mod tests {
             .build();
         let listener_token = CancellationToken::new();
 
-        let end = run_control_channel_loop(mock, listener_token.clone()).await;
+        let end = run_control_channel_loop(mock, listener_token.clone(), Shutdown::default()).await;
 
         assert!(
             matches!(end, ControlChannelEnd::StreamClosed(None)),
@@ -339,6 +433,7 @@ mod tests {
         let server = tokio::spawn(run_control_channel_loop(
             server_side,
             listener_token.clone(),
+            Shutdown::default(),
         ));
 
         client_side.write_all(DRAIN).await.unwrap();
@@ -357,11 +452,57 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn test_server_sends_drain_when_shutting_down() {
+        let (mut client_side, server_side) = duplex(64);
+        let listener_token = CancellationToken::new();
+        let shutdown = Shutdown::default();
+        let server = tokio::spawn(run_control_channel_loop(
+            server_side,
+            listener_token.clone(),
+            shutdown.clone(),
+        ));
+
+        // The server drains while it reads a PING, which doesn't get lost.
+        client_side.write_all(&PING[..1]).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        shutdown.drain();
+        let mut message = [0u8; 3];
+        client_side.read_exact(&mut message).await.unwrap();
+        assert_eq!(message, DRAIN);
+        assert!(listener_token.is_cancelled());
+
+        // The tunnel stays up for the running connections.
+        client_side.write_all(&PING[1..]).await.unwrap();
+        client_side.read_exact(&mut message).await.unwrap();
+        assert_eq!(message, PONG);
+        assert!(!server.is_finished());
+
+        drop(client_side);
+        let end = server.await.unwrap();
+        assert_eq!(end.close_code(), CloseCode::Ok);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_server_stops_when_drain_fails() {
+        let shutdown = Shutdown::default();
+        shutdown.drain();
+        let mock = Builder::new()
+            .write_error(io::Error::other("connection lost"))
+            .build();
+        let end = run_control_channel_loop(mock, CancellationToken::new(), shutdown).await;
+        assert!(
+            matches!(&end, ControlChannelEnd::StreamClosed(Some(_))),
+            "{:?}",
+            end
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn test_server_stops_on_unexpected_message() {
         let mock = Builder::new().read(&[1, 0, 0]).build();
         let listener_token = CancellationToken::new();
 
-        let end = run_control_channel_loop(mock, listener_token.clone()).await;
+        let end = run_control_channel_loop(mock, listener_token.clone(), Shutdown::default()).await;
 
         assert!(
             matches!(&end, ControlChannelEnd::ProtocolViolation(m) if m.contains("unexpected Hello")),
@@ -377,7 +518,8 @@ mod tests {
         // Unknown type, and a message longer than allowed.
         for bytes in [&b"P"[..], &[3, 0xff, 0xff]] {
             let mock = Builder::new().read(bytes).build();
-            let end = run_control_channel_loop(mock, CancellationToken::new()).await;
+            let end =
+                run_control_channel_loop(mock, CancellationToken::new(), Shutdown::default()).await;
             assert!(
                 matches!(&end, ControlChannelEnd::ProtocolViolation(_)),
                 "{:?}: {:?}",
@@ -393,7 +535,8 @@ mod tests {
             .read(&[3, 0, 2, 0xaa, 0xbb])
             .write(PONG)
             .build();
-        let end = run_control_channel_loop(mock, CancellationToken::new()).await;
+        let end =
+            run_control_channel_loop(mock, CancellationToken::new(), Shutdown::default()).await;
         assert!(
             matches!(end, ControlChannelEnd::StreamClosed(None)),
             "{:?}",
@@ -409,7 +552,8 @@ mod tests {
             .write(PONG)
             .build();
 
-        let end = run_control_channel_loop(mock, CancellationToken::new()).await;
+        let end =
+            run_control_channel_loop(mock, CancellationToken::new(), Shutdown::default()).await;
 
         assert!(
             matches!(end, ControlChannelEnd::StreamClosed(None)),
@@ -424,6 +568,7 @@ mod tests {
         let server = tokio::spawn(run_control_channel_loop(
             server_side,
             CancellationToken::new(),
+            Shutdown::default(),
         ));
 
         client_side.write_all(&PING.repeat(2)).await.unwrap();
@@ -444,7 +589,8 @@ mod tests {
     async fn test_server_stops_on_truncated_message() {
         let mock = Builder::new().read(&PING[..2]).build();
 
-        let end = run_control_channel_loop(mock, CancellationToken::new()).await;
+        let end =
+            run_control_channel_loop(mock, CancellationToken::new(), Shutdown::default()).await;
 
         assert!(
             matches!(&end, ControlChannelEnd::StreamClosed(Some(_))),
@@ -461,7 +607,8 @@ mod tests {
             .write_error(io::Error::other("connection lost"))
             .build();
 
-        let end = run_control_channel_loop(mock, CancellationToken::new()).await;
+        let end =
+            run_control_channel_loop(mock, CancellationToken::new(), Shutdown::default()).await;
 
         assert!(
             matches!(&end, ControlChannelEnd::StreamClosed(Some(_))),
@@ -475,7 +622,8 @@ mod tests {
         let listener_token = CancellationToken::new();
         let start = tokio::time::Instant::now();
 
-        let end = run_control_channel_loop(NeverRead, listener_token.clone()).await;
+        let end =
+            run_control_channel_loop(NeverRead, listener_token.clone(), Shutdown::default()).await;
 
         assert!(matches!(end, ControlChannelEnd::Timeout), "{:?}", end);
         assert_eq!(end.close_code(), CloseCode::KeepaliveFailed);
@@ -492,11 +640,15 @@ mod tests {
         let server = tokio::spawn(run_control_channel_loop(
             server_side,
             listener_token.clone(),
+            Shutdown::default(),
         ));
 
         // Run the client much longer than the server's PING timeout.
         let client_runtime = (KEEP_ALIVE_INTERVAL + READ_TIMEOUT) * 3;
-        let client = tokio::time::timeout(client_runtime, run_keepalive_client_loop(client_side));
+        let client = tokio::time::timeout(
+            client_runtime,
+            run_keepalive_client_loop(client_side, Shutdown::default()),
+        );
         assert!(client.await.is_err(), "client loop ended early");
         assert!(
             !listener_token.is_cancelled(),

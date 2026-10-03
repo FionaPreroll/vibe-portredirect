@@ -4,11 +4,12 @@
 
 use anyhow::{anyhow, Context, Result};
 use portredirect::app_data::ServerAppData;
-use portredirect::quic::server::{run_quic_server_until, ServerConfig};
+use portredirect::quic::server::{run_quic_server, ServerConfig};
 use portredirect::server::client_handler::handle_quic_client_connection;
 use portredirect::server::config::Config;
 use portredirect::server::metrics_printer::print_metrics_loop;
-use portredirect::{get_config_dir, init_logging, shutdown_signal};
+use portredirect::shutdown::Shutdown;
+use portredirect::{get_config_dir, init_logging};
 use std::net::{SocketAddr, ToSocketAddrs};
 use tracing::{info, span, Level};
 
@@ -50,13 +51,14 @@ async fn main() -> Result<()> {
         .with_forwarding_limits(config.forwarding_limits);
     info!("QUIC will listen on {}", quic_addr);
 
-    let quic_config = ServerConfig::create_default_config(
+    let mut quic_config = ServerConfig::create_default_config(
         config_dir,
         config.quic_cert_hostname,
         quic_addr,
         Some(config.max_quic_connections),
         app_data.clone(),
     );
+    quic_config.shutdown = Shutdown::on_signals(config.shutdown_timeout);
 
     // Spawn the metrics printer task.
     if config.print_metrics {
@@ -67,13 +69,9 @@ async fn main() -> Result<()> {
     }
 
     // Start QUIC server, until a shutdown signal arrives.
-    run_quic_server_until(
-        quic_config,
-        handle_quic_client_connection,
-        shutdown_signal(),
-    )
-    .await
-    .with_context(|| "PortRedirect Server Error")?;
+    run_quic_server(quic_config, handle_quic_client_connection)
+        .await
+        .with_context(|| "PortRedirect Server Error")?;
 
     info!("PortRedirect Server exited cleanly");
     Ok(())
