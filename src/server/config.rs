@@ -8,6 +8,7 @@ use clap::error::ErrorKind;
 use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser};
 use serde::Deserialize;
 use std::collections::BTreeSet;
+use std::net::SocketAddr;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -23,6 +24,9 @@ use crate::server::clients::{ClientEntry, ClientList};
 use crate::server::{ForwardingLimits, PortSpec};
 use crate::shutdown::DEFAULT_SHUTDOWN_TIMEOUT;
 use crate::PortRedirectProtocol;
+
+/// Default for --metrics-listen, next to the client's default, so both can run on one host.
+pub const DEFAULT_METRICS_LISTEN: &str = "127.0.0.1:9899";
 
 /// Default for --max-quic-connections.
 pub const DEFAULT_MAX_QUIC_CONNECTIONS: u32 = 64;
@@ -109,6 +113,15 @@ pub struct Args {
     #[clap(long)]
     pub print_metrics: bool,
 
+    /// Serve Prometheus metrics via HTTP at /metrics, see --metrics-listen.
+    #[clap(long)]
+    pub provide_metrics: bool,
+
+    /// Address and port for --provide-metrics. The endpoint has no authentication, only make it
+    /// reachable from trusted networks.
+    #[clap(long, default_value = DEFAULT_METRICS_LISTEN)]
+    pub metrics_listen: SocketAddr,
+
     /// Seconds that running forwarded connections may take to finish when shutting down on
     /// SIGINT or SIGTERM, 0 to close them right away. A second signal closes them right away.
     #[clap(long, default_value_t = DEFAULT_SHUTDOWN_TIMEOUT.as_secs())]
@@ -138,6 +151,8 @@ pub struct ConfigFile {
     pub max_connections_per_ip: Option<u32>,
     pub idle_timeout: Option<u64>,
     pub print_metrics: Option<bool>,
+    pub provide_metrics: Option<bool>,
+    pub metrics_listen: Option<SocketAddr>,
     pub shutdown_timeout: Option<u64>,
     #[serde(default, deserialize_with = "config::optional_parsed")]
     pub log_level: Option<LevelFilter>,
@@ -194,6 +209,8 @@ pub struct Config {
     pub max_quic_connections: usize,
     pub forwarding_limits: ForwardingLimits,
     pub print_metrics: bool,
+    /// Address to serve Prometheus metrics on, if any.
+    pub metrics_addr: Option<SocketAddr>,
     /// How long running forwarded connections may take to finish when shutting down.
     pub shutdown_timeout: Duration,
     pub log_level: LevelFilter,
@@ -330,6 +347,18 @@ impl Config {
             args.max_connections_per_ip,
             file.max_connections_per_ip,
         );
+        let provide_metrics = merge(
+            matches,
+            "provide_metrics",
+            args.provide_metrics,
+            file.provide_metrics,
+        );
+        let metrics_listen = merge(
+            matches,
+            "metrics_listen",
+            args.metrics_listen,
+            file.metrics_listen,
+        );
         let idle_timeout = merge(
             matches,
             "idle_timeout",
@@ -370,6 +399,7 @@ impl Config {
                 args.print_metrics,
                 file.print_metrics,
             ),
+            metrics_addr: provide_metrics.then_some(metrics_listen),
             shutdown_timeout: Duration::from_secs(merge(
                 matches,
                 "shutdown_timeout",
@@ -449,6 +479,8 @@ mod tests {
         max-connections-per-ip = 0
         idle-timeout = 0
         print-metrics = true
+        provide-metrics = true
+        metrics-listen = "127.0.0.1:9999"
         shutdown-timeout = 30
         log-level = "debug"
     "#;
@@ -481,6 +513,7 @@ mod tests {
         assert_eq!(config.max_quic_connections, 64);
         assert_eq!(config.forwarding_limits, ForwardingLimits::default());
         assert!(!config.print_metrics);
+        assert_eq!(config.metrics_addr, None);
         assert_eq!(config.shutdown_timeout, DEFAULT_SHUTDOWN_TIMEOUT);
         assert_eq!(config.log_level, LevelFilter::INFO);
         Ok(())
@@ -518,6 +551,7 @@ mod tests {
             }
         );
         assert!(config.print_metrics);
+        assert_eq!(config.metrics_addr, Some("127.0.0.1:9999".parse()?));
         assert_eq!(config.shutdown_timeout, Duration::from_secs(30));
         assert_eq!(config.log_level, LevelFilter::DEBUG);
         Ok(())
@@ -552,6 +586,8 @@ mod tests {
                 "50",
                 "--idle-timeout",
                 "60",
+                "--metrics-listen",
+                DEFAULT_METRICS_LISTEN,
                 "--shutdown-timeout",
                 "0",
                 "--log-level",
@@ -586,6 +622,8 @@ mod tests {
         );
         // A flag can only switch a setting on.
         assert!(config.print_metrics);
+        // Overrides the file, though it is the default.
+        assert_eq!(config.metrics_addr, Some(DEFAULT_METRICS_LISTEN.parse()?));
         assert_eq!(config.shutdown_timeout, Duration::ZERO);
         assert_eq!(config.log_level, LevelFilter::WARN);
 

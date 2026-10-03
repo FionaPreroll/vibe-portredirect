@@ -49,7 +49,7 @@ The wire protocol is described in [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
 - Protection of the forwarded data outside the tunnel: between the external TCP client and the server, and between the client and the destination, data is forwarded as is. Use an end-to-end protocol such as TLS (e.g. HTTPS) for sensitive data.
 - Access control for the forwarded port: everyone who can reach the server's TCP port reaches the destination service. The destination does not see the external client's address.
-- Access control for the client's metrics endpoint (`--provide-metrics`): it listens on `127.0.0.1:9898` by default; make it reachable from trusted networks only.
+- Access control for the metrics endpoints (`--provide-metrics`): they listen on `127.0.0.1` by default; make them reachable from trusted networks only. The server's metrics name its clients.
 
 ## Known Limitations
 

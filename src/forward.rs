@@ -19,7 +19,7 @@ use tokio::net::TcpStream;
 use tokio::time::Instant;
 use tracing::{debug, info};
 
-use crate::metrics_helper::MetricsCounter;
+use crate::metrics::MetricsCounter;
 use crate::protocol::data_stream::StreamErrorCode;
 
 /// How a forwarding ended.
@@ -47,7 +47,7 @@ pub enum ForwardEnd {
 ///
 /// ```no_run
 /// # use portredirect::forward::{forward_bidirectional, ForwardEnd};
-/// # use portredirect::metrics_helper::DummyCounter;
+/// # use portredirect::metrics::DummyCounter;
 /// # use tokio::io::{duplex, split};
 /// # #[tokio::main]
 /// # async fn main() {
@@ -342,7 +342,7 @@ impl<R: AsyncRead + Unpin, C: MetricsCounter> AsyncRead for Tracked<'_, R, C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metrics_helper::DummyCounter;
+    use crate::metrics::DummyCounter;
     use tokio::io::{duplex, split, DuplexStream};
 
     /// A reader that returns its data and then ends.

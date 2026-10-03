@@ -11,7 +11,7 @@ use portredirect::client::run_client::{run_client, ClientSettings};
 use portredirect::client::server_handler::handle_quic_server_connection;
 use portredirect::forward::forward_tcp_and_quic;
 use portredirect::limits::{BlockingPolicy, QuicAdmission};
-use portredirect::metrics_helper::DummyCounter;
+use portredirect::metrics::DummyCounter;
 use portredirect::protocol::auth::{client_authenticate, session_binding, ClientName};
 use portredirect::protocol::close::CloseCode;
 use portredirect::protocol::control::{receive_hello, send_welcome, SERVER_SOFTWARE};
@@ -22,6 +22,7 @@ use portredirect::quic::server::{load_or_generate_quic_cert, run_quic_server, Se
 use portredirect::server::auth::authenticate_quic_client;
 use portredirect::server::client_handler::handle_quic_client_connection;
 use portredirect::server::clients::{ClientEntry, ClientList};
+use portredirect::server::metrics::{ClientMetrics, METRICS};
 use portredirect::server::{ForwardingLimits, PortSpec};
 use portredirect::shutdown::Shutdown;
 use portredirect::PortRedirectProtocol;
@@ -1249,6 +1250,202 @@ async fn client_shuts_down_while_setting_up_the_tunnel() -> Result<()> {
     .await
 }
 
+/// Waits until `value` returns `expected`.
+async fn wait_for_metric(value: impl Fn() -> i64, expected: i64, what: &str) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while value() != expected {
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "{} is {}, not {}",
+            what,
+            value(),
+            expected
+        );
+        sleep(Duration::from_millis(20)).await;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn server_metrics_count_per_client() -> Result<()> {
+    let config_dir = setup();
+    let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
+    let echo_addr = start_echo_server().await;
+    // The metrics are shared by all tests, but these clients only appear here.
+    let mut config = server_config_with_clients(
+        config_dir.path(),
+        quic_port,
+        &[
+            ("metrics-a", &[TEST_PSK], listen_port),
+            ("metrics-b", &["metrics-b-psk-0123456789"], free_tcp_port()),
+        ],
+    );
+    config.app_data.forwarding_limits.max_connections_per_ip = 1;
+    let _server = spawn_server_with_handler(config, handle_quic_client_connection);
+    let client = start_named_client(
+        config_dir.path(),
+        quic_port,
+        "metrics-a",
+        TEST_PSK,
+        echo_addr,
+        listen_port,
+    );
+    let a: ClientMetrics = METRICS.client(&"metrics-a".parse().unwrap());
+    let b = METRICS.client(&"metrics-b".parse().unwrap());
+    let failures = METRICS.authentication_failures.get();
+
+    with_timeout(async {
+        let mut first = connect_through_tunnel(listen_port).await?;
+        echo_once(&mut first, b"hello").await?;
+        assert_eq!((a.tunnels.get(), a.tunnels_active.get()), (1, 1));
+        assert_eq!(a.forwarded_connections_active.get(), 1);
+
+        // A second connection from the same address is refused.
+        let mut second = TcpStream::connect(localhost(listen_port)).await?;
+        assert!(closed_by_peer(&mut second, Duration::from_secs(5)).await);
+        assert_eq!(a.forwarded_connections_refused.get(), 1);
+
+        drop(first);
+        wait_for_metric(
+            || a.forwarded_connections_active.get(),
+            0,
+            "running connections",
+        )
+        .await?;
+        assert_eq!(a.forwarded_connections.get(), 1);
+        assert_eq!(a.bytes_from_external.get(), 5);
+        assert_eq!(a.bytes_to_external.get(), 5);
+        assert_eq!(a.forwarded_connections_aborted.get(), 0);
+
+        // An external client that resets its connection aborts it.
+        let reset = TcpStream::connect(localhost(listen_port)).await?;
+        sleep(Duration::from_millis(200)).await;
+        reset.set_zero_linger()?;
+        drop(reset);
+        wait_for_metric(
+            || a.forwarded_connections_aborted.get() as i64,
+            1,
+            "aborted connections",
+        )
+        .await?;
+
+        // A wrong PSK counts as failed attempt, without a client name.
+        let result = connect_once(config_dir.path(), quic_port, "wrong-psk", listen_port).await;
+        assert!(result.is_err(), "{:?}", result);
+        assert!(METRICS.authentication_failures.get() > failures);
+
+        client.stop().await?;
+        wait_for_metric(|| a.tunnels_active.get(), 0, "active tunnels").await?;
+        assert_eq!((a.keepalive_failures.get(), a.accept_errors.get()), (0, 0));
+
+        // The other client's metrics are untouched.
+        assert_eq!((b.tunnels.get(), b.forwarded_connections.get()), (0, 0));
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn server_resets_connections_for_which_the_client_accepts_no_stream() -> Result<()> {
+    let config_dir = setup();
+    let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
+    let config = server_config_with_clients(
+        config_dir.path(),
+        quic_port,
+        &[("no-streams", &[TEST_PSK], listen_port)],
+    );
+    let _server = spawn_server_with_handler(config, handle_quic_client_connection);
+    let metrics = METRICS.client(&"no-streams".parse().unwrap());
+
+    with_timeout(async {
+        // A client that lets the server open a single data stream, and never takes it.
+        let client_config = ClientConfig::create_default_config(
+            config_dir.path().to_path_buf(),
+            localhost(0),
+            localhost(quic_port),
+            Some(CERT_HOSTNAME.into()),
+            Some(1),
+            ClientAppData::new(TEST_PSK.into(), localhost(1), 1),
+        );
+        let client = QuicClient::new(client_config)?;
+        let connection = client.connect().await?;
+        let mut control_stream =
+            authenticated_control_stream_as(&connection, "no-streams", TEST_PSK).await?;
+        request_port(&mut control_stream, listen_port).await?;
+
+        let _first = TcpStream::connect(localhost(listen_port)).await?;
+        let mut second = TcpStream::connect(localhost(listen_port)).await?;
+        // The server waits 10 seconds for a stream, then resets the external connection.
+        assert_eq!(
+            tcp_end(&mut second, Duration::from_secs(15)).await,
+            TcpEnd::Reset
+        );
+        assert_eq!(metrics.forwarded_connections_failed.get(), 1);
+        assert_eq!(metrics.forwarded_connections.get(), 2);
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn client_reconnects_when_the_server_ends_the_control_stream() -> Result<()> {
+    let config_dir = setup();
+    let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
+    let (closed_tx, mut closed_rx) = mpsc::unbounded_channel();
+    let config = server_config(
+        config_dir.path(),
+        quic_port,
+        vec![PortSpec::Single(listen_port)],
+        ForwardingLimits::default(),
+    );
+    // A server that sets up the tunnel, then ends the control stream but not the connection.
+    let _server = spawn_server_with_handler(config, move |config, connection| {
+        let closed_tx = closed_tx.clone();
+        async move {
+            let (mut control_stream, _client) =
+                authenticate_quic_client(config, connection.clone()).await?;
+            let hello = receive_hello(&mut control_stream).await?;
+            let welcome = Greeting::new(SERVER_SOFTWARE, hello.listen_port);
+            send_welcome(&mut control_stream, &welcome).await?;
+            drop(control_stream);
+            let _ = closed_tx.send(connection.closed().await);
+            Ok(())
+        }
+    });
+    let failures = portredirect::client::metrics::METRICS
+        .keepalive_failures
+        .get();
+    let _client = start_client(
+        config_dir.path(),
+        quic_port,
+        TEST_PSK,
+        localhost(1),
+        listen_port,
+    );
+
+    with_timeout(async {
+        // The client closes each connection as failed keepalive, and connects again.
+        for _ in 0..2 {
+            let reason = closed_rx
+                .recv()
+                .await
+                .ok_or_else(|| anyhow!("the server ended"))?;
+            assert_eq!(
+                CloseCode::of(&reason),
+                Some(CloseCode::KeepaliveFailed),
+                "{:?}",
+                reason
+            );
+        }
+        let keepalive_failures = portredirect::client::metrics::METRICS
+            .keepalive_failures
+            .get();
+        assert!(keepalive_failures >= failures + 2, "{}", keepalive_failures);
+        Ok(())
+    })
+    .await
+}
+
 #[tokio::test]
 async fn responses_after_the_end_of_the_request_are_forwarded() -> Result<()> {
     let config_dir = setup();
@@ -1393,8 +1590,11 @@ async fn destination_can_speak_first() -> Result<()> {
 async fn unreachable_destination_resets_the_external_connection() -> Result<()> {
     let config_dir = setup();
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
-    // Nothing listens on the destination port yet.
-    let destination = localhost(free_tcp_port());
+    // Nothing listens on the destination port yet. The socket is bound, so no other test can
+    // listen on the port meanwhile.
+    let destination_socket = tokio::net::TcpSocket::new_v4()?;
+    destination_socket.bind(localhost(0))?;
+    let destination = destination_socket.local_addr()?;
 
     let _server = start_server(
         config_dir.path(),
@@ -1419,7 +1619,7 @@ async fn unreachable_destination_resets_the_external_connection() -> Result<()> 
         );
 
         // Once the destination is up, the same tunnel forwards connections to it.
-        tokio::spawn(serve_echo(TcpListener::bind(destination).await?));
+        tokio::spawn(serve_echo(destination_socket.listen(16)?));
         let stream = connect_through_tunnel(listen_port).await?;
         assert_eq!(echo_roundtrip(stream, b"hello".to_vec()).await?, b"hello");
         Ok(())

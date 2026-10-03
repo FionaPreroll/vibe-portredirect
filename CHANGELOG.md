@@ -14,6 +14,7 @@ Versions 0.4.0 to 0.7.0 were not published on crates.io; the latest published ve
 
 - Both programs can read their settings from a TOML configuration file, `--config-file`. Its keys are the names of the options, and options on the command line or in the environment take precedence. It only names the files that hold PSKs, and relative paths in it are relative to the file. Unknown keys are errors, so typos don't go unnoticed. See the README.
 - Graceful shutdown: on `SIGINT` or `SIGTERM`, both programs start no new forwarded connections and send `DRAIN`, let running ones finish for up to `--shutdown-timeout` seconds (default 5), and then close the rest. A second signal closes them right away. A client that shuts down makes the server release its port right away, e.g. for a standby client, and a server that shuts down refuses new clients.
+- The server serves Prometheus metrics, too: `--provide-metrics` and `--metrics-listen`, on `127.0.0.1:9899` by default. Metrics of its clients have the label `client`. New metrics include failed authentication attempts, refused QUIC connections by reason, and gauges of the running tunnels and forwarded connections on both sides, e.g. the client's `portredirect_client_tunnel_up`. The README lists all metrics.
 - The server's configuration file can list several clients, each with its own name, one or two PSK files (two while changing the PSK) and ports. A client can only use its own ports. Clients may share ports on purpose, e.g. an active and a standby client; the server logs which clients share which ports when it starts.
 
 ### Changed
@@ -22,6 +23,9 @@ Versions 0.4.0 to 0.7.0 were not published on crates.io; the latest published ve
   - `--quic-psk`, `--quic-psk-file` and `PORTREDIRECT_QUIC_PSK` are now `--psk`, `--psk-file` and `PORTREDIRECT_PSK`: the PSK authenticates the client and isn't specific to QUIC.
   - The client's `--quic-remote-hostname-match` is now `--quic-cert-hostname`, like the server option whose value it must match.
   - The server's `--local-host` is now `--listen-host`, matching the client's `--remote-listen-port`, and `--quic-server-host` and `--quic-server-port` are now `--quic-listen-host` and `--quic-listen-port`.
+
+- Metric names are consistent before 1.0: they start with `portredirect_client_` or `portredirect_server_` and say what they count, e.g. `portredirect_client_bytes_to_destination_total` instead of `bytes_transmitted_b_total`. All metrics are listed from the start, with 0, and each program only serves its own. Update dashboards and alerts, see the README for the new names.
+- `--print-metrics` prints the server's metrics under their new names, each summed over all clients.
 
 ### Fixed
 

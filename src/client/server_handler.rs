@@ -11,10 +11,11 @@ use crate::quic::client::ClientConfig;
 use crate::PortRedirectProtocol;
 
 use super::auth::handle_quic_auth_client_side;
-use super::metrics_counters::*;
+use super::metrics::METRICS;
 use super::tcp_forwarder::forward_tcp_to_quic_stream;
 
 use crate::bi_stream::BiStream;
+use crate::metrics::Active;
 
 use anyhow::{Context, Result};
 use std::sync::Arc;
@@ -36,8 +37,6 @@ pub async fn handle_quic_server_connection(
     config: Arc<ClientConfig<ClientAppData>>,
     conn: quinn::Connection,
 ) -> Result<()> {
-    // We have just connected to the QUIC server.
-    SERVER_CONNECTIONS_OPENED_TOTAL.inc();
     let shutdown = config.shutdown.clone();
 
     // Set up the tunnel, unless the client shuts down meanwhile.
@@ -48,6 +47,8 @@ pub async fn handle_quic_server_connection(
             return Ok(());
         }
     };
+    METRICS.tunnels.inc();
+    let _tunnel_up = Active::new(&METRICS.tunnel_up);
 
     // Start the keepalive loop to maintain the QUIC connection.
     // This loop periodically sends a PING and expects a PONG response.
@@ -63,7 +64,7 @@ pub async fn handle_quic_server_connection(
             warn!("Invalid control message, closing the connection: {:#}", e);
             CloseCode::ProtocolViolation.close(&keepalive_conn, "unexpected control message");
         } else {
-            KEEPALIVE_ERRORS.inc();
+            METRICS.keepalive_failures.inc();
             warn!("Keepalive failed, closing the connection: {:#}", e);
             CloseCode::KeepaliveFailed.close(&keepalive_conn, "keepalive failed");
         }
@@ -89,7 +90,7 @@ pub async fn handle_quic_server_connection(
                 return Ok(());
             }
         };
-        CONNECTIONS_ACCEPTED.inc();
+        METRICS.forwarded_connections.inc();
 
         let stream_id = recv.id();
         debug!(
@@ -100,8 +101,9 @@ pub async fn handle_quic_server_connection(
         // Draining the shutdown waits for the connection.
         let config = Arc::clone(&config);
         shutdown.spawn(async move {
+            let _active = Active::new(&METRICS.forwarded_connections_active);
             if let Err(e) = forward_tcp_to_quic_stream(config, send, recv).await {
-                TCP_FORWARDING_ERRORS.inc();
+                METRICS.forwarded_connections_aborted.inc();
                 info!(
                     "Forwarded connection (stream {}) aborted: {:#}",
                     stream_id, e
@@ -112,7 +114,6 @@ pub async fn handle_quic_server_connection(
 
     debug!("Closed QUIC connection handler: {}", end);
     if CloseCode::of(&end) == Some(CloseCode::Ok) {
-        SERVER_CONNECTIONS_GRACEFULLY_CLOSED_TOTAL.inc();
         return Ok(());
     }
     Err(anyhow::Error::new(end).context("connection to the server ended"))

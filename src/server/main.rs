@@ -4,14 +4,15 @@
 
 use anyhow::{anyhow, Context, Result};
 use portredirect::app_data::ServerAppData;
+use portredirect::metrics::{print_metrics_loop, serve_metrics};
 use portredirect::quic::server::{run_quic_server, ServerConfig};
 use portredirect::server::client_handler::handle_quic_client_connection;
 use portredirect::server::config::Config;
-use portredirect::server::metrics_printer::print_metrics_loop;
+use portredirect::server::metrics::{METRICS, PREFIX};
 use portredirect::shutdown::Shutdown;
 use portredirect::{get_config_dir, init_logging};
 use std::net::{SocketAddr, ToSocketAddrs};
-use tracing::{info, span, Level};
+use tracing::{error, info, span, Level};
 
 /// Program entry point.
 #[tokio::main]
@@ -33,6 +34,10 @@ async fn main() -> Result<()> {
         info!("Configuration file: {:?}", config_file);
     }
     let clients = config.clients.load()?;
+    // List the clients' metrics before they connect.
+    for name in clients.names() {
+        METRICS.client(name);
+    }
 
     // Retrieve (or create) the configuration directory.
     let config_dir =
@@ -63,8 +68,12 @@ async fn main() -> Result<()> {
     // Spawn the metrics printer task.
     if config.print_metrics {
         info!("Starting metrics printer task");
-        tokio::spawn(async {
-            print_metrics_loop().await;
+        tokio::spawn(print_metrics_loop(METRICS.registry.clone(), PREFIX));
+    }
+    if let Some(metrics_addr) = config.metrics_addr {
+        tokio::spawn(async move {
+            let Err(e) = serve_metrics(METRICS.registry.clone(), metrics_addr).await;
+            error!("Metrics server failed: {:#}", e);
         });
     }
 

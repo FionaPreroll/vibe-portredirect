@@ -3,7 +3,7 @@
 //
 // License: GPL-3.0-only
 
-use super::metrics_counters::{BYTES_TRANSMITTED_A, BYTES_TRANSMITTED_B};
+use super::metrics::METRICS;
 
 use crate::app_data::ClientAppData;
 use crate::forward::{abort_quic_stream, forward_tcp_and_quic};
@@ -65,6 +65,7 @@ pub async fn forward_tcp_to_quic_stream(
     let tcp_stream = match connected {
         Ok(Ok(tcp_stream)) => tcp_stream,
         Ok(Err(e)) => {
+            METRICS.destination_connect_failures.inc();
             abort_quic_stream(&mut send, &mut recv, StreamErrorCode::ConnectFailed);
             return Err(anyhow!(
                 "failed to connect to destination {}: {}",
@@ -73,6 +74,7 @@ pub async fn forward_tcp_to_quic_stream(
             ));
         }
         Err(_) => {
+            METRICS.destination_connect_failures.inc();
             abort_quic_stream(&mut send, &mut recv, StreamErrorCode::ConnectFailed);
             return Err(anyhow!(
                 "connecting to destination {} timed out after {:?}",
@@ -94,9 +96,8 @@ pub async fn forward_tcp_to_quic_stream(
         send,
         recv,
         &stream_name,
-        // Force dereferencing here because the counter is a LazyStatic.
-        &*BYTES_TRANSMITTED_A,
-        &*BYTES_TRANSMITTED_B,
+        &METRICS.bytes_from_destination,
+        &METRICS.bytes_to_destination,
         // The server closes idle connections.
         None,
     )

@@ -2,15 +2,14 @@
 //
 // License: GPL-3.0-only
 
+use crate::metrics::Active;
 use crate::protocol::auth::ClientName;
 use crate::protocol::close::CloseCode;
 use crate::protocol::control::{receive_hello, send_welcome, Greeting, SERVER_SOFTWARE};
 use crate::protocol::keepalive::{run_control_channel_loop, ControlChannelEnd};
 use crate::quic::server::ServerConfig;
 use crate::quic::ProtocolVersion;
-use crate::server::metrics_counters::{
-    CLIENT_CONNECTIONS_CLOSED_TOTAL, CLIENT_CONNECTIONS_TOTAL, KEEPALIVE_ERRORS,
-};
+use crate::server::metrics::METRICS;
 use crate::server::port_registry::PortTaken;
 use crate::server::AllowedPorts;
 use crate::PortRedirectProtocol;
@@ -52,11 +51,11 @@ pub async fn handle_quic_client_connection(
         Ok(Ok(authenticated)) => {
             // Auth succeeded. Continue with the control stream.
             config.admission.record_success(remote.ip());
-            CLIENT_CONNECTIONS_TOTAL.inc();
             authenticated
         }
         Ok(Err(err)) => {
             config.admission.record_failure(remote.ip());
+            METRICS.authentication_failures.inc();
             CloseCode::AuthenticationFailed.close(&quic_conn, "authentication failed");
             return Err(err).context(format!(
                 "failed to authenticate PR QUIC client from {}",
@@ -65,6 +64,7 @@ pub async fn handle_quic_client_connection(
         }
         Err(_) => {
             config.admission.record_failure(remote.ip());
+            METRICS.authentication_failures.inc();
             CloseCode::AuthenticationTimeout.close(&quic_conn, "authentication timed out");
             return Err(anyhow!("authentication timed out")).context(format!(
                 "authentication timeout for PR QUIC client from {}",
@@ -179,6 +179,9 @@ where
         CloseCode::InternalError.close(&quic_conn, "failed to confirm configuration");
         return Err(err);
     }
+    let metrics = METRICS.client(&client);
+    metrics.tunnels.inc();
+    let _tunnel_active = Active::new(&metrics.tunnels_active);
 
     // Spawn the TCP listener in its own task. It releases the port when it ends: when the
     // client sends DRAIN or the connection ends.
@@ -189,6 +192,7 @@ where
             quic_conn.clone(),
             listener,
             lease,
+            metrics.clone(),
             listener_token.clone(),
         )
         .in_current_span(),
@@ -206,10 +210,8 @@ where
         ControlChannelEnd::StreamClosed(_) => "tunnel closed",
     };
     end.close_code().close(&quic_conn, reason);
-    match end.close_code() {
-        CloseCode::Ok => CLIENT_CONNECTIONS_CLOSED_TOTAL.inc(),
-        CloseCode::KeepaliveFailed => KEEPALIVE_ERRORS.inc(),
-        _ => {}
+    if end.close_code() == CloseCode::KeepaliveFailed {
+        metrics.keepalive_failures.inc();
     }
 
     // Await the TCP listener task. It is only cancelled when the runtime shuts down at the end
