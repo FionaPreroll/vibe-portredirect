@@ -540,6 +540,31 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn test_one_way_transfer_keeps_forwarding_open() -> Result<()> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // E.g. a download: only one side sends, the other one only receives.
+        for a_sends in [true, false] {
+            let (mut peer_a, mut peer_b, forwarding) =
+                spawn_forwarding(Some(Duration::from_secs(10)));
+            let mut byte = [0u8; 1];
+            for _ in 0..4 {
+                tokio::time::sleep(Duration::from_secs(6)).await;
+                if a_sends {
+                    peer_a.write_all(b"x").await?;
+                    peer_b.read_exact(&mut byte).await?;
+                } else {
+                    peer_b.write_all(b"y").await?;
+                    peer_a.read_exact(&mut byte).await?;
+                }
+                assert!(!forwarding.is_finished(), "forwarding ended while active");
+            }
+            forwarding.abort();
+        }
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn test_no_idle_timeout_without_limit() {
         let (_peer_a, _peer_b, forwarding) = spawn_forwarding(None);
 
