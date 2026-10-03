@@ -10,6 +10,11 @@ Versions 0.4.0 to 0.7.0 were not published on crates.io; the latest published ve
 
 ## [Unreleased]
 
+### Added
+
+- Both programs can read their settings from a TOML configuration file, `--config-file`. Its keys are the names of the options, and options on the command line or in the environment take precedence. It only names the files that hold PSKs, and relative paths in it are relative to the file. Unknown keys are errors, so typos don't go unnoticed. See the README.
+- The server's configuration file can list several clients, each with its own name, one or two PSK files (two while changing the PSK) and ports. A client can only use its own ports. Clients may share ports on purpose, e.g. an active and a standby client; the server logs which clients share which ports when it starts.
+
 ### Fixed
 
 - A client that stalled the TLS handshake, e.g. on purpose, held up all new connections to the server as long as the handshake lasted, 30 seconds for a client that stopped responding, because the server completed each handshake before accepting the next connection. Handshakes now run independently and are aborted after 10 seconds, which counts as a failed attempt for blocking the address.

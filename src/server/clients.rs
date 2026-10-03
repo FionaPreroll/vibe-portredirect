@@ -62,11 +62,16 @@ impl ClientList {
         }
         let list = Self(list);
         for shared in list.shared_ports() {
+            let ports = match shared.ports[..] {
+                [(start, end)] if start == end => "port",
+                _ => "ports",
+            };
             info!(
-                "Standby is active: clients {:?} and {:?} may both use port {}. Whichever \
-                 connects first gets the port, the other one waits until it is free.",
+                "Standby is active: clients {:?} and {:?} may both use {} {}. Whichever \
+                 connects first gets a port, the other one waits until it is free.",
                 shared.clients.0.as_str(),
                 shared.clients.1.as_str(),
+                ports,
                 shared
             );
         }

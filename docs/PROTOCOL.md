@@ -66,7 +66,7 @@ If a side rejects anything, it closes the whole QUIC connection with a [close co
 ### 1. Authentication
 
 The server knows a list of clients, each with a **name**, one or two PSKs (two while changing it) and the ports it may use.
-A server configured on the command line has a single client named `default`, with the PSK and `--allowed-client-ports` given there; clients name themselves `default` unless configured otherwise (`--client-name`).
+The server's configuration file lists them; a server configured with a single PSK and `--allowed-client-ports` has a single client named `default`. Clients name themselves `default` unless configured otherwise (`--client-name`).
 Names consist of 1 to 64 letters, digits, dots, underscores or hyphens (`A-Z a-z 0-9 . _ -`), so they can safely appear in logs.
 
 Both sides prove that they know the client's PSK, with proofs that are bound to the TLS session and to the client's name.

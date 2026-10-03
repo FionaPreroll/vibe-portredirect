@@ -187,6 +187,26 @@ async fn http_get(addr: SocketAddr, path: &str) -> Result<String> {
     Ok(response)
 }
 
+/// Sends data through the tunnel at `listen_port` and checks that the echo server returns it.
+async fn assert_echo(listen_port: u16) -> Result<()> {
+    let mut stream = TcpStream::connect(localhost(listen_port)).await?;
+    stream.write_all(b"hello").await?;
+    let mut echoed = [0u8; 5];
+    timeout(WAIT_TIMEOUT, stream.read_exact(&mut echoed)).await??;
+    anyhow::ensure!(&echoed == b"hello", "echoed {:?}", echoed);
+    Ok(())
+}
+
+/// Waits until nothing listens on `port` anymore.
+async fn wait_until_closed(port: u16) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while TcpStream::connect(localhost(port)).await.is_ok() {
+        anyhow::ensure!(Instant::now() < deadline, "port {} is still open", port);
+        sleep(Duration::from_millis(50)).await;
+    }
+    Ok(())
+}
+
 fn path_str(path: &Path) -> &str {
     path.to_str().expect("non-UTF-8 path")
 }
@@ -390,11 +410,7 @@ async fn programs_forward_and_exit_cleanly_on_sigterm() -> Result<()> {
     let mut client = Program::start(CLIENT, &args, &[]);
     client.wait_for_output("Tunnel established").await?;
 
-    let mut stream = TcpStream::connect(localhost(listen_port)).await?;
-    stream.write_all(b"hello").await?;
-    let mut echoed = [0u8; 5];
-    timeout(WAIT_TIMEOUT, stream.read_exact(&mut echoed)).await??;
-    assert_eq!(&echoed, b"hello");
+    assert_echo(listen_port).await?;
 
     // The client's metrics count the connection to the server.
     let metrics = http_get(localhost(metrics_port), "/metrics").await?;
@@ -408,11 +424,7 @@ async fn programs_forward_and_exit_cleanly_on_sigterm() -> Result<()> {
     // The client closes its connection, so the server releases the port right away.
     client.terminate();
     assert_eq!(client.exit_code().await?, 0, "{}", client.output());
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while TcpStream::connect(localhost(listen_port)).await.is_ok() {
-        anyhow::ensure!(Instant::now() < deadline, "the server kept the port");
-        sleep(Duration::from_millis(50)).await;
-    }
+    wait_until_closed(listen_port).await?;
 
     // The server's metrics count the client's connection and its normal end.
     server
@@ -562,5 +574,166 @@ async fn server_with_invalid_certificate_name_exits_with_an_error() -> Result<()
         "{}",
         server.output()
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn programs_read_configuration_files() -> Result<()> {
+    let (server_dir, client_dir) = (tempfile::tempdir()?, tempfile::tempdir()?);
+    let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
+    let echo_addr = start_echo_server().await?;
+
+    // The server knows two clients, which may both use the port, and one of them is changing its
+    // PSK. Paths are relative to the file.
+    let home_psk = "home-psk-0123456789";
+    let office_next_psk = "office-next-psk-0123456789";
+    fs::create_dir(server_dir.path().join("clients"))?;
+    for (file, psk) in [
+        ("home.psk", home_psk),
+        ("office.psk", "office-psk-0123456789"),
+        ("office-next.psk", office_next_psk),
+    ] {
+        write_psk_file(&server_dir.path().join("clients").join(file), psk, 0o600)?;
+    }
+    let server_config = server_dir.path().join("server.toml");
+    fs::write(
+        &server_config,
+        format!(
+            r#"
+config-dir = "state"
+local-host = "127.0.0.1"
+quic-server-port = {quic_port}
+quic-cert-hostname = "localhost"
+
+[[clients]]
+name = "home"
+psk-files = ["clients/home.psk"]
+ports = {listen_port}
+
+[[clients]]
+name = "office"
+psk-files = ["clients/office.psk", "clients/office-next.psk"]
+ports = [{listen_port}]
+"#
+        ),
+    )?;
+    let mut server = Program::start(SERVER, &["--config-file", path_str(&server_config)], &[]);
+    server.wait_for_output("QUIC server is ready").await?;
+    let standby = format!(
+        "Standby is active: clients \"home\" and \"office\" may both use port {}.",
+        listen_port
+    );
+    assert!(server.output().contains(&standby), "{}", server.output());
+
+    // The client already uses the office's next PSK.
+    fs::copy(
+        server_dir.path().join("state").join("cert.der"),
+        client_dir.path().join("cert.der"),
+    )?;
+    write_psk_file(&client_dir.path().join("psk"), office_next_psk, 0o600)?;
+    let client_config = client_dir.path().join("client.toml");
+    fs::write(
+        &client_config,
+        format!(
+            r#"
+config-dir = "."
+destination-host = "127.0.0.1"
+destination-port = {}
+remote-listen-port = {listen_port}
+client-name = "office"
+quic-remote-host = "127.0.0.1"
+quic-remote-port = {quic_port}
+quic-remote-hostname-match = "localhost"
+quic-psk-file = "psk"
+log-level = "error"
+"#,
+            echo_addr.port()
+        ),
+    )?;
+
+    // The command line takes precedence over the file, so the client logs its progress.
+    let client_config = path_str(&client_config);
+    let mut office = Program::start(
+        CLIENT,
+        &["--config-file", client_config, "--log-level", "info"],
+        &[],
+    );
+    office.wait_for_output("Tunnel established").await?;
+    assert_echo(listen_port).await?;
+    server.wait_for_output("Client \"office\"").await?;
+    office.terminate();
+    assert_eq!(office.exit_code().await?, 0, "{}", office.output());
+    wait_until_closed(listen_port).await?;
+
+    // So does the environment: the other client with its own PSK gets the port.
+    let mut home = Program::start(
+        CLIENT,
+        &[
+            "--config-file",
+            client_config,
+            "--log-level",
+            "info",
+            "--client-name",
+            "home",
+        ],
+        &[("PORTREDIRECT_QUIC_PSK", home_psk)],
+    );
+    home.wait_for_output("Tunnel established").await?;
+    assert_echo(listen_port).await?;
+    server.wait_for_output("Client \"home\"").await?;
+    home.terminate();
+    assert_eq!(home.exit_code().await?, 0, "{}", home.output());
+
+    server.terminate();
+    assert_eq!(server.exit_code().await?, 0, "{}", server.output());
+    Ok(())
+}
+
+#[tokio::test]
+async fn invalid_configuration_files_exit_with_code_2() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let write = |name: &str, text: &str| -> Result<String> {
+        let path = dir.path().join(name);
+        fs::write(&path, text)?;
+        Ok(path_str(&path).to_string())
+    };
+    let typo = write(
+        "typo.toml",
+        "destination-host = \"localhost\"\ndestination-prot = 80\n",
+    )?;
+    let incomplete = write("incomplete.toml", "destination-host = \"localhost\"\n")?;
+    let clients = write(
+        "clients.toml",
+        "local-host = \"127.0.0.1\"\n[[clients]]\nname = \"home\"\npsk-files = [\"home.psk\"]\nports = 443\n",
+    )?;
+    let missing = path_str(&dir.path().join("missing.toml")).to_string();
+
+    for (program, config_file, env, expected) in [
+        (CLIENT, &typo, &[][..], "unknown field `destination-prot`"),
+        (
+            CLIENT,
+            &incomplete,
+            &[("PORTREDIRECT_QUIC_PSK", PSK)],
+            "--destination-port is required",
+        ),
+        // A PSK for a single client, though the file lists clients.
+        (
+            SERVER,
+            &clients,
+            &[("PORTREDIRECT_QUIC_PSK", PSK)],
+            "PORTREDIRECT_QUIC_PSK doesn't apply",
+        ),
+        (
+            SERVER,
+            &missing,
+            &[],
+            "failed to read the configuration file",
+        ),
+    ] {
+        let mut process = Program::start(program, &["--config-file", config_file], env);
+        assert_eq!(process.exit_code().await?, 2, "{}", config_file);
+        let output = process.output();
+        assert!(output.contains(expected), "{}:\n{}", config_file, output);
+    }
     Ok(())
 }

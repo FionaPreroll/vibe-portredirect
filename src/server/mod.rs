@@ -5,6 +5,7 @@
 pub mod auth;
 pub mod client_handler;
 pub mod clients;
+pub mod config;
 pub mod metrics_counters;
 pub mod metrics_printer;
 pub mod port_registry;
