@@ -1,227 +1,260 @@
-// PortRedirect Protocol Module - Control Channel Implementation
+// PortRedirect Protocol Module - Setting up the tunnel on the control stream
+//
+// After the authentication, the client sends HELLO with the port the server should listen on,
+// and the server answers with WELCOME once it listens. Both messages consist of parameters, see
+// protocol::message and docs/PROTOCOL.md.
+//
 // License: GPL-3.0-only
 
-use anyhow::{anyhow, Context, Result};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use anyhow::{bail, Context, Result};
+use tokio::io::{AsyncRead, AsyncWrite};
 
-use crate::bi_stream::BiStream;
+use crate::protocol::message::{
+    param, read_message, write_message, Message, MessageType, Parameters, ProtocolViolation,
+};
 
-/// Header of the client's request asking the server to listen on a TCP port.
-const LISTEN_PORT_REQUEST_HEADER: &[u8; 10] = b"LISTENPORT";
-/// Header of the server's confirmation that the TCP listener is bound.
-const LISTENING_RESPONSE_HEADER: &[u8; 9] = b"LISTENING";
+/// Software parameter of the client's HELLO.
+pub const CLIENT_SOFTWARE: &str = concat!("portredirect_client ", env!("CARGO_PKG_VERSION"));
+/// Software parameter of the server's WELCOME.
+pub const SERVER_SOFTWARE: &str = concat!("portredirect_server ", env!("CARGO_PKG_VERSION"));
 
-// Structure to hold the client's requested configuration.
-pub struct RequestedClientConfiguration {
-    pub port: u16,
+/// Content of HELLO (client to server) and WELCOME (server to client).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Greeting {
+    /// The sender's software and version, only for logs.
+    pub software: Option<String>,
+    /// HELLO: the port the server should listen on. WELCOME: the port it listens on.
+    pub listen_port: u16,
 }
 
-/// Receives the client's desired configuration over the control channel.
-/// The client must send a control message in the form:
-///
-/// ```text
-/// LISTENPORTxx
-/// ```
-///
-/// where:
-/// - `"LISTENPORT"` is a literal header (10 ASCII bytes),
-/// - `xx` is a 2-byte big‑endian encoded u16 port number.
-///
-/// The caller is responsible for checking that the requested port is allowed by the server's
-/// configuration, and for confirming it with [`confirm_client_configuration`].
-pub async fn configure_quic_client<R, W>(
-    mut control_channel: BiStream<R, W>,
-) -> Result<(RequestedClientConfiguration, BiStream<R, W>)>
-where
-    R: tokio::io::AsyncRead + Unpin,
-    W: tokio::io::AsyncWrite + Unpin,
-{
-    // 1. Read the fixed header ("LISTENPORT").
-    let mut header_buf = [0u8; LISTEN_PORT_REQUEST_HEADER.len()];
-    control_channel
-        .read
-        .read_exact(&mut header_buf)
-        .await
-        .context("failed to read control message header from client")?;
-
-    if &header_buf != LISTEN_PORT_REQUEST_HEADER {
-        return Err(anyhow!(
-            "invalid control message header: expected 'LISTENPORT', got {:?}",
-            String::from_utf8_lossy(&header_buf)
-        ));
+impl Greeting {
+    pub fn new(software: &str, listen_port: u16) -> Self {
+        Self {
+            software: Some(software.into()),
+            listen_port,
+        }
     }
 
-    // 2. Read the port bytes.
-    let mut port_buf = [0u8; 2];
-    control_channel
-        .read
-        .read_exact(&mut port_buf)
-        .await
-        .context("failed to read port bytes from client")?;
-    let port = u16::from_be_bytes(port_buf);
-
-    Ok((RequestedClientConfiguration { port }, control_channel))
-}
-
-/// Confirms to the client that the server is now listening on `bound_port` (server side).
-///
-/// The confirmation is sent as:
-///
-/// ```text
-/// LISTENINGxx
-/// ```
-///
-/// where `"LISTENING"` is a literal header (9 ASCII bytes) and `xx` is the 2-byte big-endian
-/// encoded port the TCP listener is bound to.
-pub async fn confirm_client_configuration<R, W>(
-    control_channel: &mut BiStream<R, W>,
-    bound_port: u16,
-) -> Result<()>
-where
-    W: tokio::io::AsyncWrite + Unpin,
-{
-    let mut message = Vec::with_capacity(LISTENING_RESPONSE_HEADER.len() + 2);
-    message.extend_from_slice(LISTENING_RESPONSE_HEADER);
-    message.extend_from_slice(&bound_port.to_be_bytes());
-
-    control_channel
-        .write
-        .write_all(&message)
-        .await
-        .context("failed to send configuration confirmation to client")?;
-    control_channel
-        .write
-        .flush()
-        .await
-        .context("failed to flush configuration confirmation to client")?;
-    Ok(())
-}
-
-/// Asks the server to listen on TCP port `port` and waits for its confirmation (client side).
-///
-/// Counterpart of [`configure_quic_client`] and [`confirm_client_configuration`].
-/// Returns the port the server's TCP listener is bound to.
-pub async fn request_listen_port<R, W>(
-    control_channel: &mut BiStream<R, W>,
-    port: u16,
-) -> Result<u16>
-where
-    R: tokio::io::AsyncRead + Unpin,
-    W: tokio::io::AsyncWrite + Unpin,
-{
-    // 1. Send the request.
-    let mut request = Vec::with_capacity(LISTEN_PORT_REQUEST_HEADER.len() + 2);
-    request.extend_from_slice(LISTEN_PORT_REQUEST_HEADER);
-    request.extend_from_slice(&port.to_be_bytes());
-
-    control_channel
-        .write
-        .write_all(&request)
-        .await
-        .context("failed to send listen port request to server")?;
-    control_channel
-        .write
-        .flush()
-        .await
-        .context("failed to flush listen port request to server")?;
-
-    // 2. Wait for the confirmation. The server closes the connection instead if it refuses.
-    let mut header_buf = [0u8; LISTENING_RESPONSE_HEADER.len()];
-    control_channel
-        .read
-        .read_exact(&mut header_buf)
-        .await
-        .context("server did not confirm the listen port request")?;
-
-    if &header_buf != LISTENING_RESPONSE_HEADER {
-        return Err(anyhow!(
-            "invalid control message header: expected 'LISTENING', got {:?}",
-            String::from_utf8_lossy(&header_buf)
-        ));
+    /// Returns the software for logs, or a placeholder if the peer didn't send it.
+    pub fn software(&self) -> &str {
+        self.software.as_deref().unwrap_or("unknown software")
     }
 
-    let mut port_buf = [0u8; 2];
-    control_channel
-        .read
-        .read_exact(&mut port_buf)
-        .await
-        .context("failed to read confirmed port from server")?;
+    fn to_message(&self, kind: MessageType) -> Message {
+        let mut parameters = Parameters::new();
+        if let Some(software) = &self.software {
+            parameters.insert_text(param::SOFTWARE, software);
+        }
+        parameters.insert_u16(param::LISTEN_PORT, self.listen_port);
+        Message::new(kind, parameters.encode())
+    }
 
-    Ok(u16::from_be_bytes(port_buf))
+    fn from_message(message: &Message, kind: MessageType) -> Result<Self, ProtocolViolation> {
+        if message.kind != kind {
+            return Err(ProtocolViolation(format!(
+                "expected {:?}, got {:?}",
+                kind, message.kind
+            )));
+        }
+        let parameters = Parameters::decode(&message.payload)?;
+        Ok(Self {
+            software: parameters.get_text(param::SOFTWARE)?.map(String::from),
+            listen_port: Parameters::require(
+                parameters.get_u16(param::LISTEN_PORT),
+                param::LISTEN_PORT,
+                &format!("{:?}", kind),
+            )?,
+        })
+    }
+}
+
+/// Receives the client's HELLO (server side).
+///
+/// The caller checks whether the client may use the requested port, and confirms it with
+/// [`send_welcome`] once it listens. Fails with [`ProtocolViolation`] if the client sends
+/// anything else.
+pub async fn receive_hello<S>(control_stream: &mut S) -> Result<Greeting>
+where
+    S: AsyncRead + Unpin,
+{
+    receive_greeting(control_stream, MessageType::Hello).await
+}
+
+/// Tells the client which port the server listens on (server side).
+pub async fn send_welcome<S>(control_stream: &mut S, welcome: &Greeting) -> Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
+    write_message(control_stream, &welcome.to_message(MessageType::Welcome))
+        .await
+        .context("failed to send WELCOME")
+}
+
+/// Sends HELLO and returns the server's WELCOME (client side).
+///
+/// If the server refuses, it closes the connection instead of answering.
+pub async fn request_listen_port<S>(control_stream: &mut S, hello: &Greeting) -> Result<Greeting>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    write_message(control_stream, &hello.to_message(MessageType::Hello))
+        .await
+        .context("failed to send HELLO")?;
+    receive_greeting(control_stream, MessageType::Welcome).await
+}
+
+async fn receive_greeting<S>(control_stream: &mut S, kind: MessageType) -> Result<Greeting>
+where
+    S: AsyncRead + Unpin,
+{
+    let message = read_message(control_stream)
+        .await
+        .with_context(|| format!("failed to receive {:?}", kind))?;
+    let Some(message) = message else {
+        bail!("the control stream ended before {:?}", kind);
+    };
+    Ok(Greeting::from_message(&message, kind)?)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::{duplex, split};
+    use tokio::io::{duplex, AsyncWriteExt};
 
     #[tokio::test]
-    async fn test_listen_port_roundtrip() -> Result<()> {
-        let (client_side, server_side) = duplex(64);
+    async fn test_hello_and_welcome() -> Result<()> {
+        let (mut client_side, mut server_side) = duplex(1024);
 
         let server = tokio::spawn(async move {
-            let (read, write) = split(server_side);
-            let control_channel = BiStream::new(read, write, "server".to_string());
-            let (requested, mut control_channel) = configure_quic_client(control_channel).await?;
-            confirm_client_configuration(&mut control_channel, requested.port + 1).await?;
-            Ok::<u16, anyhow::Error>(requested.port)
+            let hello = receive_hello(&mut server_side).await?;
+            send_welcome(&mut server_side, &Greeting::new(SERVER_SOFTWARE, 4243)).await?;
+            Ok::<Greeting, anyhow::Error>(hello)
         });
 
-        let (read, write) = split(client_side);
-        let mut control_channel = BiStream::new(read, write, "client".to_string());
-        let bound_port = request_listen_port(&mut control_channel, 4242).await?;
+        let welcome =
+            request_listen_port(&mut client_side, &Greeting::new(CLIENT_SOFTWARE, 4242)).await?;
 
-        assert_eq!(server.await??, 4242);
-        assert_eq!(bound_port, 4243);
+        let hello = server.await??;
+        assert_eq!(hello, Greeting::new(CLIENT_SOFTWARE, 4242));
+        assert_eq!(welcome, Greeting::new(SERVER_SOFTWARE, 4243));
+        assert_eq!(
+            CLIENT_SOFTWARE,
+            format!("portredirect_client {}", env!("CARGO_PKG_VERSION"))
+        );
         Ok(())
     }
 
-    #[tokio::test]
-    async fn test_configure_rejects_invalid_header() {
-        let (mut client_side, server_side) = duplex(64);
-        client_side.write_all(b"LISTENPOXT\x00\x50").await.unwrap();
-
-        let (read, write) = split(server_side);
-        let result = configure_quic_client(BiStream::new(read, write, "server".into())).await;
-
-        let err = result.err().expect("invalid header must be rejected");
-        assert!(err.to_string().contains("invalid control message header"));
+    #[test]
+    fn test_hello_format() {
+        // As described in docs/PROTOCOL.md.
+        let hello = Greeting::new("portredirect_client 1.0.0", 443).to_message(MessageType::Hello);
+        let mut expected = vec![0, 1, 0, 25];
+        expected.extend_from_slice(b"portredirect_client 1.0.0");
+        expected.extend_from_slice(&[0, 2, 0, 2, 0x01, 0xbb]);
+        assert_eq!(hello, Message::new(MessageType::Hello, expected));
     }
 
     #[tokio::test]
-    async fn test_configure_rejects_truncated_request() {
-        let (mut client_side, server_side) = duplex(64);
-        client_side.write_all(b"LISTENPORT\x00").await.unwrap();
-        drop(client_side);
+    async fn test_software_is_optional_and_unknown_parameters_are_ignored() -> Result<()> {
+        let (mut client_side, mut server_side) = duplex(1024);
+        let mut parameters = Parameters::new();
+        parameters
+            .insert_u16(param::LISTEN_PORT, 80)
+            .insert(0x0100, b"an extension".as_slice());
+        write_message(
+            &mut client_side,
+            &Message::new(MessageType::Hello, parameters.encode()),
+        )
+        .await?;
 
-        let (read, write) = split(server_side);
-        let result = configure_quic_client(BiStream::new(read, write, "server".into())).await;
+        let hello = receive_hello(&mut server_side).await?;
+        assert_eq!(
+            hello,
+            Greeting {
+                software: None,
+                listen_port: 80
+            }
+        );
+        assert_eq!(hello.software(), "unknown software");
+        Ok(())
+    }
 
-        assert!(result.is_err(), "truncated request must be rejected");
+    /// Returns the server's error for a client that sends `message` instead of a valid HELLO.
+    async fn hello_error(message: Message) -> anyhow::Error {
+        let (mut client_side, mut server_side) = duplex(1024);
+        write_message(&mut client_side, &message).await.unwrap();
+        receive_hello(&mut server_side).await.unwrap_err()
     }
 
     #[tokio::test]
-    async fn test_request_rejects_invalid_confirmation() {
+    async fn test_invalid_hellos_are_protocol_violations() {
+        let mut software_only = Parameters::new();
+        software_only.insert_text(param::SOFTWARE, "x");
+        let mut long_port = Parameters::new();
+        long_port.insert(param::LISTEN_PORT, [0u8, 0, 80]);
+
+        for (message, expected) in [
+            (
+                Message::empty(MessageType::Ping),
+                "expected Hello, got Ping",
+            ),
+            (
+                Message::new(MessageType::Hello, software_only.encode()),
+                "Hello without parameter 2",
+            ),
+            (
+                Message::new(MessageType::Hello, long_port.encode()),
+                "parameter 2 is not a 16-bit number",
+            ),
+            (
+                Message::new(MessageType::Hello, vec![0, 2, 0]),
+                "truncated parameter",
+            ),
+        ] {
+            let err = hello_error(message).await;
+            assert!(err.is::<ProtocolViolation>(), "{:#}", err);
+            assert!(err.to_string().contains(expected), "{:#}", err);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_missing_hello() {
         let (client_side, mut server_side) = duplex(64);
-        server_side.write_all(b"LISTENINX\x00\x50").await.unwrap();
+        drop(client_side);
+        let err = receive_hello(&mut server_side).await.unwrap_err();
+        assert!(err.to_string().contains("ended before Hello"), "{:#}", err);
 
-        let (read, write) = split(client_side);
-        let mut control_channel = BiStream::new(read, write, "client".into());
-        let result = request_listen_port(&mut control_channel, 80).await;
-
-        let err = result.expect_err("invalid confirmation must be rejected");
-        assert!(err.to_string().contains("invalid control message header"));
+        // A stream that breaks off in the middle of a message.
+        let (mut client_side, mut server_side) = duplex(64);
+        client_side.write_all(&[1, 0, 8, 0]).await.unwrap();
+        drop(client_side);
+        let err = receive_hello(&mut server_side).await.unwrap_err();
+        assert!(!err.is::<ProtocolViolation>(), "{:#}", err);
     }
 
     #[tokio::test]
     async fn test_request_fails_when_server_closes() {
-        let (client_side, server_side) = duplex(64);
-        drop(server_side);
+        let (mut client_side, server_side) = duplex(1024);
+        let server = tokio::spawn(async move {
+            let mut server_side = server_side;
+            let _ = read_message(&mut server_side).await;
+            // Closes without answering, like a server that refuses the port.
+        });
+        let result =
+            request_listen_port(&mut client_side, &Greeting::new(CLIENT_SOFTWARE, 80)).await;
+        server.await.unwrap();
+        assert!(result.is_err(), "missing WELCOME must be an error");
+    }
 
-        let (read, write) = split(client_side);
-        let mut control_channel = BiStream::new(read, write, "client".into());
-        let result = request_listen_port(&mut control_channel, 80).await;
-
-        assert!(result.is_err(), "missing confirmation must be an error");
+    #[tokio::test]
+    async fn test_request_rejects_other_answers() {
+        let (mut client_side, mut server_side) = duplex(1024);
+        write_message(&mut server_side, &Message::empty(MessageType::Pong))
+            .await
+            .unwrap();
+        let err = request_listen_port(&mut client_side, &Greeting::new(CLIENT_SOFTWARE, 80))
+            .await
+            .unwrap_err();
+        assert!(err.is::<ProtocolViolation>(), "{:#}", err);
     }
 }

@@ -28,10 +28,14 @@ pub enum CloseCode {
     KeepaliveFailed = 7,
     /// An unexpected error, e.g. an I/O error.
     InternalError = 8,
+    /// A new connection of the same client took over the listen port.
+    Replaced = 9,
+    /// The peer lacks a feature this side requires.
+    Unsupported = 10,
 }
 
 impl CloseCode {
-    const ALL: [CloseCode; 9] = [
+    const ALL: [CloseCode; 11] = [
         CloseCode::Ok,
         CloseCode::AuthenticationFailed,
         CloseCode::AuthenticationTimeout,
@@ -41,6 +45,8 @@ impl CloseCode {
         CloseCode::PortUnavailable,
         CloseCode::KeepaliveFailed,
         CloseCode::InternalError,
+        CloseCode::Replaced,
+        CloseCode::Unsupported,
     ];
 
     /// Returns the close code with the numeric value `code`, if it is known.
@@ -63,14 +69,17 @@ impl CloseCode {
         VarInt::from(self as u32)
     }
 
-    /// Returns whether connecting again will fail the same way until the configuration of
-    /// client or server changes.
+    /// Returns whether the client should not connect again: connecting again would fail the same
+    /// way until the configuration of client or server changes, or, after
+    /// [`CloseCode::Replaced`], take the port from another instance of the same client.
     pub fn is_permanent(self) -> bool {
         matches!(
             self,
             CloseCode::AuthenticationFailed
                 | CloseCode::ProtocolViolation
                 | CloseCode::PortNotAllowed
+                | CloseCode::Replaced
+                | CloseCode::Unsupported
         )
     }
 
@@ -99,7 +108,7 @@ mod tests {
             .iter()
             .map(|c| c.code().into_inner())
             .collect();
-        assert_eq!(values, (0..9).collect::<Vec<u64>>());
+        assert_eq!(values, (0..11).collect::<Vec<u64>>());
     }
 
     #[test]
@@ -113,7 +122,9 @@ mod tests {
             [
                 CloseCode::AuthenticationFailed,
                 CloseCode::ProtocolViolation,
-                CloseCode::PortNotAllowed
+                CloseCode::PortNotAllowed,
+                CloseCode::Replaced,
+                CloseCode::Unsupported
             ]
         );
     }

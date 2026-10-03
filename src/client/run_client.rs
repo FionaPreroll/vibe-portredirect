@@ -8,6 +8,7 @@ use super::server_handler::handle_quic_server_connection;
 
 use crate::app_data::ClientAppData;
 use crate::protocol::close::CloseCode;
+use crate::protocol::message::ProtocolViolation;
 use crate::quic::client::{ClientConfig, QuicClient};
 
 use anyhow::{Context, Result};
@@ -84,7 +85,13 @@ pub async fn run_client(
         };
         if is_permanent_error(&error, attempt.close_reason.as_ref()) {
             client.shutdown("client giving up").await;
-            return Err(error.context("connecting again would fail the same way, giving up"));
+            let replaced =
+                attempt.close_reason.as_ref().and_then(CloseCode::of) == Some(CloseCode::Replaced);
+            return Err(error.context(if replaced {
+                "another client with the same name took over the port, not connecting again"
+            } else {
+                "connecting again would fail the same way, giving up"
+            }));
         }
 
         let delay = reconnect_delay(&mut backoff, attempt.connected_for);
@@ -142,7 +149,14 @@ async fn run_connection(client: &QuicClient<ClientAppData>) -> ConnectionAttempt
 
     // Don't leave the connection open, e.g. if the handler failed on its own.
     if connection.close_reason().is_none() {
-        CloseCode::InternalError.close(&connection, "client error");
+        let violation = result
+            .as_ref()
+            .is_err_and(|e| e.chain().any(|cause| cause.is::<ProtocolViolation>()));
+        if violation {
+            CloseCode::ProtocolViolation.close(&connection, "unexpected message");
+        } else {
+            CloseCode::InternalError.close(&connection, "client error");
+        }
     }
 
     ConnectionAttempt {

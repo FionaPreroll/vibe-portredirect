@@ -30,7 +30,7 @@ rcgen = { version = "0.14.10", features = ["pem", "crypto"] }
 ring = "0.17.14"
 rustls = { version = "0.23.45", default-features = false, features = ["logging", "ring", "std"] }
 secrecy = "0.10.3"
-tokio = { version = "1.43.0", features = ["full"] }
+tokio = { version = "1.50.0", features = ["full"] }
 tokio-util = { version = "0.7.13", features = ["compat"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }

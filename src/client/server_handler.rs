@@ -3,10 +3,10 @@
 // License: GPL-3.0-only
 
 use crate::app_data::ClientAppData;
-use crate::bi_stream::BiStream;
 use crate::protocol::close::CloseCode;
-use crate::protocol::control::request_listen_port;
+use crate::protocol::control::{request_listen_port, Greeting, CLIENT_SOFTWARE};
 use crate::protocol::keepalive::run_keepalive_client_loop;
+use crate::protocol::message::ProtocolViolation;
 use crate::quic::client::ClientConfig;
 use crate::PortRedirectProtocol;
 
@@ -17,7 +17,6 @@ use super::tcp_forwarder::forward_tcp_to_quic_stream;
 use anyhow::{Context, Result};
 use std::sync::Arc;
 use tokio::time::timeout;
-use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tracing::{debug, info, warn};
 
 /// Handles the connection to the QUIC server, authenticates and keeps it alive.
@@ -40,16 +39,20 @@ pub async fn handle_quic_server_connection(
 
     // Ask the server to accept external TCP connections on our behalf.
     let requested_port = config.app_data.remote_listen_port;
-    let bound_port = timeout(
+    let welcome = timeout(
         PortRedirectProtocol::CONFIGURATION_TIMEOUT,
-        request_listen_port(&mut auth_stream, requested_port),
+        request_listen_port(
+            &mut auth_stream,
+            &Greeting::new(CLIENT_SOFTWARE, requested_port),
+        ),
     )
     .await
     .context("timed out waiting for the server to confirm the listen port")?
     .with_context(|| format!("server did not listen on TCP port {}", requested_port))?;
     info!(
-        "Tunnel established, server listens on TCP port {}",
-        bound_port
+        "Tunnel established, server ({:?}) listens on TCP port {}",
+        welcome.software(),
+        welcome.listen_port
     );
 
     // Start the keepalive loop to maintain the QUIC connection.
@@ -58,7 +61,13 @@ pub async fn handle_quic_server_connection(
     let keepalive_conn = conn.clone();
     tokio::spawn(async move {
         let Err(e) = run_keepalive_client_loop(auth_stream).await;
-        if keepalive_conn.close_reason().is_none() {
+        if keepalive_conn.close_reason().is_some() {
+            return;
+        }
+        if e.is::<ProtocolViolation>() {
+            warn!("Invalid control message, closing the connection: {:#}", e);
+            CloseCode::ProtocolViolation.close(&keepalive_conn, "unexpected control message");
+        } else {
             KEEPALIVE_ERRORS.inc();
             warn!("Keepalive failed, closing the connection: {:#}", e);
             CloseCode::KeepaliveFailed.close(&keepalive_conn, "keepalive failed");
@@ -74,7 +83,6 @@ pub async fn handle_quic_server_connection(
         CONNECTIONS_ACCEPTED.inc();
 
         let stream_id = recv.id();
-        let bi_stream = BiStream::new(recv.compat(), send.compat_write(), stream_id.to_string());
         debug!(
             "Opened QUIC stream for new forwarded connection, id {}",
             stream_id
@@ -82,9 +90,12 @@ pub async fn handle_quic_server_connection(
 
         let config = Arc::clone(&config);
         tokio::spawn(async move {
-            if let Err(e) = forward_tcp_to_quic_stream(config, bi_stream).await {
+            if let Err(e) = forward_tcp_to_quic_stream(config, send, recv).await {
                 TCP_FORWARDING_ERRORS.inc();
-                warn!("Error handling QUIC stream: {}", e);
+                info!(
+                    "Forwarded connection (stream {}) aborted: {:#}",
+                    stream_id, e
+                );
             }
         });
     };
