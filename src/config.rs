@@ -10,16 +10,52 @@
 //
 // License: GPL-3.0-only
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::parser::ValueSource;
 use clap::ArgMatches;
 use serde::de::{self, DeserializeOwned, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
+use std::ffi::OsStr;
 use std::fmt::{self, Display};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+use crate::psk::PSK_ENV_VAR;
 use crate::server::PortSpec;
+
+/// The environment variable that held the PSK before 1.0, see [`check_renamed_environment`].
+pub const RENAMED_PSK_ENV_VAR: &str = "PORTREDIRECT_QUIC_PSK";
+
+/// Fails if the command-line `args` use an option by the name it had before 1.0, with a message
+/// naming the new one. Clap would only guess a similar option, often the wrong one. `renamed`
+/// holds pairs of old and new names.
+pub fn check_renamed_options<I>(args: I, renamed: &[(&str, &str)]) -> Result<()>
+where
+    I: IntoIterator,
+    I::Item: AsRef<OsStr>,
+{
+    for arg in args {
+        let arg = arg.as_ref().to_string_lossy();
+        let option = arg.split_once('=').map_or(&*arg, |(option, _)| option);
+        if let Some((old, new)) = renamed.iter().find(|(old, _)| *old == option) {
+            bail!("{} was renamed to {}", old, new);
+        }
+    }
+    Ok(())
+}
+
+/// Fails if the environment has the variable that held the PSK before 1.0, which would be
+/// ignored otherwise.
+pub fn check_renamed_environment() -> Result<()> {
+    if std::env::var_os(RENAMED_PSK_ENV_VAR).is_some() {
+        bail!(
+            "the environment variable {} was renamed to {}",
+            RENAMED_PSK_ENV_VAR,
+            PSK_ENV_VAR
+        );
+    }
+    Ok(())
+}
 
 /// Reads the configuration file at `path`.
 ///
@@ -207,12 +243,42 @@ mod tests {
     }
 
     #[test]
+    fn test_renamed_options_are_named_with_their_new_names() {
+        let renamed = [("--quic-psk", "--psk"), ("--local-host", "--listen-host")];
+        let current = [
+            "--psk",
+            "secret",
+            "--listen-host",
+            "::",
+            "--psk=--local-host",
+        ];
+        assert!(check_renamed_options(current, &renamed).is_ok());
+        for args in [
+            &["--quic-psk", "secret"][..],
+            &["--quic-psk=secret"],
+            &["--psk", "secret", "--local-host", "::"],
+        ] {
+            let err = check_renamed_options(args, &renamed).unwrap_err();
+            let renamed_to = [
+                "--quic-psk was renamed to --psk",
+                "--local-host was renamed to --listen-host",
+            ];
+            assert!(
+                renamed_to.contains(&err.to_string().as_str()),
+                "{:?}: {}",
+                args,
+                err
+            );
+        }
+    }
+
+    #[test]
     fn test_required_settings() {
         assert_eq!(required(Some(5), "max-connections").unwrap(), 5);
-        let err = required::<u16>(None, "local-host").unwrap_err();
+        let err = required::<u16>(None, "listen-host").unwrap_err();
         assert_eq!(
             err.to_string(),
-            "--local-host is required, on the command line or as local-host in the configuration file"
+            "--listen-host is required, on the command line or as listen-host in the configuration file"
         );
     }
 

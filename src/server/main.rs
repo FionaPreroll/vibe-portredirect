@@ -41,12 +41,12 @@ async fn main() -> Result<()> {
     // Parse QUIC server listener address.
     let quic_addr = resolve_socket_addr(&format!(
         "{}:{}",
-        config.quic_server_host, config.quic_server_port
+        config.quic_listen_host, config.quic_listen_port
     ))
     .context("Failed to resolve QUIC bind address")?;
 
     // Set up QUIC server configuration.
-    let app_data = ServerAppData::with_clients(clients, config.local_host)
+    let app_data = ServerAppData::with_clients(clients, config.listen_host)
         .with_forwarding_limits(config.forwarding_limits);
     info!("QUIC will listen on {}", quic_addr);
 

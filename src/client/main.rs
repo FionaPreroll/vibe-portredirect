@@ -73,7 +73,7 @@ async fn run(config: Config) -> Result<()> {
         config_dir,
         quic_local_addr,
         quic_remote_addr,
-        quic_remote_hostname_match: config.quic_remote_hostname_match,
+        quic_cert_hostname: config.quic_cert_hostname,
         max_connections: config.max_connections,
         metrics_addr: config.metrics_addr,
         reconnect_backoff: Backoff::default(),

@@ -13,7 +13,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tracing::level_filters::LevelFilter;
 
-use crate::config::{self, merge, merge_option, read_config_file, required, resolve_path};
+use crate::config::{
+    self, check_renamed_environment, check_renamed_options, merge, merge_option, read_config_file,
+    required, resolve_path,
+};
 use crate::protocol::auth::{ClientName, MAX_PSKS_PER_CLIENT};
 use crate::psk::{PskArgs, PskSource, PSK_ENV_VAR};
 use crate::server::clients::{ClientEntry, ClientList};
@@ -22,6 +25,15 @@ use crate::PortRedirectProtocol;
 
 /// Default for --max-quic-connections.
 pub const DEFAULT_MAX_QUIC_CONNECTIONS: u32 = 64;
+
+/// Options renamed before 1.0, as pairs of old and new names.
+const RENAMED_OPTIONS: &[(&str, &str)] = &[
+    ("--quic-psk", "--psk"),
+    ("--quic-psk-file", "--psk-file"),
+    ("--local-host", "--listen-host"),
+    ("--quic-server-host", "--quic-listen-host"),
+    ("--quic-server-port", "--quic-listen-port"),
+];
 
 /// PortRedirect server: listens on the ports its clients ask for and forwards the TCP
 /// connections it accepts to the clients through QUIC.
@@ -38,24 +50,26 @@ pub struct Args {
     #[clap(long, value_name = "PATH")]
     pub config_dir: Option<PathBuf>,
 
-    /// TCP listener host for external connections. Required, here or in the configuration file.
+    /// Host to listen on for external TCP connections, on the ports the clients ask for.
+    /// Required, here or in the configuration file.
     #[clap(long, required_unless_present = "config_file")]
-    pub local_host: Option<String>,
+    pub listen_host: Option<String>,
 
     /// Allowed ports for clients to request, e.g., "80,443,1000-2000". Required, here or in the
     /// configuration file, unless it lists clients with their own ports.
     #[clap(long, value_delimiter = ',', required_unless_present = "config_file")]
     pub allowed_client_ports: Option<Vec<PortSpec>>,
 
-    /// QUIC server listener host.
+    /// Host to listen on for QUIC connections from clients.
     #[clap(long, default_value = "127.0.0.1")]
-    pub quic_server_host: String,
+    pub quic_listen_host: String,
 
-    /// QUIC server listener port.
+    /// UDP port to listen on for QUIC connections from clients.
     #[clap(long, default_value = "4433")]
-    pub quic_server_port: u16,
+    pub quic_listen_port: u16,
 
-    /// QUIC server certificate Subject Alt Name.
+    /// Name the server's generated certificate is issued for (Subject Alt Name). Clients check
+    /// it, see their --quic-cert-hostname.
     #[clap(long, default_value = "127.0.0.1")]
     pub quic_cert_hostname: String,
 
@@ -101,18 +115,18 @@ pub struct Args {
 }
 
 /// The server's configuration file. Its keys are the names of the options; instead of a single
-/// client with quic-psk-file and allowed-client-ports, it can list several clients.
+/// client with psk-file and allowed-client-ports, it can list several clients.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct ConfigFile {
     pub config_dir: Option<PathBuf>,
-    pub local_host: Option<String>,
+    pub listen_host: Option<String>,
     #[serde(default, deserialize_with = "config::optional_ports")]
     pub allowed_client_ports: Option<Vec<PortSpec>>,
-    pub quic_server_host: Option<String>,
-    pub quic_server_port: Option<u16>,
+    pub quic_listen_host: Option<String>,
+    pub quic_listen_port: Option<u16>,
     pub quic_cert_hostname: Option<String>,
-    pub quic_psk_file: Option<PathBuf>,
+    pub psk_file: Option<PathBuf>,
     pub max_quic_connections: Option<NonZeroU32>,
     pub max_connections: Option<NonZeroU32>,
     pub max_connections_per_ip: Option<u32>,
@@ -136,7 +150,7 @@ impl ConfigFile {
         for relative in file
             .config_dir
             .iter_mut()
-            .chain(file.quic_psk_file.iter_mut())
+            .chain(file.psk_file.iter_mut())
             .chain(psk_files)
         {
             *relative = resolve_path(path, relative);
@@ -165,9 +179,9 @@ pub struct ConfiguredClient {
 pub struct Config {
     pub config_file: Option<PathBuf>,
     pub config_dir: Option<PathBuf>,
-    pub local_host: String,
-    pub quic_server_host: String,
-    pub quic_server_port: u16,
+    pub listen_host: String,
+    pub quic_listen_host: String,
+    pub quic_listen_port: u16,
     pub quic_cert_hostname: String,
     pub clients: Clients,
     pub max_quic_connections: usize,
@@ -218,6 +232,13 @@ impl Config {
     /// Returns the configuration given by the program's command line, the environment and the
     /// configuration file. Exits with code 2 if it is invalid, like for invalid arguments.
     pub fn from_command_line() -> Self {
+        let renamed = check_renamed_options(std::env::args_os().skip(1), RENAMED_OPTIONS)
+            .and_then(|()| check_renamed_environment());
+        if let Err(e) = renamed {
+            Args::command()
+                .error(ErrorKind::UnknownArgument, e.to_string())
+                .exit()
+        }
         let matches = Args::command().get_matches();
         Self::from_matches(&matches).unwrap_or_else(|e| {
             Args::command()
@@ -243,8 +264,8 @@ impl Config {
                     Some(format!("a PSK on the command line or in {}", PSK_ENV_VAR))
                 } else if args.allowed_client_ports.is_some() {
                     Some("--allowed-client-ports".into())
-                } else if file.quic_psk_file.is_some() {
-                    Some("quic-psk-file".into())
+                } else if file.psk_file.is_some() {
+                    Some("psk-file".into())
                 } else if file.allowed_client_ports.is_some() {
                     Some("allowed-client-ports".into())
                 } else {
@@ -261,10 +282,10 @@ impl Config {
             }
             None => {
                 let psk = psk
-                    .or(file.quic_psk_file.map(PskSource::File))
+                    .or(file.psk_file.map(PskSource::File))
                     .ok_or_else(|| {
                         anyhow!(
-                            "a pre-shared key is required: use --quic-psk-file, {}, --quic-psk, or quic-psk-file in the configuration file",
+                            "a pre-shared key is required: use --psk-file, {}, --psk, or psk-file in the configuration file",
                             PSK_ENV_VAR
                         )
                     })?;
@@ -281,7 +302,7 @@ impl Config {
             }
         };
 
-        let local_host = merge_option(matches, "local_host", args.local_host, file.local_host);
+        let listen_host = merge_option(matches, "listen_host", args.listen_host, file.listen_host);
         let max_quic_connections = merge(
             matches,
             "max_quic_connections",
@@ -308,18 +329,18 @@ impl Config {
         );
         Ok(Config {
             config_dir: merge_option(matches, "config_dir", args.config_dir, file.config_dir),
-            local_host: required(local_host, "local-host")?,
-            quic_server_host: merge(
+            listen_host: required(listen_host, "listen-host")?,
+            quic_listen_host: merge(
                 matches,
-                "quic_server_host",
-                args.quic_server_host,
-                file.quic_server_host,
+                "quic_listen_host",
+                args.quic_listen_host,
+                file.quic_listen_host,
             ),
-            quic_server_port: merge(
+            quic_listen_port: merge(
                 matches,
-                "quic_server_port",
-                args.quic_server_port,
-                file.quic_server_port,
+                "quic_listen_port",
+                args.quic_listen_port,
+                file.quic_listen_port,
             ),
             quic_cert_hostname: merge(
                 matches,
@@ -402,12 +423,12 @@ mod tests {
 
     const FILE: &str = r#"
         config-dir = "state"
-        local-host = "0.0.0.0"
+        listen-host = "0.0.0.0"
         allowed-client-ports = [443, "8000-8100"]
-        quic-server-host = "::"
-        quic-server-port = 4434
+        quic-listen-host = "::"
+        quic-listen-port = 4434
         quic-cert-hostname = "tunnel.example.com"
-        quic-psk-file = "psk"
+        psk-file = "psk"
         max-quic-connections = 10
         max-connections = 20
         max-connections-per-ip = 0
@@ -419,17 +440,17 @@ mod tests {
     #[test]
     fn test_command_line_with_defaults() -> Result<()> {
         let config = config(&[
-            "--local-host",
+            "--listen-host",
             "127.0.0.1",
             "--allowed-client-ports",
             "443,8000-8100",
-            "--quic-psk-file",
+            "--psk-file",
             "/etc/portredirect/psk",
         ])?;
         assert!(config.config_file.is_none() && config.config_dir.is_none());
-        assert_eq!(config.local_host, "127.0.0.1");
-        assert_eq!(config.quic_server_host, "127.0.0.1");
-        assert_eq!(config.quic_server_port, 4433);
+        assert_eq!(config.listen_host, "127.0.0.1");
+        assert_eq!(config.quic_listen_host, "127.0.0.1");
+        assert_eq!(config.quic_listen_port, 4433);
         assert_eq!(config.quic_cert_hostname, "127.0.0.1");
         match &config.clients {
             Clients::Single {
@@ -456,9 +477,9 @@ mod tests {
         assert_eq!(config.config_file, Some(dir.path().join("server.toml")));
         // Relative to the file's directory.
         assert_eq!(config.config_dir, Some(dir.path().join("state")));
-        assert_eq!(config.local_host, "0.0.0.0");
-        assert_eq!(config.quic_server_host, "::");
-        assert_eq!(config.quic_server_port, 4434);
+        assert_eq!(config.listen_host, "0.0.0.0");
+        assert_eq!(config.quic_listen_host, "::");
+        assert_eq!(config.quic_listen_port, 4434);
         assert_eq!(config.quic_cert_hostname, "tunnel.example.com");
         match &config.clients {
             Clients::Single {
@@ -493,17 +514,17 @@ mod tests {
             &[
                 "--config-dir",
                 "/var/lib/portredirect",
-                "--local-host",
+                "--listen-host",
                 "127.0.0.1",
                 "--allowed-client-ports",
                 "80",
-                "--quic-server-host",
+                "--quic-listen-host",
                 "127.0.0.2",
-                "--quic-server-port",
+                "--quic-listen-port",
                 "4433",
                 "--quic-cert-hostname",
                 "localhost",
-                "--quic-psk",
+                "--psk",
                 "secret",
                 "--max-quic-connections",
                 "30",
@@ -519,10 +540,10 @@ mod tests {
         )?;
 
         assert_eq!(config.config_dir, Some("/var/lib/portredirect".into()));
-        assert_eq!(config.local_host, "127.0.0.1");
-        assert_eq!(config.quic_server_host, "127.0.0.2");
+        assert_eq!(config.listen_host, "127.0.0.1");
+        assert_eq!(config.quic_listen_host, "127.0.0.2");
         // Overrides the file, though it is the default.
-        assert_eq!(config.quic_server_port, 4433);
+        assert_eq!(config.quic_listen_port, 4433);
         assert_eq!(config.quic_cert_hostname, "localhost");
         match &config.clients {
             Clients::Single {
@@ -551,11 +572,11 @@ mod tests {
             dir.path(),
             "print-metrics = false",
             &[
-                "--local-host",
+                "--listen-host",
                 "127.0.0.1",
                 "--allowed-client-ports",
                 "80",
-                "--quic-psk",
+                "--psk",
                 "secret",
                 "--print-metrics",
             ],
@@ -578,7 +599,7 @@ mod tests {
         let config = config_with_file(
             dir.path(),
             r#"
-                local-host = "0.0.0.0"
+                listen-host = "0.0.0.0"
 
                 [[clients]]
                 name = "home"
@@ -622,17 +643,17 @@ mod tests {
 
     #[test]
     fn test_clients_exclude_settings_of_a_single_client() {
-        let clients = "local-host = \"0.0.0.0\"\n[[clients]]\nname = \"home\"\npsk-files = [\"home.psk\"]\nports = 443\n";
+        let clients = "listen-host = \"0.0.0.0\"\n[[clients]]\nname = \"home\"\npsk-files = [\"home.psk\"]\nports = 443\n";
         for (text, args, expected) in [
             (
                 clients.to_string(),
-                &["--quic-psk", "secret"][..],
-                "so a PSK on the command line or in PORTREDIRECT_QUIC_PSK doesn't apply",
+                &["--psk", "secret"][..],
+                "so a PSK on the command line or in PORTREDIRECT_PSK doesn't apply",
             ),
             (
                 clients.to_string(),
-                &["--quic-psk-file", "psk"],
-                "so a PSK on the command line or in PORTREDIRECT_QUIC_PSK doesn't apply",
+                &["--psk-file", "psk"],
+                "so a PSK on the command line or in PORTREDIRECT_PSK doesn't apply",
             ),
             (
                 clients.to_string(),
@@ -640,9 +661,9 @@ mod tests {
                 "so --allowed-client-ports doesn't apply",
             ),
             (
-                format!("quic-psk-file = \"psk\"\n{}", clients),
+                format!("psk-file = \"psk\"\n{}", clients),
                 &[],
-                "so quic-psk-file doesn't apply",
+                "so psk-file doesn't apply",
             ),
             (
                 format!("allowed-client-ports = 443\n{}", clients),
@@ -696,7 +717,7 @@ mod tests {
                 "no ports given",
             ),
         ] {
-            let message = error_with_file(&format!("local-host = \"::\"\n{}", clients), &[]);
+            let message = error_with_file(&format!("listen-host = \"::\"\n{}", clients), &[]);
             assert!(message.contains(expected), "{:?}: {}", clients, message);
         }
     }
@@ -705,7 +726,7 @@ mod tests {
     fn test_psks_are_only_read_from_files() {
         // So the configuration file holds no secrets.
         for (text, expected) in [
-            ("quic-psk = \"secret\"", "unknown field `quic-psk`"),
+            ("psk = \"secret\"", "unknown field `psk`"),
             (
                 "[[clients]]\nname = \"home\"\npsks = [\"secret\"]\nports = 443\n",
                 "unknown field `psks`",
@@ -720,23 +741,23 @@ mod tests {
     fn test_required_settings() {
         for (text, expected) in [
             (
-                "allowed-client-ports = 443\nquic-psk-file = \"psk\"",
-                "--local-host is required, on the command line or as local-host in the configuration file",
+                "allowed-client-ports = 443\npsk-file = \"psk\"",
+                "--listen-host is required, on the command line or as listen-host in the configuration file",
             ),
             (
-                "local-host = \"::\"\nquic-psk-file = \"psk\"",
+                "listen-host = \"::\"\npsk-file = \"psk\"",
                 "--allowed-client-ports is required",
             ),
             (
-                "local-host = \"::\"\nallowed-client-ports = 443",
-                "a pre-shared key is required: use --quic-psk-file, PORTREDIRECT_QUIC_PSK, --quic-psk, or quic-psk-file in the configuration file",
+                "listen-host = \"::\"\nallowed-client-ports = 443",
+                "a pre-shared key is required: use --psk-file, PORTREDIRECT_PSK, --psk, or psk-file in the configuration file",
             ),
         ] {
             let message = error_with_file(text, &[]);
             assert!(message.contains(expected), "{:?}: {}", text, message);
         }
         // Without configuration file, clap requires them.
-        let err = config(&["--quic-psk", "secret"]).unwrap_err();
+        let err = config(&["--psk", "secret"]).unwrap_err();
         let err = err.downcast::<clap::Error>().unwrap();
         assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
     }
@@ -746,7 +767,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let listed = config_with_file(
             dir.path(),
-            "local-host = \"::\"\n[[clients]]\nname = \"home\"\npsk-files = [\"home.psk\"]\nports = 443\n",
+            "listen-host = \"::\"\n[[clients]]\nname = \"home\"\npsk-files = [\"home.psk\"]\nports = 443\n",
             &[],
         )?;
         let err = listed.clients.load().unwrap_err();
@@ -757,11 +778,11 @@ mod tests {
         );
 
         let single = config(&[
-            "--local-host",
+            "--listen-host",
             "::",
             "--allowed-client-ports",
             "443",
-            "--quic-psk",
+            "--psk",
             "",
         ])?;
         assert!(single.clients.load().is_err());

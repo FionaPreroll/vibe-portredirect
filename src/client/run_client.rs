@@ -31,7 +31,7 @@ pub struct ClientSettings {
     pub quic_local_addr: SocketAddr,
     pub quic_remote_addr: SocketAddr,
     /// Name the server's certificate must be issued for, defaults to the remote IP address.
-    pub quic_remote_hostname_match: Option<String>,
+    pub quic_cert_hostname: Option<String>,
     /// Maximum number of concurrently forwarded connections.
     pub max_connections: usize,
     /// Address to serve Prometheus metrics on, if any.
@@ -64,7 +64,7 @@ pub async fn run_client(
         settings.config_dir,
         settings.quic_local_addr,
         settings.quic_remote_addr,
-        settings.quic_remote_hostname_match,
+        settings.quic_cert_hostname,
         Some(settings.max_connections),
         settings.app_data,
     );

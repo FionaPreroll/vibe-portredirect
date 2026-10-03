@@ -63,19 +63,19 @@ For example, if your public server (accessible on TCP port 443) should forward t
 
 ```sh
 portredirect_server \
-    --local-host 0.0.0.0 --allowed-client-ports 443 \
-    --quic-server-host 10.0.0.1 --quic-server-port 12345 \
+    --listen-host 0.0.0.0 --allowed-client-ports 443 \
+    --quic-listen-host 10.0.0.1 --quic-listen-port 12345 \
     --quic-cert-hostname 10.0.0.1 \
-    --quic-psk-file /etc/portredirect/psk
+    --psk-file /etc/portredirect/psk
 ```
 
 **Parameters:**
 
-- **`--local-host`:** Where to listen for incoming TCP connections.
+- **`--listen-host`:** Where to listen for incoming TCP connections.
 - **`--allowed-client-ports`:** TCP ports clients may ask the server to listen on, e.g. `443` or `80,443,8000-8100`.
-- **`--quic-server-host` & `--quic-server-port`:** Where to listen for the QUIC tunnel (UDP).
+- **`--quic-listen-host` & `--quic-listen-port`:** Where to listen for the QUIC tunnel (UDP).
 - **`--quic-cert-hostname`:** IP address or DNS name the generated certificate is issued for, the client verifies it. Only used when the certificate is generated on first start (default `127.0.0.1`).
-- **`--quic-psk-file`:** File containing the pre-shared key, see [PSK Best Practices](#psk-best-practices).
+- **`--psk-file`:** File containing the pre-shared key, see [PSK Best Practices](#psk-best-practices).
 - **`--config-file`:** TOML file with settings, e.g. a list of clients, see [Configuration File](#configuration-file).
 - **`--config-dir`:** Where the certificate and private key are stored (default `~/.config/portredirect`). If only one of them is there, the server doesn't start, instead of generating a new pair that clients wouldn't trust.
 - **`--print-metrics`:** Print connection and traffic counters to stderr when they change.
@@ -99,7 +99,7 @@ portredirect_client \
     --destination-host 127.0.0.1 --destination-port 4433 \
     --remote-listen-port 443 \
     --quic-remote-host 10.0.0.1 --quic-remote-port 12345 \
-    --quic-psk-file /etc/portredirect/psk
+    --psk-file /etc/portredirect/psk
 ```
 
 **Parameters:**
@@ -107,9 +107,9 @@ portredirect_client \
 - **`--destination-host` & `--destination-port`:** The target TCP service.
 - **`--remote-listen-port`:** The TCP port the server should listen on for you. Must be one of the server's `--allowed-client-ports`.
 - **`--quic-remote-host` & `--quic-remote-port`:** The QUIC server’s address.
-- **`--quic-remote-hostname-match`** (optional): Name the server's certificate must be issued for, if it differs from `--quic-remote-host`. Must match the server's `--quic-cert-hostname`.
-- **`--quic-psk-file`:** File containing the pre-shared key, must match the server’s PSK.
-- **`--client-name`** (optional): Name the client authenticates with, 1 to 64 letters, digits, dots, underscores or hyphens (default `default`). A server configured with `--quic-psk-file` and `--allowed-client-ports` knows a single client named `default`, see [Several Clients and Standby](#several-clients-and-standby).
+- **`--quic-cert-hostname`** (optional): Name the server's certificate must be issued for, if it differs from `--quic-remote-host`. Must match the server's `--quic-cert-hostname`.
+- **`--psk-file`:** File containing the pre-shared key, must match the server’s PSK.
+- **`--client-name`** (optional): Name the client authenticates with, 1 to 64 letters, digits, dots, underscores or hyphens (default `default`). A server configured with `--psk-file` and `--allowed-client-ports` knows a single client named `default`, see [Several Clients and Standby](#several-clients-and-standby).
 - **`--config-file`:** TOML file with settings, see [Configuration File](#configuration-file).
 - **`--config-dir`:** Where the server's certificate `cert.der` is read from (default `~/.config/portredirect`).
 - **`--max-connections`:** Maximum number of concurrently forwarded connections (default 512).
@@ -131,7 +131,7 @@ destination-port = 4433
 remote-listen-port = 443
 quic-remote-host = "10.0.0.1"
 quic-remote-port = 12345
-quic-psk-file = "psk"
+psk-file = "psk"
 log-level = "warn"
 ```
 
@@ -139,21 +139,21 @@ log-level = "warn"
 portredirect_client --config-file /etc/portredirect/client.toml
 ```
 
-- **Precedence:** Options on the command line or in the environment (`PORTREDIRECT_QUIC_PSK`) take precedence over the file, and the file over the defaults. So `--log-level debug` overrides the file for a single run. Flags like `--print-metrics` can only switch a setting on.
+- **Precedence:** Options on the command line or in the environment (`PORTREDIRECT_PSK`) take precedence over the file, and the file over the defaults. So `--log-level debug` overrides the file for a single run. Flags like `--print-metrics` can only switch a setting on.
 - **No secrets:** The file only names the files that hold the PSKs; it has no key for a PSK itself.
-- **Paths:** Relative paths in the file, e.g. `quic-psk-file` or `config-dir`, are relative to the file's directory, not to the working directory.
+- **Paths:** Relative paths in the file, e.g. `psk-file` or `config-dir`, are relative to the file's directory, not to the working directory.
 - **Checked:** Unknown keys, e.g. typos, and invalid values are errors: the program names the line and exits with code 2.
 - **Ports:** `allowed-client-ports` and the ports of clients can also be arrays, e.g. `[80, 443, "8000-8100"]`.
 
 ### Several Clients and Standby
 
-The server's configuration file can list several clients, each with its own name, PSK and ports, instead of the single client given by `quic-psk-file` and `allowed-client-ports`:
+The server's configuration file can list several clients, each with its own name, PSK and ports, instead of the single client given by `psk-file` and `allowed-client-ports`:
 
 ```toml
 # /etc/portredirect/server.toml
-local-host = "0.0.0.0"
-quic-server-host = "10.0.0.1"
-quic-server-port = 12345
+listen-host = "0.0.0.0"
+quic-listen-host = "10.0.0.1"
+quic-listen-port = 12345
 quic-cert-hostname = "10.0.0.1"
 
 [[clients]]
@@ -212,9 +212,9 @@ Always use a long, random pre-shared key when operating over untrusted networks.
 
 Both programs accept the PSK from one of these sources:
 
-- **`--quic-psk-file <PATH>`** (recommended): Reads the PSK from a file, trailing line breaks are ignored. PortRedirect warns if the file is accessible by other users. In the [configuration file](#configuration-file), the same is `quic-psk-file`, or `psk-files` for each of the server's [clients](#several-clients-and-standby).
-- **`PORTREDIRECT_QUIC_PSK`** environment variable: Useful for container or service managers that inject secrets.
-- **`--quic-psk <PSK>`**: Avoid this outside of testing. Command-line arguments are visible to every local user in the process list (`ps`, `/proc/<pid>/cmdline`) and end up in shell histories, so PortRedirect warns when it is used.
+- **`--psk-file <PATH>`** (recommended): Reads the PSK from a file, trailing line breaks are ignored. PortRedirect warns if the file is accessible by other users. In the [configuration file](#configuration-file), the same is `psk-file`, or `psk-files` for each of the server's [clients](#several-clients-and-standby).
+- **`PORTREDIRECT_PSK`** environment variable: Useful for container or service managers that inject secrets.
+- **`--psk <PSK>`**: Avoid this outside of testing. Command-line arguments are visible to every local user in the process list (`ps`, `/proc/<pid>/cmdline`) and end up in shell histories, so PortRedirect warns when it is used.
 
 A PSK given on the command line or in the environment takes precedence over the configuration file.
 

@@ -12,10 +12,20 @@ use std::num::{NonZeroU16, NonZeroU32};
 use std::path::{Path, PathBuf};
 use tracing::level_filters::LevelFilter;
 
-use crate::config::{self, merge, merge_option, read_config_file, required, resolve_path};
+use crate::config::{
+    self, check_renamed_environment, check_renamed_options, merge, merge_option, read_config_file,
+    required, resolve_path,
+};
 use crate::protocol::auth::ClientName;
 use crate::psk::{PskArgs, PskSource, PSK_ENV_VAR};
 use crate::PortRedirectProtocol;
+
+/// Options renamed before 1.0, as pairs of old and new names.
+const RENAMED_OPTIONS: &[(&str, &str)] = &[
+    ("--quic-psk", "--psk"),
+    ("--quic-psk-file", "--psk-file"),
+    ("--quic-remote-hostname-match", "--quic-cert-hostname"),
+];
 
 /// PortRedirect client: asks the server to listen on a port and forwards the connections the
 /// server accepts there to the destination.
@@ -104,7 +114,7 @@ pub struct Args {
     /// Name the server's TLS certificate must be issued for (Subject Alt Name), if it differs
     /// from --quic-remote-host. Must match the server's --quic-cert-hostname.
     #[clap(long)]
-    pub quic_remote_hostname_match: Option<String>,
+    pub quic_cert_hostname: Option<String>,
 
     #[command(flatten)]
     pub psk: PskArgs,
@@ -132,8 +142,8 @@ pub struct ConfigFile {
     pub provide_metrics: Option<bool>,
     pub metrics_listen: Option<SocketAddr>,
     pub max_connections: Option<NonZeroU32>,
-    pub quic_remote_hostname_match: Option<String>,
-    pub quic_psk_file: Option<PathBuf>,
+    pub quic_cert_hostname: Option<String>,
+    pub psk_file: Option<PathBuf>,
     #[serde(default, deserialize_with = "config::optional_parsed")]
     pub log_level: Option<LevelFilter>,
 }
@@ -143,11 +153,7 @@ impl ConfigFile {
     /// directory.
     pub fn read(path: &Path) -> Result<Self> {
         let mut file: Self = read_config_file(path)?;
-        for relative in file
-            .config_dir
-            .iter_mut()
-            .chain(file.quic_psk_file.iter_mut())
-        {
+        for relative in file.config_dir.iter_mut().chain(file.psk_file.iter_mut()) {
             *relative = resolve_path(path, relative);
         }
         Ok(file)
@@ -171,7 +177,7 @@ pub struct Config {
     /// Address to serve Prometheus metrics on, if any.
     pub metrics_addr: Option<SocketAddr>,
     pub max_connections: usize,
-    pub quic_remote_hostname_match: Option<String>,
+    pub quic_cert_hostname: Option<String>,
     pub psk: PskSource,
     pub log_level: LevelFilter,
 }
@@ -180,6 +186,13 @@ impl Config {
     /// Returns the configuration given by the program's command line, the environment and the
     /// configuration file. Exits with code 2 if it is invalid, like for invalid arguments.
     pub fn from_command_line() -> Self {
+        let renamed = check_renamed_options(std::env::args_os().skip(1), RENAMED_OPTIONS)
+            .and_then(|()| check_renamed_environment());
+        if let Err(e) = renamed {
+            Args::command()
+                .error(ErrorKind::UnknownArgument, e.to_string())
+                .exit()
+        }
         let matches = Args::command().get_matches();
         Self::from_matches(&matches).unwrap_or_else(|e| {
             Args::command()
@@ -200,10 +213,10 @@ impl Config {
         let psk = args
             .psk
             .source(matches)
-            .or(file.quic_psk_file.map(PskSource::File))
+            .or(file.psk_file.map(PskSource::File))
             .ok_or_else(|| {
                 anyhow!(
-                    "a pre-shared key is required: use --quic-psk-file, {}, --quic-psk, or quic-psk-file in the configuration file",
+                    "a pre-shared key is required: use --psk-file, {}, --psk, or psk-file in the configuration file",
                     PSK_ENV_VAR
                 )
             })?;
@@ -277,11 +290,11 @@ impl Config {
             ),
             metrics_addr: provide_metrics.then_some(metrics_listen),
             max_connections: max_connections as usize,
-            quic_remote_hostname_match: merge_option(
+            quic_cert_hostname: merge_option(
                 matches,
-                "quic_remote_hostname_match",
-                args.quic_remote_hostname_match,
-                file.quic_remote_hostname_match,
+                "quic_cert_hostname",
+                args.quic_cert_hostname,
+                file.quic_cert_hostname,
             ),
             psk,
             log_level: merge(matches, "log_level", args.log_level, file.log_level),
@@ -332,8 +345,8 @@ mod tests {
         provide-metrics = true
         metrics-listen = "127.0.0.1:9999"
         max-connections = 20
-        quic-remote-hostname-match = "tunnel"
-        quic-psk-file = "psk"
+        quic-cert-hostname = "tunnel"
+        psk-file = "psk"
         log-level = "debug"
     "#;
 
@@ -348,7 +361,7 @@ mod tests {
         "127.0.0.1",
         "--quic-remote-port",
         "4433",
-        "--quic-psk-file",
+        "--psk-file",
         "/etc/portredirect/psk",
     ];
 
@@ -369,7 +382,7 @@ mod tests {
             config.max_connections,
             PortRedirectProtocol::DEFAULT_MAX_FORWARDED_CONNECTIONS
         );
-        assert_eq!(config.quic_remote_hostname_match, None);
+        assert_eq!(config.quic_cert_hostname, None);
         assert!(
             matches!(&config.psk, PskSource::File(path) if path == Path::new("/etc/portredirect/psk"))
         );
@@ -395,7 +408,7 @@ mod tests {
         assert_eq!(config.quic_local_port, 5000);
         assert_eq!(config.metrics_addr, Some("127.0.0.1:9999".parse()?));
         assert_eq!(config.max_connections, 20);
-        assert_eq!(config.quic_remote_hostname_match.as_deref(), Some("tunnel"));
+        assert_eq!(config.quic_cert_hostname.as_deref(), Some("tunnel"));
         assert!(matches!(&config.psk, PskSource::File(path) if path == &dir.path().join("psk")));
         assert_eq!(config.log_level, LevelFilter::DEBUG);
         Ok(())
@@ -430,9 +443,9 @@ mod tests {
                 "127.0.0.1:9898",
                 "--max-connections",
                 "30",
-                "--quic-remote-hostname-match",
+                "--quic-cert-hostname",
                 "localhost",
-                "--quic-psk",
+                "--psk",
                 "secret",
                 "--log-level",
                 "warn",
@@ -451,10 +464,7 @@ mod tests {
         assert_eq!(config.quic_local_port, 0);
         assert_eq!(config.metrics_addr, Some("127.0.0.1:9898".parse()?));
         assert_eq!(config.max_connections, 30);
-        assert_eq!(
-            config.quic_remote_hostname_match.as_deref(),
-            Some("localhost")
-        );
+        assert_eq!(config.quic_cert_hostname.as_deref(), Some("localhost"));
         assert!(matches!(config.psk, PskSource::CommandLine(_)));
         assert_eq!(config.psk.load()?.expose_secret(), "secret");
         assert_eq!(config.log_level, LevelFilter::WARN);
@@ -475,7 +485,7 @@ mod tests {
             ("remote-listen-port", "443"),
             ("quic-remote-host", "\"127.0.0.1\""),
             ("quic-remote-port", "4433"),
-            ("quic-psk-file", "\"psk\""),
+            ("psk-file", "\"psk\""),
         ];
         for (missing, _) in required {
             let text: String = required
@@ -484,8 +494,8 @@ mod tests {
                 .map(|(key, value)| format!("{} = {}\n", key, value))
                 .collect();
             let message = error_with_file(&text);
-            let expected = if missing == "quic-psk-file" {
-                "a pre-shared key is required: use --quic-psk-file, PORTREDIRECT_QUIC_PSK, --quic-psk, or quic-psk-file in the configuration file".to_string()
+            let expected = if missing == "psk-file" {
+                "a pre-shared key is required: use --psk-file, PORTREDIRECT_PSK, --psk, or psk-file in the configuration file".to_string()
             } else {
                 format!(
                     "--{0} is required, on the command line or as {0} in the configuration file",
@@ -495,7 +505,7 @@ mod tests {
             assert!(message.contains(&expected), "{}: {}", missing, message);
         }
         // Without configuration file, clap requires them.
-        let err = config(&["--quic-psk", "secret"]).unwrap_err();
+        let err = config(&["--psk", "secret"]).unwrap_err();
         let err = err.downcast::<clap::Error>().unwrap();
         assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
     }
@@ -510,7 +520,7 @@ mod tests {
                 "invalid client name \"my home\"",
             ),
             ("metrics-listen = \"localhost\"", "invalid socket address"),
-            ("quic-psk = \"secret\"", "unknown field `quic-psk`"),
+            ("psk = \"secret\"", "unknown field `psk`"),
             ("provide-metrics = \"yes\"", "invalid type"),
         ] {
             let message = error_with_file(text);

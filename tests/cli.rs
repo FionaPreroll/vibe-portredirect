@@ -57,6 +57,7 @@ impl Program {
     fn start(program: &str, args: &[&str], env: &[(&str, &str)]) -> Program {
         let mut child = Command::new(program)
             .args(args)
+            .env_remove("PORTREDIRECT_PSK")
             .env_remove("PORTREDIRECT_QUIC_PSK")
             .env_remove("RUST_LOG")
             .envs(env.iter().copied())
@@ -219,17 +220,17 @@ async fn start_server(config_dir: &Path, quic_port: u16, listen_port: u16) -> Re
         &[
             "--config-dir",
             path_str(config_dir),
-            "--local-host",
+            "--listen-host",
             "127.0.0.1",
             "--allowed-client-ports",
             &listen_port.to_string(),
-            "--quic-server-port",
+            "--quic-listen-port",
             &quic_port.to_string(),
             "--quic-cert-hostname",
             "localhost",
             "--print-metrics",
         ],
-        &[("PORTREDIRECT_QUIC_PSK", PSK)],
+        &[("PORTREDIRECT_PSK", PSK)],
     );
     server.wait_for_output("QUIC server is ready").await?;
     Ok(server)
@@ -255,7 +256,7 @@ fn client_args(
         "127.0.0.1",
         "--quic-remote-port",
         &quic_port.to_string(),
-        "--quic-remote-hostname-match",
+        "--quic-cert-hostname",
         "localhost",
     ]
     .map(String::from)
@@ -281,28 +282,33 @@ async fn invalid_arguments_exit_with_code_2() -> Result<()> {
         "127.0.0.1",
         "--quic-remote-port",
         "4433",
-        "--quic-psk",
+        "--psk",
         PSK,
     ];
     let server_with_port_0 = [
-        "--local-host",
+        "--listen-host",
         "127.0.0.1",
         "--allowed-client-ports",
         "443,0-100",
-        "--quic-psk",
+        "--psk",
         PSK,
     ];
     let mut client_with_invalid_name = client_with_port_0.to_vec();
     client_with_invalid_name[5] = "443";
     client_with_invalid_name.extend(["--client-name", "my client"]);
-    let server_without_psk = ["--local-host", "127.0.0.1", "--allowed-client-ports", "443"];
+    let server_without_psk = [
+        "--listen-host",
+        "127.0.0.1",
+        "--allowed-client-ports",
+        "443",
+    ];
     // Replaced by --allowed-client-ports.
     let server_with_local_port = [
-        "--local-host",
+        "--listen-host",
         "127.0.0.1",
         "--local-port",
         "443",
-        "--quic-psk",
+        "--psk",
         PSK,
     ];
 
@@ -318,10 +324,46 @@ async fn invalid_arguments_exit_with_code_2() -> Result<()> {
             "invalid client name \"my client\"",
         ),
         (SERVER, server_with_port_0.as_slice(), "random port"),
-        (SERVER, server_without_psk.as_slice(), "--quic-psk"),
+        (SERVER, server_without_psk.as_slice(), "--psk"),
         (SERVER, server_with_local_port.as_slice(), "--local-port"),
     ] {
         let mut process = Program::start(program, args, &[]);
+        assert_eq!(process.exit_code().await?, 2, "{:?}", args);
+        let output = process.output();
+        assert!(output.contains(expected), "{:?}:\n{}", args, output);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn options_renamed_before_1_0_are_named_with_their_new_names() -> Result<()> {
+    for (program, args, env, expected) in [
+        (
+            SERVER,
+            &["--local-host", "127.0.0.1"][..],
+            &[][..],
+            "--local-host was renamed to --listen-host",
+        ),
+        (
+            SERVER,
+            &["--quic-psk-file=/etc/portredirect/psk"],
+            &[],
+            "--quic-psk-file was renamed to --psk-file",
+        ),
+        (
+            CLIENT,
+            &["--quic-remote-hostname-match", "localhost"],
+            &[],
+            "--quic-remote-hostname-match was renamed to --quic-cert-hostname",
+        ),
+        (
+            CLIENT,
+            &[],
+            &[("PORTREDIRECT_QUIC_PSK", PSK)],
+            "the environment variable PORTREDIRECT_QUIC_PSK was renamed to PORTREDIRECT_PSK",
+        ),
+    ] {
+        let mut process = Program::start(program, args, env);
         assert_eq!(process.exit_code().await?, 2, "{:?}", args);
         let output = process.output();
         assert!(output.contains(expected), "{:?}:\n{}", args, output);
@@ -350,7 +392,7 @@ async fn logs_go_to_stderr_without_colors_and_follow_rust_log() -> Result<()> {
     // A client without certificate logs a little and exits right away.
     let config_dir = tempfile::tempdir()?;
     let mut args = client_args(config_dir.path(), free_udp_port(), 1, free_tcp_port());
-    args.extend(["--quic-psk".into(), PSK.into()]);
+    args.extend(["--psk".into(), PSK.into()]);
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
 
     let mut client = Program::start(CLIENT, &args, &[]);
@@ -398,7 +440,7 @@ async fn programs_forward_and_exit_cleanly_on_sigterm() -> Result<()> {
     let mut args = client_args(client_dir.path(), quic_port, echo_addr.port(), listen_port);
     args.extend(
         [
-            "--quic-psk-file",
+            "--psk-file",
             path_str(&psk_file),
             "--provide-metrics",
             "--metrics-listen",
@@ -453,15 +495,15 @@ async fn client_exits_with_code_1_when_the_server_rejects_its_psk() -> Result<()
         &[
             "--config-dir",
             path_str(server_dir.path()),
-            "--local-host",
+            "--listen-host",
             "127.0.0.1",
             "--allowed-client-ports",
             &listen_port.to_string(),
-            "--quic-server-port",
+            "--quic-listen-port",
             &quic_port.to_string(),
             "--quic-cert-hostname",
             "localhost",
-            "--quic-psk",
+            "--psk",
             PSK,
         ],
         &[],
@@ -477,7 +519,7 @@ async fn client_exits_with_code_1_when_the_server_rejects_its_psk() -> Result<()
     let psk_file = client_dir.path().join("psk");
     write_psk_file(&psk_file, "another-psk-0123456789", 0o644)?;
     let mut args = client_args(client_dir.path(), quic_port, 1, listen_port);
-    args.extend(["--quic-psk-file".into(), path_str(&psk_file).into()]);
+    args.extend(["--psk-file".into(), path_str(&psk_file).into()]);
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let mut client = Program::start(CLIENT, &args, &[]);
 
@@ -496,7 +538,7 @@ async fn client_exits_with_code_1_when_the_server_rejects_its_psk() -> Result<()
 async fn client_without_certificate_exits_with_code_1() -> Result<()> {
     let config_dir = tempfile::tempdir()?;
     let mut args = client_args(config_dir.path(), free_udp_port(), 1, free_tcp_port());
-    args.extend(["--quic-psk".into(), PSK.into()]);
+    args.extend(["--psk".into(), PSK.into()]);
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
 
     let mut client = Program::start(CLIENT, &args, &[]);
@@ -527,14 +569,14 @@ async fn server_does_not_start_without_its_private_key() -> Result<()> {
         &[
             "--config-dir",
             path_str(config_dir.path()),
-            "--local-host",
+            "--listen-host",
             "127.0.0.1",
             "--allowed-client-ports",
             "443",
-            "--quic-server-port",
+            "--quic-listen-port",
             &free_udp_port().to_string(),
         ],
-        &[("PORTREDIRECT_QUIC_PSK", PSK)],
+        &[("PORTREDIRECT_PSK", PSK)],
     );
 
     assert_eq!(server.exit_code().await?, 1, "{}", server.output());
@@ -555,16 +597,16 @@ async fn server_with_invalid_certificate_name_exits_with_an_error() -> Result<()
         &[
             "--config-dir",
             path_str(config_dir.path()),
-            "--local-host",
+            "--listen-host",
             "127.0.0.1",
             "--allowed-client-ports",
             "443",
-            "--quic-server-port",
+            "--quic-listen-port",
             &free_udp_port().to_string(),
             "--quic-cert-hostname",
             "bücher.example",
         ],
-        &[("PORTREDIRECT_QUIC_PSK", PSK)],
+        &[("PORTREDIRECT_PSK", PSK)],
     );
 
     // An error, not a panic (exit code 101).
@@ -601,8 +643,8 @@ async fn programs_read_configuration_files() -> Result<()> {
         format!(
             r#"
 config-dir = "state"
-local-host = "127.0.0.1"
-quic-server-port = {quic_port}
+listen-host = "127.0.0.1"
+quic-listen-port = {quic_port}
 quic-cert-hostname = "localhost"
 
 [[clients]]
@@ -643,8 +685,8 @@ remote-listen-port = {listen_port}
 client-name = "office"
 quic-remote-host = "127.0.0.1"
 quic-remote-port = {quic_port}
-quic-remote-hostname-match = "localhost"
-quic-psk-file = "psk"
+quic-cert-hostname = "localhost"
+psk-file = "psk"
 log-level = "error"
 "#,
             echo_addr.port()
@@ -676,7 +718,7 @@ log-level = "error"
             "--client-name",
             "home",
         ],
-        &[("PORTREDIRECT_QUIC_PSK", home_psk)],
+        &[("PORTREDIRECT_PSK", home_psk)],
     );
     home.wait_for_output("Tunnel established").await?;
     assert_echo(listen_port).await?;
@@ -704,7 +746,7 @@ async fn invalid_configuration_files_exit_with_code_2() -> Result<()> {
     let incomplete = write("incomplete.toml", "destination-host = \"localhost\"\n")?;
     let clients = write(
         "clients.toml",
-        "local-host = \"127.0.0.1\"\n[[clients]]\nname = \"home\"\npsk-files = [\"home.psk\"]\nports = 443\n",
+        "listen-host = \"127.0.0.1\"\n[[clients]]\nname = \"home\"\npsk-files = [\"home.psk\"]\nports = 443\n",
     )?;
     let missing = path_str(&dir.path().join("missing.toml")).to_string();
 
@@ -713,15 +755,15 @@ async fn invalid_configuration_files_exit_with_code_2() -> Result<()> {
         (
             CLIENT,
             &incomplete,
-            &[("PORTREDIRECT_QUIC_PSK", PSK)],
+            &[("PORTREDIRECT_PSK", PSK)],
             "--destination-port is required",
         ),
         // A PSK for a single client, though the file lists clients.
         (
             SERVER,
             &clients,
-            &[("PORTREDIRECT_QUIC_PSK", PSK)],
-            "PORTREDIRECT_QUIC_PSK doesn't apply",
+            &[("PORTREDIRECT_PSK", PSK)],
+            "PORTREDIRECT_PSK doesn't apply",
         ),
         (
             SERVER,

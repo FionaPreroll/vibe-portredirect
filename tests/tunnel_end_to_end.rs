@@ -275,7 +275,7 @@ fn client_settings(
         config_dir: config_dir.to_path_buf(),
         quic_local_addr: localhost(0),
         quic_remote_addr: localhost(quic_port),
-        quic_remote_hostname_match: Some(CERT_HOSTNAME.into()),
+        quic_cert_hostname: Some(CERT_HOSTNAME.into()),
         max_connections: PortRedirectProtocol::DEFAULT_MAX_FORWARDED_CONNECTIONS,
         metrics_addr: None,
         reconnect_backoff: Backoff::new(Duration::from_millis(100), Duration::from_secs(1)),
@@ -2026,7 +2026,7 @@ async fn client_gives_up_on_a_certificate_for_another_name() -> Result<()> {
         echo_addr,
         listen_port,
     );
-    settings.quic_remote_hostname_match = Some("other.example".into());
+    settings.quic_cert_hostname = Some("other.example".into());
     let client = spawn_client(settings);
 
     with_timeout(async {
