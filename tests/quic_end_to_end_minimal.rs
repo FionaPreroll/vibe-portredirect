@@ -39,8 +39,12 @@ async fn test_quic_end_to_end_minimal() {
 
     // Define server and client configuration
     let server_app_data =
-        ServerAppData::new(test_psk_server, "0.0.0.0".into(), vec![PortSpec::Single(0)]);
-    let test_port = 65500; // HACK statically chosen port
+        ServerAppData::new(test_psk_server, "0.0.0.0".into(), Vec::<PortSpec>::new());
+    // A UDP port that was free a moment ago, so tests running in parallel don't collide.
+    let test_port = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+        .and_then(|socket| socket.local_addr())
+        .expect("failed to find a free UDP port")
+        .port();
     let server_config: server::ServerConfig<ServerAppData> =
         server::ServerConfig::create_default_config(
             config_dir.clone(),

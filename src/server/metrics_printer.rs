@@ -17,7 +17,7 @@ pub async fn print_metrics_loop() {
 
         // Render the current metrics string without a timestamp.
         let current_metrics = format!(
-            "accepted: {} | failed_accept: {} | refused: {} | quic_err: {} | bytes_a: {} | bytes_b: {} | tcp_quic_closed_err: {} | tcp_quic_closed_graceful: {} | keepalive_err: {} | server_opened: {} | server_closed: {}",
+            "accepted: {} | failed_accept: {} | refused: {} | quic_err: {} | bytes_a: {} | bytes_b: {} | tcp_quic_closed_err: {} | tcp_quic_closed_graceful: {} | keepalive_err: {} | clients_connected: {} | clients_closed: {}",
             TCP_CONNECTIONS_ACCEPTED.get(),
             TCP_CONNECTIONS_FAILED_ACCEPTING.get(),
             TCP_CONNECTIONS_REFUSED.get(),
@@ -27,8 +27,8 @@ pub async fn print_metrics_loop() {
             TCP_QUIC_CONNECTIONS_CLOSED_ERROR.get(),
             TCP_QUIC_CONNECTIONS_CLOSED_GRACEFUL.get(),
             KEEPALIVE_ERRORS.get(),
-            SERVER_CONNECTIONS_OPENED_TOTAL.get(),
-            SERVER_CONNECTIONS_GRACEFULLY_CLOSED_TOTAL.get()
+            CLIENT_CONNECTIONS_TOTAL.get(),
+            CLIENT_CONNECTIONS_CLOSED_TOTAL.get()
         );
 
         // Print only if the metrics string has changed.

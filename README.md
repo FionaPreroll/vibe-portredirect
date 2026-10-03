@@ -52,7 +52,7 @@ cargo install --locked --path .
 
 `--locked` uses the dependency versions from `Cargo.lock`, which are the ones tested and audited in CI.
 
-> **Note:** The latest `portredirect` package on crates.io, version 0.3.0, predates the current protocol version 3 (see [docs/PROTOCOL.md](docs/PROTOCOL.md)) and can't talk to this version. It will be updated once this version has proven stable in practice. Server and client must speak the same protocol version.
+> **Note:** The latest `portredirect` package on crates.io, version 0.3.0, predates the current protocol version 4 (see [docs/PROTOCOL.md](docs/PROTOCOL.md)) and can't talk to this version. It will be updated once this version has proven stable in practice. Server and client must speak the same protocol version.
 
 ## Usage
 
@@ -75,7 +75,7 @@ portredirect_server \
 - **`--quic-server-host` & `--quic-server-port`:** Where to listen for the QUIC tunnel (UDP).
 - **`--quic-cert-hostname`:** IP address or DNS name the generated certificate is issued for, the client verifies it. Only used when the certificate is generated on first start (default `127.0.0.1`).
 - **`--quic-psk-file`:** File containing the pre-shared key, see [PSK Best Practices](#psk-best-practices).
-- **`--config-dir`:** Where the certificate and private key are stored (default `~/.config/portredirect`).
+- **`--config-dir`:** Where the certificate and private key are stored (default `~/.config/portredirect`). If only one of them is there, the server doesn't start, instead of generating a new pair that clients wouldn't trust.
 - **`--print-metrics`:** Print connection and traffic counters to stderr when they change.
 - **`--log-level`:** `off`, `error`, `warn`, `info` (default), `debug` or `trace`.
 
@@ -172,6 +172,9 @@ make test
 ```
 
 The Cargo tests include end-to-end tests of a complete tunnel in `tests/tunnel_end_to_end.rs`.
+
+To see which code the Cargo tests cover, install [cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov) and run `make coverage`.
+It prints a summary per file and writes an HTML report with the covered lines to `target/llvm-cov/html`.
 
 Before committing, run the linters (`cargo fmt --check`, `cargo clippy` and, if installed, `black`):
 

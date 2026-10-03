@@ -29,7 +29,7 @@ struct Args {
     local_host: String,
 
     /// TCP listener port for external connections (deprecated, use --allowed-client-ports instead).
-    #[clap(long)]
+    #[clap(long, value_parser = clap::value_parser!(u16).range(1..))]
     local_port: Option<u16>,
 
     /// Allowed ports for clients to request, e.g., "80,443,1000-2000"

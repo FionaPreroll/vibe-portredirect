@@ -334,6 +334,52 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn test_server_reads_messages_split_into_parts() {
+        let mock = Builder::new()
+            .read(b"PI")
+            .read(b"NG\n")
+            .write(PONG_MESSAGE)
+            .read(b"B")
+            .read(b"YE\n")
+            .build();
+
+        let end = run_control_channel_loop(mock, CancellationToken::new()).await;
+
+        assert!(matches!(end, ControlChannelEnd::ClientSaidBye), "{:?}", end);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_server_reads_several_messages_at_once() {
+        let (mut client_side, server_side) = duplex(64);
+        let server = tokio::spawn(run_control_channel_loop(
+            server_side,
+            CancellationToken::new(),
+        ));
+
+        client_side.write_all(b"PING\nPING\nBYE\n").await.unwrap();
+        let mut pongs = [0u8; 2 * PONG_MESSAGE.len()];
+        client_side.read_exact(&mut pongs).await.unwrap();
+
+        assert_eq!(pongs.as_slice(), PONG_MESSAGE.repeat(2));
+        let end = server.await.unwrap();
+        assert!(matches!(end, ControlChannelEnd::ClientSaidBye), "{:?}", end);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_server_stops_on_truncated_message() {
+        let mock = Builder::new().read(b"PI").build();
+
+        let end = run_control_channel_loop(mock, CancellationToken::new()).await;
+
+        assert!(
+            matches!(&end, ControlChannelEnd::StreamClosed(Some(e)) if e.kind() == io::ErrorKind::UnexpectedEof),
+            "{:?}",
+            end
+        );
+        assert_eq!(end.close_code(), CloseCode::Ok);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn test_server_stops_when_connection_closes() {
         let mock = Builder::new()
             .read(PING_MESSAGE)

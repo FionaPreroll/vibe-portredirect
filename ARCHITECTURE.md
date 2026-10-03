@@ -9,7 +9,7 @@ How client and server talk to each other is described in [docs/PROTOCOL.md](docs
 | ---------------------- | ------------------------------------------------------------------------------------------------------------ |
 | `src/server/`          | `portredirect_server`: command line (`main.rs`), handling of one client connection (`client_handler.rs`) including its authentication (`auth.rs`), listener for external TCP connections with its limits (`tcp_listener.rs`), forwarding and metrics. |
 | `src/client/`          | `portredirect_client`: command line (`main.rs`), connecting and reconnecting (`run_client.rs`, `reconnect.rs`), handling of the server connection (`server_handler.rs`) including the authentication (`auth.rs`), forwarding to the destination, Prometheus endpoint (`metrics.rs`). |
-| `src/protocol/`        | Messages on the control stream: authentication (`auth.rs`), listen port request (`control.rs`), keepalive (`keepalive.rs`). Codes for closing connections (`close.rs`). |
+| `src/protocol/`        | Messages on the control stream: authentication (`auth.rs`), listen port request (`control.rs`), keepalive (`keepalive.rs`). Header of data streams (`data_stream.rs`), codes for closing connections (`close.rs`). |
 | `src/quic/`            | QUIC endpoints of both sides, certificate loading and generation, ALPN and transport settings, admission of new connections on the server. |
 | `src/limits.rs`        | Connection limits per address, blocking of addresses after failed authentication attempts.                   |
 | `src/forward.rs`       | Copies data in both directions between a TCP connection and a QUIC stream, closes idle connections.          |

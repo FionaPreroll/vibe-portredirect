@@ -32,10 +32,11 @@ impl Backoff {
     /// don't reconnect in lockstep, e.g. after a server restart.
     pub fn next_delay(&mut self) -> Duration {
         let nominal = self.next;
-        self.next = (self.next * 2).min(self.max);
+        self.next = self.next.saturating_mul(2).min(self.max);
         // Without randomness, use the nominal delay.
         let random = getrandom::u32().unwrap_or(u32::MAX);
-        nominal.mul_f64(0.5 + 0.5 * f64::from(random) / f64::from(u32::MAX))
+        let factor = 0.5 + 0.5 * f64::from(random) / f64::from(u32::MAX);
+        Duration::try_from_secs_f64(nominal.as_secs_f64() * factor).unwrap_or(nominal)
     }
 
     /// Starts over with the initial delay, e.g. after a connection worked for a while.
@@ -127,6 +128,29 @@ mod tests {
     }
 
     #[test]
+    fn test_backoff_with_huge_maximum_does_not_overflow() {
+        let mut backoff = Backoff::new(Duration::from_secs(1), Duration::MAX);
+        let mut delay = Duration::ZERO;
+        // Doubling 100 times exceeds the largest Duration.
+        for _ in 0..100 {
+            delay = backoff.next_delay();
+        }
+        assert!(delay >= Duration::MAX / 4, "{:?}", delay);
+    }
+
+    #[test]
+    fn test_default_backoff() {
+        let mut backoff = Backoff::default();
+        let first = backoff.next_delay();
+        assert!(first >= Duration::from_millis(500) && first <= Duration::from_secs(1));
+        for _ in 0..10 {
+            backoff.next_delay();
+        }
+        let capped = backoff.next_delay();
+        assert!(capped >= Duration::from_secs(30) && capped <= Duration::from_secs(60));
+    }
+
+    #[test]
     fn test_backoff_reset() {
         let mut backoff = Backoff::new(Duration::from_secs(1), Duration::from_secs(10));
         for _ in 0..5 {
@@ -186,6 +210,27 @@ mod tests {
         assert!(is_permanent_error(
             &anyhow::Error::new(error).context("failed to connect"),
             None
+        ));
+    }
+
+    #[test]
+    fn test_quic_version_mismatch_is_permanent() {
+        assert!(is_permanent_error(
+            &anyhow!("failed to connect"),
+            Some(&ConnectionError::VersionMismatch)
+        ));
+    }
+
+    #[test]
+    fn test_unknown_close_codes_are_transient() {
+        // A newer server might close with codes this client doesn't know; try again.
+        let error = ConnectionError::ApplicationClosed(ApplicationClose {
+            error_code: quinn::VarInt::from_u32(1000),
+            reason: Default::default(),
+        });
+        assert!(!is_permanent_error(
+            &anyhow!("connection ended"),
+            Some(&error)
         ));
     }
 

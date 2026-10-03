@@ -48,6 +48,7 @@ digraph {
     "portredirect::protocol::auth" [label="pub mod|protocol::auth", fillcolor="#81c169"]; // "mod" node
     "portredirect::protocol::close" [label="pub mod|protocol::close", fillcolor="#81c169"]; // "mod" node
     "portredirect::protocol::control" [label="pub mod|protocol::control", fillcolor="#81c169"]; // "mod" node
+    "portredirect::protocol::data_stream" [label="pub mod|protocol::data_stream", fillcolor="#81c169"]; // "mod" node
     "portredirect::protocol::keepalive" [label="pub mod|protocol::keepalive", fillcolor="#81c169"]; // "mod" node
     "portredirect::psk" [label="pub mod|psk", fillcolor="#81c169"]; // "mod" node
     "portredirect::quic" [label="pub mod|quic", fillcolor="#81c169"]; // "mod" node
@@ -82,6 +83,7 @@ digraph {
     "portredirect::protocol" -> "portredirect::protocol::auth" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge
     "portredirect::protocol" -> "portredirect::protocol::close" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge
     "portredirect::protocol" -> "portredirect::protocol::control" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge
+    "portredirect::protocol" -> "portredirect::protocol::data_stream" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge
     "portredirect::protocol" -> "portredirect::protocol::keepalive" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge
     "portredirect::quic" -> "portredirect::quic::client" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge
     "portredirect::quic" -> "portredirect::quic::server" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge

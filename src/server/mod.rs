@@ -54,35 +54,42 @@ impl FromStr for PortSpec {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let s = s.trim();
         if let Some((start, end)) = s.split_once('-') {
-            let start = start
-                .trim()
-                .parse::<u16>()
-                .map_err(|e| format!("Invalid start port: {}", e))?;
-            let end = end
-                .trim()
-                .parse::<u16>()
-                .map_err(|e| format!("Invalid end port: {}", e))?;
+            let start = parse_port(start, "start port")?;
+            let end = parse_port(end, "end port")?;
             if start > end {
                 return Err(format!("Invalid range: {}-{}", start, end));
             }
             Ok(PortSpec::Range(start, end))
         } else {
-            let port = s
-                .parse::<u16>()
-                .map_err(|e| format!("Invalid port: {}", e))?;
-            Ok(PortSpec::Single(port))
+            Ok(PortSpec::Single(parse_port(s, "port")?))
         }
+    }
+}
+
+/// Parses a port clients may request, see [`PortSpec::allows`] about port 0.
+fn parse_port(s: &str, what: &str) -> Result<u16, String> {
+    match s.trim().parse::<u16>() {
+        Ok(0) => Err(format!(
+            "Invalid {}: 0, the system would choose a random port",
+            what
+        )),
+        Ok(port) => Ok(port),
+        Err(e) => Err(format!("Invalid {}: {}", what, e)),
     }
 }
 
 // Check whether a port is allowed.
 impl PortSpec {
     /// Returns true if the given port is allowed by this PortSpec.
+    ///
+    /// Port 0 is never allowed: listening on it makes the system choose a random port, which
+    /// isn't necessarily allowed.
     pub fn allows(&self, port: u16) -> bool {
-        match self {
-            PortSpec::Single(allowed) => port == *allowed,
-            PortSpec::Range(start, end) => port >= *start && port <= *end,
-        }
+        port != 0
+            && match self {
+                PortSpec::Single(allowed) => port == *allowed,
+                PortSpec::Range(start, end) => port >= *start && port <= *end,
+            }
     }
 }
 
@@ -111,5 +118,96 @@ pub trait AllowedPorts {
 impl AllowedPorts for [PortSpec] {
     fn allows(&self, port: u16) -> bool {
         self.iter().any(|spec| spec.allows(port))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(s: &str) -> Result<PortSpec, String> {
+        s.parse()
+    }
+
+    #[test]
+    fn test_parse_single_ports_and_ranges() {
+        assert!(matches!(parse("443"), Ok(PortSpec::Single(443))));
+        assert!(matches!(parse(" 80 "), Ok(PortSpec::Single(80))));
+        assert!(matches!(
+            parse("1000-2000"),
+            Ok(PortSpec::Range(1000, 2000))
+        ));
+        assert!(matches!(
+            parse("1000 - 2000"),
+            Ok(PortSpec::Range(1000, 2000))
+        ));
+        assert!(matches!(
+            parse("8080-8080"),
+            Ok(PortSpec::Range(8080, 8080))
+        ));
+        assert!(matches!(parse("1-65535"), Ok(PortSpec::Range(1, 65535))));
+    }
+
+    #[test]
+    fn test_parse_rejects_invalid_specs() {
+        for spec in [
+            "",
+            "-",
+            "abc",
+            "443-",
+            "-443",
+            "65536",
+            "1-65536",
+            "2000-1000",
+            "1-2-3",
+            "80,443",
+            "-1",
+        ] {
+            assert!(parse(spec).is_err(), "{:?} must be rejected", spec);
+        }
+    }
+
+    #[test]
+    fn test_parse_rejects_port_zero() {
+        for spec in ["0", "0-100", " 0 - 0 "] {
+            let err = parse(spec).unwrap_err();
+            assert!(err.contains("random port"), "{:?}: {}", spec, err);
+        }
+    }
+
+    #[test]
+    fn test_allows_range_boundaries() {
+        let range = PortSpec::Range(1000, 2000);
+        assert!(!range.allows(999));
+        assert!(range.allows(1000));
+        assert!(range.allows(2000));
+        assert!(!range.allows(2001));
+
+        let single = PortSpec::Single(443);
+        assert!(single.allows(443));
+        assert!(!single.allows(442) && !single.allows(444));
+    }
+
+    #[test]
+    fn test_port_zero_is_never_allowed() {
+        // Specs built in code are not parsed, so allows() must reject port 0 itself.
+        assert!(!PortSpec::Single(0).allows(0));
+        assert!(!PortSpec::Range(0, 100).allows(0));
+        assert!(PortSpec::Range(0, 100).allows(1));
+    }
+
+    #[test]
+    fn test_allowed_ports_of_a_list() {
+        let allowed: Vec<PortSpec> = "80, 443,8000-8100"
+            .split(',')
+            .map(|spec| spec.parse().unwrap())
+            .collect();
+        for port in [80, 443, 8000, 8050, 8100] {
+            assert!(allowed.allows(port), "{} must be allowed", port);
+        }
+        for port in [0, 81, 442, 7999, 8101] {
+            assert!(!allowed.allows(port), "{} must not be allowed", port);
+        }
+        assert!(!Vec::<PortSpec>::new().allows(80));
     }
 }

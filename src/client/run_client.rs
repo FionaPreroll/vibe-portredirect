@@ -87,13 +87,7 @@ pub async fn run_client(
             return Err(error.context("connecting again would fail the same way, giving up"));
         }
 
-        if attempt
-            .connected_for
-            .is_some_and(|duration| duration >= STABLE_CONNECTION_DURATION)
-        {
-            backoff.reset();
-        }
-        let delay = backoff.next_delay();
+        let delay = reconnect_delay(&mut backoff, attempt.connected_for);
         warn!(
             "Disconnected from the server: {:#}. Reconnecting in {:.1?}",
             error, delay
@@ -108,6 +102,15 @@ pub async fn run_client(
     info!("Shutting down");
     client.shutdown("client shutting down").await;
     Ok(())
+}
+
+/// Returns the delay before connecting again, after a connection that was established for
+/// `connected_for`, if at all. After a connection that worked for a while, the delays start over.
+fn reconnect_delay(backoff: &mut Backoff, connected_for: Option<Duration>) -> Duration {
+    if connected_for.is_some_and(|duration| duration >= STABLE_CONNECTION_DURATION) {
+        backoff.reset();
+    }
+    backoff.next_delay()
 }
 
 /// Result of one connection to the server.
@@ -146,5 +149,35 @@ async fn run_connection(client: &QuicClient<ClientAppData>) -> ConnectionAttempt
         result,
         close_reason: connection.close_reason(),
         connected_for: Some(connected.elapsed()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn backoff() -> Backoff {
+        Backoff::new(Duration::from_secs(1), Duration::from_secs(60))
+    }
+
+    #[test]
+    fn test_delays_grow_while_connections_fail_or_end_soon() {
+        let mut backoff = backoff();
+        for connected_for in [None, Some(Duration::from_secs(5)), None] {
+            reconnect_delay(&mut backoff, connected_for);
+        }
+        // The fourth delay is 8 seconds, minus up to half for jitter.
+        assert!(reconnect_delay(&mut backoff, None) >= Duration::from_secs(4));
+    }
+
+    #[test]
+    fn test_delays_start_over_after_a_stable_connection() {
+        let mut backoff = backoff();
+        for _ in 0..5 {
+            reconnect_delay(&mut backoff, None);
+        }
+        // E.g. after a network outage ended a connection that worked for a day.
+        let delay = reconnect_delay(&mut backoff, Some(STABLE_CONNECTION_DURATION));
+        assert!(delay <= Duration::from_secs(1), "{:?}", delay);
     }
 }

@@ -10,12 +10,12 @@ use crate::forward::forward_bidirectional;
 use anyhow::Result;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::{debug, instrument};
+use tracing::debug;
 
 /// Forwards an incoming TCP connection to a QUIC stream (server side).
 ///
 /// Forwarding ends when no data was transferred for `idle_timeout`, if given.
-#[instrument(skip(tcp_stream, quic_stream))]
+#[cfg_attr(not(coverage), tracing::instrument(skip(tcp_stream, quic_stream)))]
 pub async fn forward_tcp_to_quic_stream<QuicStreamType>(
     mut tcp_stream: tokio::net::TcpStream,
     mut quic_stream: QuicStreamType,
