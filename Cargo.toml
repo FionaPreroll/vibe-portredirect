@@ -32,7 +32,7 @@ rustls = { version = "0.23.45", default-features = false, features = ["logging",
 secrecy = "0.10.3"
 serde = { version = "1.0.229", features = ["derive"] }
 tokio = { version = "1.50.0", features = ["full"] }
-tokio-util = { version = "0.7.13", features = ["compat"] }
+tokio-util = { version = "0.7.13", features = ["compat", "rt"] }
 toml = { version = "1.1.6", default-features = false, features = ["std", "serde", "parse"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }

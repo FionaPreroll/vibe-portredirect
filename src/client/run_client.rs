@@ -10,9 +10,9 @@ use crate::app_data::ClientAppData;
 use crate::protocol::close::CloseCode;
 use crate::protocol::message::ProtocolViolation;
 use crate::quic::client::{ClientConfig, QuicClient};
+use crate::shutdown::Shutdown;
 
 use anyhow::{Context, Result};
-use std::future::Future;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -38,18 +38,18 @@ pub struct ClientSettings {
     pub metrics_addr: Option<SocketAddr>,
     /// Delays between reconnection attempts.
     pub reconnect_backoff: Backoff,
+    /// When to shut down, and the forwarded connections that may finish meanwhile.
+    pub shutdown: Shutdown,
 }
 
 /// Runs the client: connects to the server and reconnects whenever the connection ends, with
-/// growing delays, until `shutdown` completes.
+/// growing delays, until the settings' shutdown drains. Then the running forwarded connections
+/// may finish, see [`handle_quic_server_connection`].
 ///
-/// Returns `Ok` after `shutdown` completed, and an error if the client can't work without a
-/// change of the configuration, e.g. because the server rejected the PSK or the requested port,
-/// or the server's certificate is missing or doesn't match.
-pub async fn run_client(
-    settings: ClientSettings,
-    shutdown: impl Future<Output = ()>,
-) -> Result<()> {
+/// Returns `Ok` after shutting down, and an error if the client can't work without a change of
+/// the configuration, e.g. because the server rejected the PSK or the requested port, or the
+/// server's certificate is missing or doesn't match.
+pub async fn run_client(settings: ClientSettings) -> Result<()> {
     // Start the metrics server if enabled.
     if let Some(metrics_addr) = settings.metrics_addr {
         tokio::spawn(async move {
@@ -60,7 +60,8 @@ pub async fn run_client(
     }
 
     // Build the QUIC client.
-    let quic_client_config = ClientConfig::create_default_config(
+    let shutdown = settings.shutdown;
+    let mut quic_client_config = ClientConfig::create_default_config(
         settings.config_dir,
         settings.quic_local_addr,
         settings.quic_remote_addr,
@@ -68,15 +69,16 @@ pub async fn run_client(
         Some(settings.max_connections),
         settings.app_data,
     );
+    quic_client_config.shutdown = shutdown.clone();
     let client = QuicClient::new(quic_client_config)?;
 
     let mut backoff = settings.reconnect_backoff;
-    tokio::pin!(shutdown);
     loop {
-        let attempt = tokio::select! {
-            attempt = run_connection(&client) => attempt,
-            () = &mut shutdown => break,
-        };
+        // Ends after the connection finished shutting down, if the client shuts down.
+        let attempt = run_connection(&client).await;
+        if shutdown.is_draining() {
+            break;
+        }
 
         let error = match (attempt.result, &attempt.close_reason) {
             (Ok(()), Some(reason)) => anyhow::anyhow!("the server ended the tunnel: {}", reason),
@@ -102,11 +104,11 @@ pub async fn run_client(
 
         tokio::select! {
             () = tokio::time::sleep(delay) => {}
-            () = &mut shutdown => break,
+            () = shutdown.draining() => break,
         }
     }
 
-    info!("Shutting down");
+    info!("Shut down");
     client.shutdown("client shutting down").await;
     Ok(())
 }
@@ -129,9 +131,14 @@ struct ConnectionAttempt {
     connected_for: Option<Duration>,
 }
 
-/// Connects to the server and handles the connection until it ends.
+/// Connects to the server and handles the connection until it ends, or until the client shut
+/// down.
 async fn run_connection(client: &QuicClient<ClientAppData>) -> ConnectionAttempt {
-    let connection = match client.connect().await {
+    let connected = tokio::select! {
+        connected = client.connect() => connected,
+        () = client.config().shutdown.draining() => Err(anyhow::anyhow!("shutting down")),
+    };
+    let connection = match connected {
         Ok(connection) => connection,
         Err(e) => {
             return ConnectionAttempt {

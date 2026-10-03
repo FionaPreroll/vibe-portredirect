@@ -198,6 +198,15 @@ async fn assert_echo(listen_port: u16) -> Result<()> {
     Ok(())
 }
 
+/// Sends `message` over `stream` and checks that the echo server returns it.
+async fn echo_on(stream: &mut TcpStream, message: &[u8]) -> Result<()> {
+    stream.write_all(message).await?;
+    let mut echoed = vec![0u8; message.len()];
+    timeout(WAIT_TIMEOUT, stream.read_exact(&mut echoed)).await??;
+    anyhow::ensure!(echoed == message, "echoed {:?}", echoed);
+    Ok(())
+}
+
 /// Waits until nothing listens on `port` anymore.
 async fn wait_until_closed(port: u16) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -215,23 +224,32 @@ fn path_str(path: &Path) -> &str {
 /// Starts a server with the PSK in the environment and waits until it is ready.
 /// It prints its metrics whenever they change.
 async fn start_server(config_dir: &Path, quic_port: u16, listen_port: u16) -> Result<Program> {
-    let server = Program::start(
-        SERVER,
-        &[
-            "--config-dir",
-            path_str(config_dir),
-            "--listen-host",
-            "127.0.0.1",
-            "--allowed-client-ports",
-            &listen_port.to_string(),
-            "--quic-listen-port",
-            &quic_port.to_string(),
-            "--quic-cert-hostname",
-            "localhost",
-            "--print-metrics",
-        ],
-        &[("PORTREDIRECT_PSK", PSK)],
-    );
+    start_server_with(config_dir, quic_port, listen_port, &[]).await
+}
+
+/// Like [`start_server`], with additional arguments.
+async fn start_server_with(
+    config_dir: &Path,
+    quic_port: u16,
+    listen_port: u16,
+    extra_args: &[&str],
+) -> Result<Program> {
+    let (listen_port, quic_port) = (listen_port.to_string(), quic_port.to_string());
+    let mut args = vec![
+        "--config-dir",
+        path_str(config_dir),
+        "--listen-host",
+        "127.0.0.1",
+        "--allowed-client-ports",
+        &listen_port,
+        "--quic-listen-port",
+        &quic_port,
+        "--quic-cert-hostname",
+        "localhost",
+        "--print-metrics",
+    ];
+    args.extend(extra_args);
+    let server = Program::start(SERVER, &args, &[("PORTREDIRECT_PSK", PSK)]);
     server.wait_for_output("QUIC server is ready").await?;
     Ok(server)
 }
@@ -777,5 +795,77 @@ async fn invalid_configuration_files_exit_with_code_2() -> Result<()> {
         let output = process.output();
         assert!(output.contains(expected), "{}:\n{}", config_file, output);
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn programs_let_running_connections_finish_on_sigterm() -> Result<()> {
+    let (server_dir, client_dir) = (tempfile::tempdir()?, tempfile::tempdir()?);
+    let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
+    let echo_addr = start_echo_server().await?;
+
+    let mut server = start_server_with(
+        server_dir.path(),
+        quic_port,
+        listen_port,
+        &["--shutdown-timeout", "60"],
+    )
+    .await?;
+    fs::copy(
+        server_dir.path().join("cert.der"),
+        client_dir.path().join("cert.der"),
+    )?;
+    let mut args = client_args(client_dir.path(), quic_port, echo_addr.port(), listen_port);
+    args.extend(["--shutdown-timeout".into(), "60".into()]);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let env = [("PORTREDIRECT_PSK", PSK)];
+
+    // On SIGTERM, the client stops taking new connections, but lets the running one finish.
+    let mut client = Program::start(CLIENT, &args, &env);
+    client.wait_for_output("Tunnel established").await?;
+    let mut running = TcpStream::connect(localhost(listen_port)).await?;
+    echo_on(&mut running, b"before").await?;
+    client.terminate();
+    wait_until_closed(listen_port).await?;
+    echo_on(&mut running, b"during").await?;
+    drop(running);
+    assert_eq!(client.exit_code().await?, 0, "{}", client.output());
+    let output = client.output();
+    assert!(
+        output.contains("All forwarded connections finished"),
+        "{}",
+        output
+    );
+
+    // A second signal closes running connections right away, here the server's.
+    let mut client = Program::start(CLIENT, &args, &env);
+    client.wait_for_output("Tunnel established").await?;
+    let mut running = TcpStream::connect(localhost(listen_port)).await?;
+    echo_on(&mut running, b"before").await?;
+    server.terminate();
+    server
+        .wait_for_output("Waiting up to 60s for running forwarded connections to finish: 1")
+        .await?;
+    client
+        .wait_for_output("The server starts no new forwarded connections")
+        .await?;
+    echo_on(&mut running, b"during").await?;
+    let second_signal = Instant::now();
+    server.terminate();
+    assert_eq!(server.exit_code().await?, 0, "{}", server.output());
+    assert!(second_signal.elapsed() < Duration::from_secs(10));
+    let output = server.output();
+    assert!(
+        output.contains("Closing forwarded connections that didn't finish: 1"),
+        "{}",
+        output
+    );
+    // The tunnel ended, so the running connection ended, too.
+    let mut buf = [0u8; 16];
+    let read = timeout(WAIT_TIMEOUT, running.read(&mut buf)).await?;
+    assert!(matches!(read, Ok(0) | Err(_)), "{:?}", read);
+
+    client.terminate();
+    assert_eq!(client.exit_code().await?, 0, "{}", client.output());
     Ok(())
 }

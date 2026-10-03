@@ -21,6 +21,7 @@ use crate::protocol::auth::{ClientName, MAX_PSKS_PER_CLIENT};
 use crate::psk::{PskArgs, PskSource, PSK_ENV_VAR};
 use crate::server::clients::{ClientEntry, ClientList};
 use crate::server::{ForwardingLimits, PortSpec};
+use crate::shutdown::DEFAULT_SHUTDOWN_TIMEOUT;
 use crate::PortRedirectProtocol;
 
 /// Default for --max-quic-connections.
@@ -108,6 +109,11 @@ pub struct Args {
     #[clap(long)]
     pub print_metrics: bool,
 
+    /// Seconds that running forwarded connections may take to finish when shutting down on
+    /// SIGINT or SIGTERM, 0 to close them right away. A second signal closes them right away.
+    #[clap(long, default_value_t = DEFAULT_SHUTDOWN_TIMEOUT.as_secs())]
+    pub shutdown_timeout: u64,
+
     /// Log messages up to this level: off, error, warn, info, debug or trace. The RUST_LOG
     /// environment variable, if set, takes precedence and can set levels per module.
     #[clap(long, default_value = "info")]
@@ -132,6 +138,7 @@ pub struct ConfigFile {
     pub max_connections_per_ip: Option<u32>,
     pub idle_timeout: Option<u64>,
     pub print_metrics: Option<bool>,
+    pub shutdown_timeout: Option<u64>,
     #[serde(default, deserialize_with = "config::optional_parsed")]
     pub log_level: Option<LevelFilter>,
     pub clients: Option<Vec<ConfiguredClient>>,
@@ -187,6 +194,8 @@ pub struct Config {
     pub max_quic_connections: usize,
     pub forwarding_limits: ForwardingLimits,
     pub print_metrics: bool,
+    /// How long running forwarded connections may take to finish when shutting down.
+    pub shutdown_timeout: Duration,
     pub log_level: LevelFilter,
 }
 
@@ -361,6 +370,12 @@ impl Config {
                 args.print_metrics,
                 file.print_metrics,
             ),
+            shutdown_timeout: Duration::from_secs(merge(
+                matches,
+                "shutdown_timeout",
+                args.shutdown_timeout,
+                file.shutdown_timeout,
+            )),
             log_level: merge(matches, "log_level", args.log_level, file.log_level),
             config_file: args.config_file,
         })
@@ -434,6 +449,7 @@ mod tests {
         max-connections-per-ip = 0
         idle-timeout = 0
         print-metrics = true
+        shutdown-timeout = 30
         log-level = "debug"
     "#;
 
@@ -465,6 +481,7 @@ mod tests {
         assert_eq!(config.max_quic_connections, 64);
         assert_eq!(config.forwarding_limits, ForwardingLimits::default());
         assert!(!config.print_metrics);
+        assert_eq!(config.shutdown_timeout, DEFAULT_SHUTDOWN_TIMEOUT);
         assert_eq!(config.log_level, LevelFilter::INFO);
         Ok(())
     }
@@ -501,6 +518,7 @@ mod tests {
             }
         );
         assert!(config.print_metrics);
+        assert_eq!(config.shutdown_timeout, Duration::from_secs(30));
         assert_eq!(config.log_level, LevelFilter::DEBUG);
         Ok(())
     }
@@ -534,6 +552,8 @@ mod tests {
                 "50",
                 "--idle-timeout",
                 "60",
+                "--shutdown-timeout",
+                "0",
                 "--log-level",
                 "warn",
             ],
@@ -566,6 +586,7 @@ mod tests {
         );
         // A flag can only switch a setting on.
         assert!(config.print_metrics);
+        assert_eq!(config.shutdown_timeout, Duration::ZERO);
         assert_eq!(config.log_level, LevelFilter::WARN);
 
         let config = config_with_file(

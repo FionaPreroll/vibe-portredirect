@@ -7,7 +7,8 @@ use portredirect::app_data::ClientAppData;
 use portredirect::client::config::Config;
 use portredirect::client::reconnect::Backoff;
 use portredirect::client::run_client::{run_client, ClientSettings};
-use portredirect::{get_config_dir, init_logging, shutdown_signal};
+use portredirect::shutdown::Shutdown;
+use portredirect::{get_config_dir, init_logging};
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::process::ExitCode;
 use tracing::{error, info, span, Level};
@@ -77,8 +78,9 @@ async fn run(config: Config) -> Result<()> {
         max_connections: config.max_connections,
         metrics_addr: config.metrics_addr,
         reconnect_backoff: Backoff::default(),
+        shutdown: Shutdown::on_signals(config.shutdown_timeout),
     };
-    run_client(settings, shutdown_signal()).await
+    run_client(settings).await
 }
 
 /// Resolves `host` and `port` to a socket address.

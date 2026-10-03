@@ -196,7 +196,7 @@ On errors, the server closes the connection: with code 5 if the client may not u
   - From the client, it makes the server stop the TCP listener and release the port, so another connection, e.g. a new instance of the same client, can take it without replacing the draining connection. The tunnel stays up for the running connections until the client closes the connection.
   - From the server, it tells the client that no new connections will come, e.g. because the server shuts down.
 
-  PortRedirect 0.7.0 understands `DRAIN`, but doesn't send it yet.
+  Both programs send `DRAIN` when they shut down. Then they let running connections finish for a while, see the README, and close the connection with code 0.
 
 ### 5. Extensions
 

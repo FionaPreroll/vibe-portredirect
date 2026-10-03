@@ -104,8 +104,9 @@ async fn accept_connections(
         };
         debug!("Accepted TCP connection from {}", peer_addr);
 
+        // Draining the shutdown waits for the connection.
         let quic_conn = quic_conn.clone();
-        tokio::spawn(
+        config.shutdown.spawn(
             async move {
                 forward_external_connection(quic_conn, tcp_stream, peer_addr, limits.idle_timeout)
                     .await;

@@ -13,10 +13,11 @@ use tracing::info;
 
 use super::{client_transport_config, ALPN_QUIC_PORTREDIRECT};
 use crate::protocol::close::CloseCode;
+use crate::shutdown::Shutdown;
 use crate::PortRedirectProtocol;
 
-/// Time to wait for the server to be notified when the client shuts down.
-const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+/// Time to wait for the server to be notified when the client closes its connections.
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug)]
 #[allow(unused)]
@@ -30,6 +31,9 @@ pub struct ClientConfig<AppDataType> {
     /// Maximum number of concurrently forwarded connections, i.e. streams the server may open.
     /// Defaults to `PortRedirectProtocol::DEFAULT_MAX_FORWARDED_CONNECTIONS`.
     pub connection_limit: Option<usize>,
+
+    /// When to shut down, and the forwarded connections that may finish meanwhile.
+    pub shutdown: Shutdown,
 
     pub app_data: AppDataType,
 }
@@ -51,6 +55,7 @@ impl<AppDataType> ClientConfig<AppDataType> {
             local_socket,
             remote_socket,
             connection_limit,
+            shutdown: Shutdown::default(),
             app_data,
         }
     }
@@ -141,7 +146,7 @@ impl<AppDataType> QuicClient<AppDataType> {
     /// than `SHUTDOWN_TIMEOUT`.
     pub async fn shutdown(&self, reason: &str) {
         self.endpoint.close(CloseCode::Ok.code(), reason.as_bytes());
-        let _ = tokio::time::timeout(SHUTDOWN_TIMEOUT, self.endpoint.wait_idle()).await;
+        let _ = tokio::time::timeout(CLOSE_TIMEOUT, self.endpoint.wait_idle()).await;
     }
 }
 
