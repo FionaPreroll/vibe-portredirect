@@ -33,7 +33,7 @@ secrecy = "0.10.3"
 tokio = { version = "1.43.0", features = ["full"] }
 tokio-util = { version = "0.7.13", features = ["compat"] }
 tracing = "0.1.41"
-tracing-subscriber = "0.3.20"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 
 [lints.rust]
 # cargo-llvm-cov sets cfg(coverage). Code coverage can't see into async functions with

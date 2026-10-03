@@ -45,8 +45,10 @@ fn free_udp_port() -> u16 {
 /// A running program whose output is collected in the background.
 struct Program {
     child: Child,
-    /// stdout and stderr, without colors.
+    /// stdout and stderr, interleaved by line.
     output: Arc<Mutex<String>>,
+    /// stdout alone.
+    stdout: Arc<Mutex<String>>,
     output_changed: Arc<Notify>,
     readers: Vec<JoinHandle<()>>,
 }
@@ -56,6 +58,7 @@ impl Program {
         let mut child = Command::new(program)
             .args(args)
             .env_remove("PORTREDIRECT_QUIC_PSK")
+            .env_remove("RUST_LOG")
             .envs(env.iter().copied())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -65,14 +68,24 @@ impl Program {
             .expect("failed to start program");
 
         let output = Arc::new(Mutex::new(String::new()));
+        let stdout = Arc::new(Mutex::new(String::new()));
         let output_changed = Arc::new(Notify::new());
         let readers = vec![
-            collect_output(child.stdout.take().unwrap(), &output, &output_changed),
-            collect_output(child.stderr.take().unwrap(), &output, &output_changed),
+            collect_output(
+                child.stdout.take().unwrap(),
+                vec![Arc::clone(&output), Arc::clone(&stdout)],
+                &output_changed,
+            ),
+            collect_output(
+                child.stderr.take().unwrap(),
+                vec![Arc::clone(&output)],
+                &output_changed,
+            ),
         ];
         Program {
             child,
             output,
+            stdout,
             output_changed,
             readers,
         }
@@ -80,6 +93,10 @@ impl Program {
 
     fn output(&self) -> String {
         self.output.lock().unwrap().clone()
+    }
+
+    fn stdout(&self) -> String {
+        self.stdout.lock().unwrap().clone()
     }
 
     /// Waits until the output contains `text`.
@@ -122,41 +139,24 @@ impl Program {
     }
 }
 
+/// Appends each line from `pipe` to all `outputs`.
 fn collect_output(
     pipe: impl AsyncRead + Unpin + Send + 'static,
-    output: &Arc<Mutex<String>>,
+    outputs: Vec<Arc<Mutex<String>>>,
     output_changed: &Arc<Notify>,
 ) -> JoinHandle<()> {
-    let (output, output_changed) = (Arc::clone(output), Arc::clone(output_changed));
+    let output_changed = Arc::clone(output_changed);
     tokio::spawn(async move {
         let mut lines = BufReader::new(pipe).lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            let mut output = output.lock().unwrap();
-            output.push_str(&strip_colors(&line));
-            output.push('\n');
-            drop(output);
+            for output in &outputs {
+                let mut output = output.lock().unwrap();
+                output.push_str(&line);
+                output.push('\n');
+            }
             output_changed.notify_waiters();
         }
     })
-}
-
-/// Removes ANSI color codes from a log line.
-fn strip_colors(line: &str) -> String {
-    let mut stripped = String::with_capacity(line.len());
-    let mut chars = line.chars();
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            // Skip until the end of the escape sequence, e.g. "\x1b[2m".
-            for c in chars.by_ref() {
-                if c.is_ascii_alphabetic() {
-                    break;
-                }
-            }
-        } else {
-            stripped.push(c);
-        }
-    }
-    stripped
 }
 
 async fn start_echo_server() -> Result<SocketAddr> {
@@ -273,6 +273,15 @@ async fn invalid_arguments_exit_with_code_2() -> Result<()> {
         PSK,
     ];
     let server_without_psk = ["--local-host", "127.0.0.1", "--allowed-client-ports", "443"];
+    // Replaced by --allowed-client-ports.
+    let server_with_local_port = [
+        "--local-host",
+        "127.0.0.1",
+        "--local-port",
+        "443",
+        "--quic-psk",
+        PSK,
+    ];
 
     for (program, args, expected) in [
         (
@@ -282,12 +291,64 @@ async fn invalid_arguments_exit_with_code_2() -> Result<()> {
         ),
         (SERVER, server_with_port_0.as_slice(), "random port"),
         (SERVER, server_without_psk.as_slice(), "--quic-psk"),
+        (SERVER, server_with_local_port.as_slice(), "--local-port"),
     ] {
         let mut process = Program::start(program, args, &[]);
         assert_eq!(process.exit_code().await?, 2, "{:?}", args);
         let output = process.output();
         assert!(output.contains(expected), "{:?}:\n{}", args, output);
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn programs_print_their_version() -> Result<()> {
+    for (program, name) in [
+        (SERVER, "portredirect_server"),
+        (CLIENT, "portredirect_client"),
+    ] {
+        let mut process = Program::start(program, &["--version"], &[]);
+        assert_eq!(process.exit_code().await?, 0);
+        assert_eq!(
+            process.stdout(),
+            format!("{} {}\n", name, env!("CARGO_PKG_VERSION"))
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn logs_go_to_stderr_without_colors_and_follow_rust_log() -> Result<()> {
+    // A client without certificate logs a little and exits right away.
+    let config_dir = tempfile::tempdir()?;
+    let mut args = client_args(config_dir.path(), free_udp_port(), 1, free_tcp_port());
+    args.extend(["--quic-psk".into(), PSK.into()]);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+
+    let mut client = Program::start(CLIENT, &args, &[]);
+    assert_eq!(client.exit_code().await?, 1);
+    let output = client.output();
+    assert!(output.contains("Configuration directory"), "{}", output);
+    // Output to a pipe has no color codes, and stdout stays free for other uses.
+    assert!(!output.contains('\x1b'), "{}", output);
+    assert_eq!(client.stdout(), "");
+
+    // RUST_LOG takes precedence over --log-level.
+    let mut quiet_args = args.clone();
+    quiet_args.extend(["--log-level", "trace"]);
+    let mut client = Program::start(CLIENT, &quiet_args, &[("RUST_LOG", "error")]);
+    assert_eq!(client.exit_code().await?, 1);
+    let output = client.output();
+    assert!(!output.contains("Configuration directory"), "{}", output);
+    assert!(output.contains("copy cert.der"), "{}", output);
+
+    // An invalid RUST_LOG is reported and ignored in favor of --log-level.
+    let mut client = Program::start(CLIENT, &quiet_args, &[("RUST_LOG", "portredirect=loud")]);
+    assert_eq!(client.exit_code().await?, 1);
+    let output = client.output();
+    assert!(output.contains("Ignoring invalid RUST_LOG"), "{}", output);
+    assert!(output.contains("Configuration directory"), "{}", output);
+    assert_eq!(client.stdout(), "");
     Ok(())
 }
 

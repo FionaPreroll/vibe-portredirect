@@ -19,6 +19,7 @@ use tracing::{info, span, Level};
 
 /// Command-line arguments for the server side.
 #[derive(Parser, Debug)]
+#[command(name = "portredirect_server", version)]
 struct Args {
     /// Full path to configuration directory.
     #[clap(long)]
@@ -28,13 +29,9 @@ struct Args {
     #[clap(long)]
     local_host: String,
 
-    /// TCP listener port for external connections (deprecated, use --allowed-client-ports instead).
-    #[clap(long, value_parser = clap::value_parser!(u16).range(1..))]
-    local_port: Option<u16>,
-
     /// Allowed ports for clients to request, e.g., "80,443,1000-2000"
-    #[clap(long, value_delimiter = ',')]
-    allowed_client_ports: Option<Vec<PortSpec>>,
+    #[clap(long, value_delimiter = ',', required = true)]
+    allowed_client_ports: Vec<PortSpec>,
 
     /// QUIC server listener host.
     #[clap(long, default_value = "127.0.0.1")]
@@ -83,7 +80,8 @@ struct Args {
     #[clap(long)]
     print_metrics: bool,
 
-    /// Log messages up to this level: off, error, warn, info, debug or trace.
+    /// Log messages up to this level: off, error, warn, info, debug or trace. The RUST_LOG
+    /// environment variable, if set, takes precedence and can set levels per module.
     #[clap(long, default_value = "info")]
     log_level: LevelFilter,
 }
@@ -116,20 +114,6 @@ async fn main() -> Result<()> {
         get_config_dir(args.config_dir).context("Failed to get configuration directory")?;
     info!("Configuration directory: {:?}", config_dir);
 
-    // Parse local TCP listener address(es) #TODO remove legacy handler.
-    let allowed_client_ports = {
-        let mut allowed_client_ports = args.allowed_client_ports.unwrap_or_default();
-        if let Some(local_port) = args.local_port {
-            info!("--local-port is deprecated; use --allowed-client-ports instead");
-            // add given port to allowed ports
-            allowed_client_ports.append(&mut vec![PortSpec::Single(local_port)]);
-        }
-        allowed_client_ports
-    };
-    if allowed_client_ports.is_empty() {
-        return Err(anyhow!("--allowed-client-ports is required"));
-    }
-
     // Parse QUIC server listener address.
     let quic_addr = resolve_socket_addr(&format!(
         "{}:{}",
@@ -143,7 +127,7 @@ async fn main() -> Result<()> {
         max_connections_per_ip: args.max_connections_per_ip as usize,
         idle_timeout: (args.idle_timeout > 0).then(|| Duration::from_secs(args.idle_timeout)),
     };
-    let app_data = ServerAppData::new(psk, args.local_host, allowed_client_ports)
+    let app_data = ServerAppData::new(psk, args.local_host, args.allowed_client_ports)
         .with_forwarding_limits(forwarding_limits);
     info!("QUIC will listen on {}", quic_addr);
 
