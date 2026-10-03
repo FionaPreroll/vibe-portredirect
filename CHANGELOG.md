@@ -10,6 +10,18 @@ Versions 0.4.0 to 0.7.0 were not published on crates.io; the latest published ve
 
 ## [Unreleased]
 
+### Added
+
+- Both programs can read their settings from a TOML configuration file, `--config-file`. Its keys are the names of the options, and options on the command line or in the environment take precedence. It only names the files that hold PSKs, and relative paths in it are relative to the file. Unknown keys are errors, so typos don't go unnoticed. See the README.
+- The server's configuration file can list several clients, each with its own name, one or two PSK files (two while changing the PSK) and ports. A client can only use its own ports. Clients may share ports on purpose, e.g. an active and a standby client; the server logs which clients share which ports when it starts.
+
+### Changed
+
+- Options renamed for consistency before 1.0. The old names are no longer accepted, the programs exit with a message naming the new name. Update service files and scripts together with the programs:
+  - `--quic-psk`, `--quic-psk-file` and `PORTREDIRECT_QUIC_PSK` are now `--psk`, `--psk-file` and `PORTREDIRECT_PSK`: the PSK authenticates the client and isn't specific to QUIC.
+  - The client's `--quic-remote-hostname-match` is now `--quic-cert-hostname`, like the server option whose value it must match.
+  - The server's `--local-host` is now `--listen-host`, matching the client's `--remote-listen-port`, and `--quic-server-host` and `--quic-server-port` are now `--quic-listen-host` and `--quic-listen-port`.
+
 ### Fixed
 
 - A client that stalled the TLS handshake, e.g. on purpose, held up all new connections to the server as long as the handshake lasted, 30 seconds for a client that stopped responding, because the server completed each handshake before accepting the next connection. Handshakes now run independently and are aborted after 10 seconds, which counts as a failed attempt for blocking the address.

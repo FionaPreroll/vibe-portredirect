@@ -28,7 +28,8 @@ The wire protocol is described in [docs/PROTOCOL.md](docs/PROTOCOL.md).
   They do get the clients' proofs of the PSK, though, so a weak PSK could be guessed offline.
 - The pre-shared key (PSK) is known only to the server and its clients, and is long and random (see the README).
   PortRedirect warns about PSKs shorter than 16 bytes, but accepts them.
-  Clients authenticate with a name and the PSK of that name. A server configured on the command line has a single client, `default`: all clients that know its PSK may use all allowed ports and can replace each other's connections.
+  Clients authenticate with a name and the PSK of that name. Give each client its own name and PSK in the server's configuration file: then a client may only use the ports listed for its name, and only clients with the same name can replace each other's connections. A server configured with a single PSK and `--allowed-client-ports` has a single client, `default`: all clients that know its PSK may use all allowed ports and can replace each other's connections.
+  Configuration files hold no PSKs, only the paths of the files with the PSKs, which should be readable only by the user running PortRedirect.
 - Both machines themselves are trusted: anyone with access to the server process, the client process or their files can read the PSK and the forwarded data.
 
 **What the tunnel provides:**

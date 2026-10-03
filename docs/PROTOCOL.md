@@ -46,7 +46,7 @@ Version 5 is designed to stay compatible:
 - QUIC with TLS 1.3, ALPN protocol identifier `pr-5`.
   Peers speaking a different version, or offering none, fail the TLS handshake ("peer doesn't support any known protocol").
 - **Server authentication:** the server presents a certificate, by default a self-signed one it generates on first start (`cert.der`, `key.der` in its configuration directory).
-  The client trusts exactly the certificate in its own `cert.der` (copied from the server) and verifies that it is issued for `--quic-remote-hostname-match`, or for the IP address of `--quic-remote-host` if not given.
+  The client trusts exactly the certificate in its own `cert.der` (copied from the server) and verifies that it is issued for `--quic-cert-hostname`, or for the IP address of `--quic-remote-host` if not given.
   In addition, the server proves on the control stream that it knows the client's PSK.
 - **Client authentication:** none at the TLS level; the client names itself and proves on the control stream that it knows its PSK, see below.
 - **Streams:** only the server opens streams, all of them bidirectional.
@@ -66,7 +66,7 @@ If a side rejects anything, it closes the whole QUIC connection with a [close co
 ### 1. Authentication
 
 The server knows a list of clients, each with a **name**, one or two PSKs (two while changing it) and the ports it may use.
-A server configured on the command line has a single client named `default`, with the PSK and `--allowed-client-ports` given there; clients name themselves `default` unless configured otherwise (`--client-name`).
+The server's configuration file lists them; a server configured with a single PSK and `--allowed-client-ports` has a single client named `default`. Clients name themselves `default` unless configured otherwise (`--client-name`).
 Names consist of 1 to 64 letters, digits, dots, underscores or hyphens (`A-Z a-z 0-9 . _ -`), so they can safely appear in logs.
 
 Both sides prove that they know the client's PSK, with proofs that are bound to the TLS session and to the client's name.
@@ -181,7 +181,7 @@ The server then:
 2. Takes the port for this connection:
    - If an older connection of the **same client** holds the port, e.g. because the client restarted while the server still kept its old connection, the server closes the older connection with code 9 and waits up to 5 seconds until it released the port.
    - If **another client** holds the port, the port is unavailable (code 6). That client may be configured to use the same port, e.g. as standby: it gets the port once it is free.
-3. Binds a TCP listener on `--local-host` and the port, and answers with `WELCOME`, containing the bound port.
+3. Binds a TCP listener on `--listen-host` and the port, and answers with `WELCOME`, containing the bound port.
 
 From now on, the server accepts external TCP connections on that port for this client.
 On errors, the server closes the connection: with code 5 if the client may not use the port, 6 if it is unavailable (another client holds it, or the server could not listen on it, e.g. because another program uses it), 3 for a malformed `HELLO` or another message instead of it, and 4 if no `HELLO` arrives within 10 seconds.

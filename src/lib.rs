@@ -12,6 +12,7 @@ use tracing_subscriber::EnvFilter;
 pub mod app_data;
 pub mod bi_stream;
 pub mod client;
+pub mod config;
 pub mod forward;
 pub mod limits;
 pub mod metrics_helper;
@@ -22,10 +23,10 @@ pub mod quic;
 pub mod server;
 
 /// Returns the path to the configuration directory, creating it if necessary.
-pub fn get_config_dir(override_config_dir: Option<String>) -> Result<PathBuf> {
+pub fn get_config_dir(override_config_dir: Option<PathBuf>) -> Result<PathBuf> {
     // Use the override if provided, otherwise fall back to the platform's config directory.
     let config_dir = if let Some(override_path) = override_config_dir {
-        PathBuf::from(override_path)
+        override_path
     } else {
         let mut config_dir =
             dirs::config_dir().context("Failed to find your platform's config directory")?;
