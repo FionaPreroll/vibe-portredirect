@@ -12,7 +12,7 @@ documentation = "https://docs.rs/portredirect"
 keywords = ["tcp", "quic", "networking", "port-forwarding"]
 categories = ["network-programming", "command-line-utilities"]
 
-authors = ["Fiona <unspezifisch@futurewidgets.eu>"]
+authors = ["Fiona <fipreroll+app@gmail.com>"]
 
 [dependencies]
 anyhow = "1.0.97"
