@@ -17,9 +17,10 @@ pub async fn print_metrics_loop() {
 
         // Render the current metrics string without a timestamp.
         let current_metrics = format!(
-            "accepted: {} | failed_accept: {} | quic_err: {} | bytes_a: {} | bytes_b: {} | tcp_quic_closed_err: {} | tcp_quic_closed_graceful: {} | keepalive_err: {} | server_opened: {} | server_closed: {}",
+            "accepted: {} | failed_accept: {} | refused: {} | quic_err: {} | bytes_a: {} | bytes_b: {} | tcp_quic_closed_err: {} | tcp_quic_closed_graceful: {} | keepalive_err: {} | server_opened: {} | server_closed: {}",
             TCP_CONNECTIONS_ACCEPTED.get(),
             TCP_CONNECTIONS_FAILED_ACCEPTING.get(),
+            TCP_CONNECTIONS_REFUSED.get(),
             QUIC_DATA_STREAM_OPENING_ERRORS.get(),
             BYTES_TRANSMITTED_A.get(),
             BYTES_TRANSMITTED_B.get(),

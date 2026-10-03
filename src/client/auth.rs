@@ -2,43 +2,49 @@
 //
 // License: GPL-3.0-only
 
-use crate::protocol::auth::client_authenticate;
+use crate::protocol::auth::{client_authenticate, session_binding, AuthenticationRejected};
+use crate::protocol::close::CloseCode;
 use crate::quic::client::ClientConfig;
 use crate::{app_data::ClientAppData, bi_stream::BiStream};
-use anyhow::{anyhow, Result};
+use anyhow::{Context, Result};
 use std::sync::Arc;
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, info, instrument};
 
-// Handles our custom authentication stream.
-#[instrument[skip(config, conn)]]
+/// Accepts the control stream, which the server opens first, and authenticates over it: proves
+/// that we know the PSK and verifies that the server knows it, too.
+///
+/// Closes the connection if the server fails to prove its knowledge of the PSK.
+#[instrument(skip(config, conn))]
 pub async fn handle_quic_auth_client_side(
     config: Arc<ClientConfig<ClientAppData>>,
     conn: quinn::Connection,
 ) -> Result<BiStream<Compat<quinn::RecvStream>, Compat<quinn::SendStream>>> {
-    // Accept the first QUIC stream, which is for authenticating us to the server.
     debug!("Accepting server-initiated QUIC stream.");
+    let (send, recv) = conn
+        .accept_bi()
+        .await
+        .context("failed to accept the control stream")?;
+    let stream_id = recv.id();
+    let mut control_stream =
+        BiStream::new(recv.compat(), send.compat_write(), stream_id.to_string());
+    debug!("opened control stream with id {}", stream_id);
 
-    // Client auth loop. Runs until server is happy.
-    if let Ok((send, recv)) = conn.accept_bi().await {
-        let stream_id = recv.id();
-        let mut bi_stream =
-            BiStream::new(recv.compat(), send.compat_write(), stream_id.to_string());
-        debug!("opened bidi channel for AUTH with stream {}", stream_id);
-
-        match client_authenticate(&mut bi_stream, config.app_data.connection_auth_psk.clone()).await
-        {
-            Ok(()) => {
-                info!("Authentication successful");
-            }
-            Err(e) => {
-                warn!("Authentication failed: {}", e);
-                return Err(anyhow!("failed to authenticate against PR QUIC server"));
-            }
+    // On failure, the caller adds the context and logs the error.
+    let binding = session_binding(&conn)?;
+    if let Err(e) = client_authenticate(
+        &mut control_stream,
+        &config.app_data.connection_auth_psk,
+        &binding,
+    )
+    .await
+    {
+        if e.is::<AuthenticationRejected>() {
+            CloseCode::AuthenticationFailed.close(&conn, "authentication failed");
         }
-
-        Ok(bi_stream)
-    } else {
-        Err(anyhow!("failed to accept bidi AUTH connection"))
+        return Err(e);
     }
+    info!("Authentication successful");
+
+    Ok(control_stream)
 }

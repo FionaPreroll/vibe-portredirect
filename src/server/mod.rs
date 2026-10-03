@@ -10,6 +10,37 @@ pub mod tcp_forwarder;
 pub mod tcp_listener;
 
 use std::str::FromStr;
+use std::time::Duration;
+
+use crate::PortRedirectProtocol;
+
+/// Limits for the external TCP connections the server forwards for one client.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ForwardingLimits {
+    /// Maximum number of concurrently forwarded connections. Further connections wait in the
+    /// listen backlog until one ends.
+    pub max_connections: usize,
+    /// Maximum number of concurrently forwarded connections per external address (IPv6: per /64
+    /// network), 0 for no limit. Further connections are closed right away.
+    pub max_connections_per_ip: usize,
+    /// Forwarded connections are closed after this long without data transfer, if set.
+    pub idle_timeout: Option<Duration>,
+}
+
+impl ForwardingLimits {
+    pub const DEFAULT_MAX_CONNECTIONS_PER_IP: usize = 64;
+    pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
+}
+
+impl Default for ForwardingLimits {
+    fn default() -> Self {
+        Self {
+            max_connections: PortRedirectProtocol::DEFAULT_MAX_FORWARDED_CONNECTIONS,
+            max_connections_per_ip: Self::DEFAULT_MAX_CONNECTIONS_PER_IP,
+            idle_timeout: Some(Self::DEFAULT_IDLE_TIMEOUT),
+        }
+    }
+}
 
 /// Represents a single port or a range of ports.
 #[derive(Clone, Debug)]

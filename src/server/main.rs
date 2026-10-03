@@ -5,13 +5,16 @@
 use anyhow::{anyhow, Context, Result};
 use clap::{CommandFactory, FromArgMatches, Parser};
 use portredirect::app_data::ServerAppData;
-use portredirect::get_config_dir;
 use portredirect::psk::{warn_if_psk_on_command_line, PskArgs};
-use portredirect::quic::server::{run_quic_server, ServerConfig};
+use portredirect::quic::server::{run_quic_server_until, ServerConfig};
 use portredirect::server::client_handler::handle_quic_client_connection;
 use portredirect::server::metrics_printer::print_metrics_loop;
-use portredirect::server::PortSpec;
+use portredirect::server::{ForwardingLimits, PortSpec};
+use portredirect::PortRedirectProtocol;
+use portredirect::{get_config_dir, init_logging, shutdown_signal};
 use std::net::{SocketAddr, ToSocketAddrs};
+use std::time::Duration;
+use tracing::level_filters::LevelFilter;
 use tracing::{info, span, Level};
 
 /// Command-line arguments for the server side.
@@ -48,15 +51,54 @@ struct Args {
     #[command(flatten)]
     psk: PskArgs,
 
+    /// Maximum number of concurrent QUIC connections, including connections that are not
+    /// authenticated yet. Each client uses one.
+    #[clap(
+        long,
+        default_value_t = DEFAULT_MAX_QUIC_CONNECTIONS,
+        value_parser = clap::value_parser!(u32).range(1..)
+    )]
+    max_quic_connections: u32,
+
+    /// Maximum number of concurrently forwarded TCP connections per client.
+    /// Further connections wait until one ends.
+    #[clap(
+        long,
+        default_value_t = PortRedirectProtocol::DEFAULT_MAX_FORWARDED_CONNECTIONS as u32,
+        value_parser = clap::value_parser!(u32).range(1..)
+    )]
+    max_connections: u32,
+
+    /// Maximum number of concurrently forwarded TCP connections per external IP address
+    /// (IPv6: per /64 network), 0 for no limit. Further connections are closed right away.
+    #[clap(long, default_value_t = ForwardingLimits::DEFAULT_MAX_CONNECTIONS_PER_IP as u32)]
+    max_connections_per_ip: u32,
+
+    /// Close forwarded TCP connections after this many seconds without data transfer,
+    /// 0 to never close idle connections.
+    #[clap(long, default_value_t = ForwardingLimits::DEFAULT_IDLE_TIMEOUT.as_secs())]
+    idle_timeout: u64,
+
     /// Print metrics to stderr every second, if any value changes.
     #[clap(long)]
     print_metrics: bool,
+
+    /// Log messages up to this level: off, error, warn, info, debug or trace.
+    #[clap(long, default_value = "info")]
+    log_level: LevelFilter,
 }
+
+/// Default for --max-quic-connections.
+const DEFAULT_MAX_QUIC_CONNECTIONS: u32 = 64;
 
 /// Program entry point.
 #[tokio::main]
 async fn main() -> Result<()> {
-    setup_tracing();
+    // Parse command-line arguments.
+    let matches = Args::command().get_matches();
+    let args = Args::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+
+    init_logging(args.log_level);
 
     // Create a root span for logging.
     let _root_span = span!(Level::INFO, "prserver_main").entered();
@@ -66,9 +108,6 @@ async fn main() -> Result<()> {
         .install_default()
         .expect("Failed to install rustls crypto provider");
 
-    // Parse command-line arguments.
-    let matches = Args::command().get_matches();
-    let args = Args::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     warn_if_psk_on_command_line(&matches);
     let psk = args.psk.load()?;
 
@@ -99,14 +138,20 @@ async fn main() -> Result<()> {
     .context("Failed to resolve QUIC bind address")?;
 
     // Set up QUIC server configuration.
-    let app_data = ServerAppData::new(psk, args.local_host, allowed_client_ports);
+    let forwarding_limits = ForwardingLimits {
+        max_connections: args.max_connections as usize,
+        max_connections_per_ip: args.max_connections_per_ip as usize,
+        idle_timeout: (args.idle_timeout > 0).then(|| Duration::from_secs(args.idle_timeout)),
+    };
+    let app_data = ServerAppData::new(psk, args.local_host, allowed_client_ports)
+        .with_forwarding_limits(forwarding_limits);
     info!("QUIC will listen on {}", quic_addr);
 
     let quic_config = ServerConfig::create_default_config(
         config_dir,
         args.quic_cert_hostname,
         quic_addr,
-        None,
+        Some(args.max_quic_connections as usize),
         app_data.clone(),
     );
 
@@ -118,22 +163,17 @@ async fn main() -> Result<()> {
         });
     }
 
-    // Start QUIC server.
-    run_quic_server(quic_config, handle_quic_client_connection)
-        .await
-        .with_context(|| "PortRedirect Server Error")?;
+    // Start QUIC server, until a shutdown signal arrives.
+    run_quic_server_until(
+        quic_config,
+        handle_quic_client_connection,
+        shutdown_signal(),
+    )
+    .await
+    .with_context(|| "PortRedirect Server Error")?;
 
     info!("PortRedirect Server exited cleanly");
     Ok(())
-}
-
-/// Sets up tracing for logging.
-fn setup_tracing() {
-    tracing_subscriber::fmt()
-        .with_max_level(Level::DEBUG)
-        .with_target(true)
-        .with_line_number(true)
-        .init();
 }
 
 /// Resolves a socket address from a string.

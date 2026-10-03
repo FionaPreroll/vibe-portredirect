@@ -23,30 +23,34 @@ The wire protocol is described in [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
 **Trust assumptions:**
 
-- The server's private key (`key.der`) stays on the server. The client trusts exactly the certificate it was given (`cert.der`); whoever has the private key can impersonate the server.
+- The server's private key (`key.der`) stays on the server. The client trusts exactly the certificate it was given (`cert.der`).
+  Whoever has the private key can make clients connect to them, but can't complete the authentication without the PSK.
+  They do get the clients' proofs of the PSK, though, so a weak PSK could be guessed offline.
 - The pre-shared key (PSK) is known only to the server and its clients, and is long and random (see the README).
+  PortRedirect warns about PSKs shorter than 16 bytes, but accepts them.
 - Both machines themselves are trusted: anyone with access to the server process, the client process or their files can read the PSK and the forwarded data.
 
 **What the tunnel provides:**
 
 - Confidentiality and integrity of the forwarded data between client and server (QUIC with TLS 1.3).
-- The client only connects to the server whose certificate it holds.
-- Only clients that know the PSK can make the server listen on a TCP port, and only on ports allowed by `--allowed-client-ports`.
+- Mutual authentication: the client only uses a server that has the private key of the certificate it holds and proves that it knows the PSK.
+  Only clients that know the PSK can make the server listen on a TCP port, and only on ports allowed by `--allowed-client-ports`.
   Before authentication, a client cannot open streams or cause the server to open TCP ports.
+- The proofs of the PSK are HMACs bound to the TLS session, so they can't be replayed or relayed into another connection, and are verified in constant time.
+- Online guessing of the PSK is slow: an address is blocked for 10 minutes after 5 failed attempts within 10 minutes.
+- Limits on the resources a single host can use: QUIC connections, forwarded connections per client and per external address, and the time a forwarded connection may stay idle.
+  See [Limits](docs/PROTOCOL.md#limits) for the defaults and options.
 
 **What it does not provide:**
 
 - Protection of the forwarded data outside the tunnel: between the external TCP client and the server, and between the client and the destination, data is forwarded as is. Use an end-to-end protocol such as TLS (e.g. HTTPS) for sensitive data.
 - Access control for the forwarded port: everyone who can reach the server's TCP port reaches the destination service. The destination does not see the external client's address.
+- Access control for the client's metrics endpoint (`--provide-metrics`): it listens on `127.0.0.1:9898` by default; make it reachable from trusted networks only.
 
 ## Known Limitations
 
 These are known weaknesses that are not fixed yet. Take them into account when you expose PortRedirect to untrusted networks.
 
-- **Connection exhaustion:** a client accepts at most 100 concurrent forwarded connections, and idle forwarded connections never time out. Anyone who can reach the server's TCP port can block it by opening 100 idle connections.
-- **No rate limiting:** the server neither limits the number of unauthenticated QUIC connections nor failed authentication attempts, and does not enforce a minimum PSK length. A weak PSK can be guessed online.
-- **Authentication construction:** the PSK proof is SHA-512 over challenge and PSK instead of an HMAC, its comparison is not constant-time, and it is not bound to the TLS session. No practical attack is known, as each connection gets a fresh random challenge and one attempt, but standard constructions should be used.
-- **No reconnect:** the client exits when the connection to the server is lost, with exit code 0. Use a service manager that restarts it unconditionally (e.g. systemd `Restart=always`).
+- **Distributed attacks:** the limits apply per address (IPv6: per /64 network). An attacker with many addresses can still use up the server's QUIC connections (`--max-quic-connections`) or a client's forwarded connections (`--max-connections`), and keep guessing the PSK online from each of them. A long random PSK makes guessing hopeless anyway.
+- **No rate limit for new forwarded connections:** the number of concurrent forwarded connections is limited, but not how fast new ones are opened. Each of them makes the client connect to the destination.
 - **Aborted connections look complete:** if a TCP connection is reset on one side, the other side sees a normal end of stream instead of a reset, so truncated transfers are not signalled as errors.
-- **Metrics endpoint:** with `--provide-metrics`, the client serves Prometheus metrics on `0.0.0.0:9898` without authentication. Restrict access to it with a firewall.
-- **Logging:** both programs log at debug level, including peer addresses, and the log level is not configurable yet.

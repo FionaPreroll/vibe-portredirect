@@ -52,7 +52,7 @@ cargo install --locked --path .
 
 `--locked` uses the dependency versions from `Cargo.lock`, which are the ones tested and audited in CI.
 
-> **Note:** The latest `portredirect` package on crates.io, version 0.3.0, predates protocol version 2 (see [docs/PROTOCOL.md](docs/PROTOCOL.md)) and can't talk to this version. It will be updated once this version has proven stable in practice. Server and client must speak the same protocol version.
+> **Note:** The latest `portredirect` package on crates.io, version 0.3.0, predates the current protocol version 3 (see [docs/PROTOCOL.md](docs/PROTOCOL.md)) and can't talk to this version. It will be updated once this version has proven stable in practice. Server and client must speak the same protocol version.
 
 ## Usage
 
@@ -77,6 +77,16 @@ portredirect_server \
 - **`--quic-psk-file`:** File containing the pre-shared key, see [PSK Best Practices](#psk-best-practices).
 - **`--config-dir`:** Where the certificate and private key are stored (default `~/.config/portredirect`).
 - **`--print-metrics`:** Print connection and traffic counters to stderr when they change.
+- **`--log-level`:** `off`, `error`, `warn`, `info` (default), `debug` or `trace`.
+
+**Limits** for the resources a single host can use:
+
+- **`--max-quic-connections`:** Maximum number of QUIC connections, including connections that are not authenticated yet (default 64). Each client uses one.
+- **`--max-connections`:** Maximum number of concurrently forwarded TCP connections per client (default 512). Further connections wait until one ends.
+- **`--max-connections-per-ip`:** Maximum number of concurrently forwarded TCP connections per external IP address, for IPv6 per /64 network (default 64, `0` for no limit). Further connections are closed right away. Raise it if many users share an address, e.g. behind a NAT.
+- **`--idle-timeout`:** Close forwarded TCP connections after this many seconds without data transfer (default 600, `0` to never close idle connections). Raise it for protocols with long idle times, e.g. SSH without keep-alive messages.
+
+The server also limits the QUIC connections per address and blocks addresses for 10 minutes after repeated failed authentication, see [Limits](docs/PROTOCOL.md#limits).
 
 ### Running the Backend Client
 
@@ -97,10 +107,33 @@ portredirect_client \
 - **`--quic-remote-host` & `--quic-remote-port`:** The QUIC server’s address.
 - **`--quic-remote-hostname-match`** (optional): Name the server's certificate must be issued for, if it differs from `--quic-remote-host`. Must match the server's `--quic-cert-hostname`.
 - **`--quic-psk-file`:** File containing the pre-shared key, must match the server’s PSK.
-- **`--provide-metrics`:** Serve Prometheus metrics at `http://0.0.0.0:9898/metrics`. The endpoint has no authentication, restrict access to it.
+- **`--config-dir`:** Where the server's certificate `cert.der` is read from (default `~/.config/portredirect`).
+- **`--max-connections`:** Maximum number of concurrently forwarded connections (default 512).
+- **`--provide-metrics`:** Serve Prometheus metrics at `http://127.0.0.1:9898/metrics`, or at the address given with `--metrics-listen`. The endpoint has no authentication, only make it reachable from trusted networks.
+- **`--log-level`:** `off`, `error`, `warn`, `info` (default), `debug` or `trace`.
 
-> **Important:** Start the server first to generate its certificate, then copy **only the certificate** `~/.config/portredirect/cert.der` from the server to the same path on the client machine.
+> **Important:** Start the server first to generate its certificate, then copy **only the certificate** `~/.config/portredirect/cert.der` from the server to the client's configuration directory (by default the same path).
 > Never copy the private key `key.der`: anyone who has it can impersonate your server. The server creates it readable only by its owner (mode `0600`) and warns if it is accessible by others.
+
+### Reconnects and Exit Codes
+
+The client keeps the tunnel up on its own: whenever the connection to the server ends, it connects again, after 1 second at first and up to 60 seconds after repeated failures.
+It only exits:
+
+- with code 0 on `SIGINT` or `SIGTERM`, after closing the connection, so the server releases the port right away;
+- with code 1 if connecting again would fail the same way until the configuration changes, e.g. because the server rejects the PSK or the port, or the server's certificate doesn't match `cert.der`;
+- with code 2 on invalid command-line arguments.
+
+Under a service manager, restart the client on failures only, and not right away, e.g. with systemd:
+
+```ini
+[Service]
+ExecStart=/usr/local/bin/portredirect_client --quic-psk-file /etc/portredirect/psk ...
+Restart=on-failure
+RestartSec=60
+```
+
+On `SIGINT` or `SIGTERM`, the server closes all connections, so its clients notice right away and connect again once it is back.
 
 ### PSK Best Practices
 
@@ -118,8 +151,8 @@ Both programs accept the PSK from one of these sources:
 
 ## Authentication & Certificate Verification
 
-PortRedirect secures QUIC tunnels using auto-generated certificates and a PSK-based challenge-response system. The client verifies the server’s certificate, while the server challenges the client to prove its identity with the shared PSK.
-Only after that, the server opens the TCP port the client asked for.
+PortRedirect secures QUIC tunnels using auto-generated certificates and a pre-shared key (PSK). The client verifies the server’s certificate, then client and server prove to each other that they know the PSK, with HMAC proofs bound to the TLS session.
+Only after that, the server opens the TCP port the client asked for. Addresses that fail to authenticate repeatedly are blocked for a while.
 
 - [docs/PROTOCOL.md](docs/PROTOCOL.md) describes the protocol in detail.
 - [SECURITY.md](SECURITY.md) describes the security model, known limitations and how to report vulnerabilities.
@@ -184,8 +217,8 @@ PortRedirect is ideal for simple TCP-to-QUIC tunneling setups:
 
 - **Protocol Support:** Currently supports IPv4 and TCP.
 - **Connection Model:** Each client gets its own TCP port on the server. Several clients can share a server if it allows several ports.
-- **Scalability:** Not yet optimized for extremely high concurrency, a client forwards at most 100 connections at the same time.
-- **Reliability:** The client does not reconnect yet, run it with a service manager that restarts it.
+- **Scalability:** Not yet optimized for extremely high concurrency, a client forwards at most 512 connections at the same time by default.
+- **Reliability:** The client reconnects on its own, see [Reconnects and Exit Codes](#reconnects-and-exit-codes).
 - **Security:** We try our best but no guarantees, see the known limitations in [SECURITY](SECURITY.md#known-limitations).
 
 ## License

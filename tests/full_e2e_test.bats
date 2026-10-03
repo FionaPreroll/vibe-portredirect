@@ -43,7 +43,7 @@ setup() {
 }
 
 teardown() {
-    kill $SERVER_PID $CLIENT_PID $IPERF_PID || true
+    stop_processes $SERVER_PID $CLIENT_PID $IPERF_PID
 }
 
 @test "Tunneled iperf3 test (via portredirect)" {

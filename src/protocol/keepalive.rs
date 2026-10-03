@@ -1,7 +1,10 @@
+use crate::protocol::close::CloseCode;
 use crate::PortRedirectProtocol;
 
-use anyhow::{Error, Result};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use anyhow::{anyhow, Context, Result};
+use std::convert::Infallible;
+use std::io;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::{interval, timeout, Duration};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -16,15 +19,16 @@ const PING_MESSAGE: &[u8] = b"PING\n";
 const PONG_MESSAGE: &[u8] = b"PONG\n";
 /// Message from client to server that initiates connection teardown.
 const CONNECTION_END_MESSAGE: &[u8] = b"BYE\n";
+/// Maximum length of a control message the server accepts, including the newline.
+const MAX_CONTROL_MESSAGE_LENGTH: usize = 16;
 
 /// Runs the keepalive loop on the client side.
 ///
 /// Every `KEEP_ALIVE_INTERVAL` the function sends a PING message, flushes the stream,
-/// and then waits (up to `READ_TIMEOUT`) for a newline-terminated response.
-/// If the response exactly matches `PONG_MESSAGE` the ping is considered successful.
-/// Any error (write/flush error, unexpected response, connection close, or timeout)
-/// causes the loop to exit gracefully.
-pub async fn run_keepalive_client_loop<T>(mut auth_stream: T) -> Result<()>
+/// and then waits (up to `READ_TIMEOUT`) for the PONG response.
+/// It only returns when the keepalive fails: on a write error, an unexpected response,
+/// a closed stream or a timeout. The error describes the failure.
+pub async fn run_keepalive_client_loop<T>(mut control_stream: T) -> Result<Infallible>
 where
     T: AsyncRead + AsyncWrite + Unpin,
 {
@@ -36,136 +40,145 @@ where
         tick_interval.tick().await;
 
         // Send the PING message.
-        if let Err(e) = auth_stream.write_all(PING_MESSAGE).await {
-            warn!("Failed to send PING: {}", e);
-            break;
-        }
-        if let Err(e) = auth_stream.flush().await {
-            warn!("Failed to flush PING: {}", e);
-            break;
-        }
-        info!("Sent PING");
+        control_stream
+            .write_all(PING_MESSAGE)
+            .await
+            .context("failed to send PING")?;
+        control_stream
+            .flush()
+            .await
+            .context("failed to flush PING")?;
+        debug!("Sent PING");
 
         // Read the PONG response with a timeout.
-        let mut response_buf = Vec::with_capacity(16);
-        let mut reader = BufReader::new(&mut auth_stream);
-        match timeout(READ_TIMEOUT, reader.read_until(b'\n', &mut response_buf)).await {
-            Ok(Ok(0)) => {
-                warn!("Connection closed by remote during keepalive");
-                break;
-            }
-            Ok(Ok(_)) => {
-                if response_buf == PONG_MESSAGE {
-                    pong_count += 1;
-                    info!("Received PONG, count: {}", pong_count);
-                } else {
-                    warn!("Unexpected response: {:?}", response_buf);
-                    break;
-                }
-            }
-            Ok(Err(e)) => {
-                warn!("Failed to read PONG: {:?}", e);
-                break;
-            }
-            Err(_) => {
-                warn!("Timed out waiting for PONG response");
-                break;
-            }
+        let mut response = [0u8; PONG_MESSAGE.len()];
+        timeout(READ_TIMEOUT, control_stream.read_exact(&mut response))
+            .await
+            .map_err(|_| anyhow!("no PONG within {:?}", READ_TIMEOUT))?
+            .context("failed to read PONG")?;
+        if response != PONG_MESSAGE {
+            return Err(anyhow!(
+                "unexpected keepalive response {:?}",
+                String::from_utf8_lossy(&response)
+            ));
         }
+        pong_count += 1;
+        debug!("Received PONG, count: {}", pong_count);
     }
-
-    Ok(())
 }
 
-/// Runs the keepalive loop on the server side.
+/// Why the control channel loop of the server ended.
+#[derive(Debug)]
+pub enum ControlChannelEnd {
+    /// The cancellation token was triggered.
+    Cancelled,
+    /// The client ended the tunnel with BYE.
+    ClientSaidBye,
+    /// The stream ended or failed, e.g. because the connection was lost.
+    StreamClosed(Option<io::Error>),
+    /// No message arrived in time.
+    Timeout,
+    /// The client sent an unexpected or too long message.
+    UnexpectedMessage(Vec<u8>),
+}
+
+impl ControlChannelEnd {
+    /// Returns the code to close the connection with.
+    pub fn close_code(&self) -> CloseCode {
+        match self {
+            ControlChannelEnd::Cancelled
+            | ControlChannelEnd::ClientSaidBye
+            | ControlChannelEnd::StreamClosed(_) => CloseCode::Ok,
+            ControlChannelEnd::Timeout => CloseCode::KeepaliveFailed,
+            ControlChannelEnd::UnexpectedMessage(_) => CloseCode::ProtocolViolation,
+        }
+    }
+}
+
+/// Runs the control channel loop on the server side.
 ///
-/// Instead of sending periodic PING messages, the server now waits for
-/// incoming PING messages from the remote peer. When a PING is received,
-/// the server replies with a PONG. Any error (read/write, unexpected message,
-/// timeout, or connection close) causes the loop to exit gracefully.
-///
-/// Runs the keepalive loop on the server side.
-///
-/// Instead of sending periodic PING messages, the server now waits for
-/// incoming PING messages from the remote peer. When a PING is received,
-/// the server replies with a PONG. Any error (read/write, unexpected message,
-/// timeout, or connection close) causes the loop to exit gracefully.
+/// The server waits for incoming PING messages from the client and answers each with a PONG.
+/// The loop ends on BYE, cancellation, an unexpected message, a timeout or a closed stream,
+/// and cancels `cancel_token` when it ends.
 pub async fn run_control_channel_loop<T>(
-    mut auth_stream: T,
+    mut control_stream: T,
     cancel_token: CancellationToken,
-) -> Result<()>
+) -> ControlChannelEnd
 where
     T: AsyncRead + AsyncWrite + Unpin,
 {
-    loop {
-        // We'll build the message manually by reading one byte at a time.
-        let mut buf = Vec::with_capacity(16);
-
-        // Read until newline is encountered or connection is closed.
-        let read_result = tokio::select! {
-            _ = cancel_token.cancelled() => { // In the future, this might come from a Ctrl-C signal.
+    let end = loop {
+        let message = tokio::select! {
+            _ = cancel_token.cancelled() => {
                 info!("Cancellation token triggered in control channel loop");
-                return Ok(());
+                break ControlChannelEnd::Cancelled;
             }
-            res = timeout(KEEP_ALIVE_INTERVAL + READ_TIMEOUT, async {
-                let mut byte = [0; 1];
-                loop {
-                    let n = auth_stream.read(&mut byte).await?;
-                    if n == 0 {
-                        // Connection closed.
-                        break;
-                    }
-                    buf.push(byte[0]);
-                    if byte[0] == b'\n' {
-                        break;
-                    }
-                }
-                Ok::<(), Error>(())
-            }) => res,
+            message = timeout(KEEP_ALIVE_INTERVAL + READ_TIMEOUT, read_control_message(&mut control_stream)) => message,
         };
 
-        match read_result {
-            Ok(Ok(())) => {
-                if buf.is_empty() {
-                    // Connection closed.
-                    warn!("Connection closed by remote during keepalive");
-                    break;
-                }
-
-                if buf == PING_MESSAGE {
-                    info!("Received PING, sending PONG");
-                    if let Err(e) = auth_stream.write_all(PONG_MESSAGE).await {
-                        warn!("Failed to send PONG: {}", e);
-                        break;
-                    }
-                    if let Err(e) = auth_stream.flush().await {
-                        warn!("Failed to flush PONG: {}", e);
-                        break;
-                    }
-                } else if buf == CONNECTION_END_MESSAGE {
-                    info!("Received BYE, initiating client connection shutdown");
-                    cancel_token.cancel();
-                    break;
-                } else {
-                    warn!("Unexpected message received: {:?}", buf);
-                    break;
-                }
+        let message = match message {
+            Ok(Ok(Some(message))) => message,
+            Ok(Ok(None)) => {
+                debug!("Control stream closed by the client");
+                break ControlChannelEnd::StreamClosed(None);
             }
             Ok(Err(e)) => {
-                warn!("Failed to read from stream: {:?}", e);
-                break;
+                debug!("Failed to read from control stream: {}", e);
+                break ControlChannelEnd::StreamClosed(Some(e));
             }
             Err(_) => {
                 warn!("Timed out waiting for PING message");
-                break;
+                break ControlChannelEnd::Timeout;
             }
+        };
+
+        if message == PING_MESSAGE {
+            debug!("Received PING, sending PONG");
+            let sent = match control_stream.write_all(PONG_MESSAGE).await {
+                Ok(()) => control_stream.flush().await,
+                Err(e) => Err(e),
+            };
+            if let Err(e) = sent {
+                debug!("Failed to send PONG: {}", e);
+                break ControlChannelEnd::StreamClosed(Some(e));
+            }
+        } else if message == CONNECTION_END_MESSAGE {
+            info!("Received BYE, initiating client connection shutdown");
+            break ControlChannelEnd::ClientSaidBye;
+        } else {
+            warn!("Unexpected control message received: {:?}", message);
+            break ControlChannelEnd::UnexpectedMessage(message);
         }
-    }
+    };
 
     debug!("Control channel loop ended, cancelling token");
     cancel_token.cancel();
+    end
+}
 
-    Ok(())
+/// Reads a newline-terminated control message of at most `MAX_CONTROL_MESSAGE_LENGTH` bytes.
+///
+/// Returns `None` if the stream ended before the first byte. A longer message is returned
+/// truncated, without its newline, so it never matches a valid message.
+async fn read_control_message<T>(stream: &mut T) -> io::Result<Option<Vec<u8>>>
+where
+    T: AsyncRead + Unpin,
+{
+    let mut message = Vec::with_capacity(MAX_CONTROL_MESSAGE_LENGTH);
+    let mut byte = [0u8; 1];
+    while message.len() < MAX_CONTROL_MESSAGE_LENGTH {
+        if stream.read(&mut byte).await? == 0 {
+            if message.is_empty() {
+                return Ok(None);
+            }
+            return Err(io::ErrorKind::UnexpectedEof.into());
+        }
+        message.push(byte[0]);
+        if byte[0] == b'\n' {
+            break;
+        }
+    }
+    Ok(Some(message))
 }
 
 #[cfg(test)]
@@ -214,6 +227,12 @@ mod tests {
 
     // --- Client side: run_keepalive_client_loop ---
 
+    /// Runs the client loop and returns its error message.
+    async fn client_error<T: AsyncRead + AsyncWrite + Unpin>(stream: T) -> String {
+        let Err(e) = run_keepalive_client_loop(stream).await;
+        format!("{:#}", e)
+    }
+
     #[tokio::test(start_paused = true)]
     async fn test_client_keeps_pinging_until_write_fails() {
         // Two successful rounds, then the third PING fails.
@@ -224,34 +243,42 @@ mod tests {
             .read(PONG_MESSAGE)
             .write_error(io::Error::other("connection lost"))
             .build();
-        run_keepalive_client_loop(mock).await.unwrap();
+        let error = client_error(mock).await;
+        assert!(error.contains("failed to send PING"), "{}", error);
     }
 
     #[tokio::test(start_paused = true)]
     async fn test_client_stops_on_wrong_response() {
-        let mock = Builder::new().write(PING_MESSAGE).read(b"WRONG\n").build();
-        run_keepalive_client_loop(mock).await.unwrap();
+        let mock = Builder::new().write(PING_MESSAGE).read(b"WRONG").build();
+        let error = client_error(mock).await;
+        assert!(error.contains("unexpected keepalive response"), "{}", error);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_client_reads_pong_split_into_parts() {
+        let mock = Builder::new()
+            .write(PING_MESSAGE)
+            .read(b"PO")
+            .read(b"NG\n")
+            .write_error(io::Error::other("connection lost"))
+            .build();
+        let error = client_error(mock).await;
+        assert!(error.contains("failed to send PING"), "{}", error);
     }
 
     #[tokio::test(start_paused = true)]
     async fn test_client_stops_when_connection_closes() {
         // After the PING, the read returns EOF.
         let mock = Builder::new().write(PING_MESSAGE).build();
-        run_keepalive_client_loop(mock).await.unwrap();
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn test_client_stops_on_write_error() {
-        let mock = Builder::new()
-            .write_error(io::Error::other("write error"))
-            .build();
-        run_keepalive_client_loop(mock).await.unwrap();
+        let error = client_error(mock).await;
+        assert!(error.contains("failed to read PONG"), "{}", error);
     }
 
     #[tokio::test(start_paused = true)]
     async fn test_client_stops_on_pong_timeout() {
         let start = tokio::time::Instant::now();
-        run_keepalive_client_loop(NeverRead).await.unwrap();
+        let error = client_error(NeverRead).await;
+        assert!(error.contains("no PONG"), "{}", error);
         assert!(start.elapsed() >= READ_TIMEOUT);
     }
 
@@ -268,10 +295,10 @@ mod tests {
             .build();
         let cancel_token = CancellationToken::new();
 
-        run_control_channel_loop(mock, cancel_token.clone())
-            .await
-            .unwrap();
+        let end = run_control_channel_loop(mock, cancel_token.clone()).await;
 
+        assert!(matches!(end, ControlChannelEnd::ClientSaidBye), "{:?}", end);
+        assert_eq!(end.close_code(), CloseCode::Ok);
         assert!(cancel_token.is_cancelled());
     }
 
@@ -280,11 +307,30 @@ mod tests {
         let mock = Builder::new().read(b"HELLO\n").build();
         let cancel_token = CancellationToken::new();
 
-        run_control_channel_loop(mock, cancel_token.clone())
-            .await
-            .unwrap();
+        let end = run_control_channel_loop(mock, cancel_token.clone()).await;
 
+        assert!(
+            matches!(&end, ControlChannelEnd::UnexpectedMessage(m) if m == b"HELLO\n"),
+            "{:?}",
+            end
+        );
+        assert_eq!(end.close_code(), CloseCode::ProtocolViolation);
         assert!(cancel_token.is_cancelled());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_server_stops_on_too_long_message() {
+        let mock = Builder::new()
+            .read(&[b'P'; MAX_CONTROL_MESSAGE_LENGTH])
+            .build();
+
+        let end = run_control_channel_loop(mock, CancellationToken::new()).await;
+
+        assert!(
+            matches!(&end, ControlChannelEnd::UnexpectedMessage(m) if m.len() == MAX_CONTROL_MESSAGE_LENGTH),
+            "{:?}",
+            end
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -295,10 +341,13 @@ mod tests {
             .build();
         let cancel_token = CancellationToken::new();
 
-        run_control_channel_loop(mock, cancel_token.clone())
-            .await
-            .unwrap();
+        let end = run_control_channel_loop(mock, cancel_token.clone()).await;
 
+        assert!(
+            matches!(end, ControlChannelEnd::StreamClosed(None)),
+            "{:?}",
+            end
+        );
         assert!(cancel_token.is_cancelled());
     }
 
@@ -307,10 +356,10 @@ mod tests {
         let cancel_token = CancellationToken::new();
         let start = tokio::time::Instant::now();
 
-        run_control_channel_loop(NeverRead, cancel_token.clone())
-            .await
-            .unwrap();
+        let end = run_control_channel_loop(NeverRead, cancel_token.clone()).await;
 
+        assert!(matches!(end, ControlChannelEnd::Timeout), "{:?}", end);
+        assert_eq!(end.close_code(), CloseCode::KeepaliveFailed);
         assert!(start.elapsed() >= KEEP_ALIVE_INTERVAL + READ_TIMEOUT);
         assert!(cancel_token.is_cancelled());
     }
@@ -321,9 +370,8 @@ mod tests {
         cancel_token.cancel();
 
         // Returns immediately, without reading anything.
-        run_control_channel_loop(NeverRead, cancel_token)
-            .await
-            .unwrap();
+        let end = run_control_channel_loop(NeverRead, cancel_token).await;
+        assert!(matches!(end, ControlChannelEnd::Cancelled), "{:?}", end);
     }
 
     // --- Both sides together ---
@@ -344,7 +392,12 @@ mod tests {
         );
 
         // The client is gone now, so the server ends the connection.
-        server.await.unwrap().unwrap();
+        let end = server.await.unwrap();
+        assert!(
+            matches!(end, ControlChannelEnd::StreamClosed(_)),
+            "{:?}",
+            end
+        );
         assert!(cancel_token.is_cancelled());
     }
 }

@@ -8,11 +8,25 @@ use anyhow::{Context, Error, Result};
 use quinn::crypto::rustls::QuicServerConfig;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-use std::{fs, net::SocketAddr, path::PathBuf, sync::Arc, time::Instant};
+use std::{
+    fs,
+    net::SocketAddr,
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tracing::{debug, info, instrument, warn};
 
+use crate::limits::QuicAdmission;
 use crate::private_files::{warn_if_accessible_by_others, write_private_file};
+use crate::protocol::close::CloseCode;
 use crate::quic::{configure_transport_config, ALPN_QUIC_PORTREDIRECT};
+
+/// Minimum time between two warnings about the connection limit.
+const LIMIT_WARNING_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Time to wait for clients to be notified when the server shuts down.
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Configuration for the QUIC server.
 ///
@@ -25,7 +39,9 @@ use crate::quic::{configure_transport_config, ALPN_QUIC_PORTREDIRECT};
 /// * `key_file` - The path to the private key file to use or generate.
 /// * `listen` - Bind address for the QUIC server.
 /// * `stateless_retry` - Whether to enable stateless retry.
-/// * `connection_limit` - Optional limit on the number of concurrently forwarded connections.
+/// * `connection_limit` - Optional limit on the number of concurrent QUIC connections, including
+///   connections that are not authenticated yet.
+/// * `admission` - Limits per client address and blocking after failed authentication attempts.
 /// * `app_data` - Application-specific data.
 #[derive(Debug)]
 pub struct ServerConfig<AppDataType> {
@@ -35,6 +51,7 @@ pub struct ServerConfig<AppDataType> {
     pub listen: SocketAddr,
     pub stateless_retry: bool,
     pub connection_limit: Option<usize>,
+    pub admission: QuicAdmission,
     pub app_data: AppDataType,
 }
 
@@ -68,6 +85,7 @@ impl<AppDataType> ServerConfig<AppDataType> {
             listen: bind_socket,
             stateless_retry: true, // Be more secure by default
             connection_limit,
+            admission: QuicAdmission::default(),
             app_data,
         }
     }
@@ -326,10 +344,25 @@ pub fn generate_quic_cert(
 /// # Returns
 ///
 /// TODO Returns a `Result` indicating the success or failure of the server operation.
-#[instrument(skip(config, handle_incoming_client))]
 pub async fn run_quic_server<F, Fut, AppDataType>(
     config: ServerConfig<AppDataType>,
     handle_incoming_client: F,
+) -> Result<()>
+where
+    F: Fn(Arc<ServerConfig<AppDataType>>, quinn::Connection) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = Result<(), Error>> + Send + 'static,
+{
+    run_quic_server_until(config, handle_incoming_client, std::future::pending()).await
+}
+
+/// Runs the QUIC server like [`run_quic_server`] until `shutdown` completes.
+///
+/// On shutdown, all connections are closed, so clients notice right away.
+#[instrument(skip(config, handle_incoming_client, shutdown))]
+pub async fn run_quic_server_until<F, Fut, AppDataType>(
+    config: ServerConfig<AppDataType>,
+    handle_incoming_client: F,
+    shutdown: impl std::future::Future<Output = ()>,
 ) -> Result<()>
 where
     F: Fn(Arc<ServerConfig<AppDataType>>, quinn::Connection) -> Fut + Send + Sync + 'static,
@@ -372,50 +405,83 @@ where
     // Handle incoming QUIC connections forever.
     let start = Instant::now();
     let config = Arc::from(config);
+    let mut last_limit_warning: Option<Instant> = None;
     info!("QUIC server is ready and accepting connections");
-    while let Some(conn) = endpoint.accept().await {
-        if config
+    tokio::pin!(shutdown);
+    loop {
+        let incoming = tokio::select! {
+            incoming = endpoint.accept() => match incoming {
+                Some(incoming) => incoming,
+                None => break,
+            },
+            () = &mut shutdown => {
+                info!("Shutting down, closing all connections");
+                endpoint.close(CloseCode::Ok.code(), b"server shutting down");
+                let _ = tokio::time::timeout(SHUTDOWN_TIMEOUT, endpoint.wait_idle()).await;
+                break;
+            }
+        };
+        let remote = incoming.remote_address();
+
+        if config.admission.is_blocked(remote.ip()) {
+            // Refusing is cheap, it happens before the TLS handshake.
+            debug!("Refusing connection from {}: address is blocked", remote);
+            incoming.refuse();
+        } else if config
             .connection_limit
             .is_some_and(|n| endpoint.open_connections() >= n)
         {
-            warn!(
-                "Refusing connection: open connection limit ({}) reached",
-                config.connection_limit.unwrap()
+            // Warn at most once a minute, so floods don't flood the log.
+            if last_limit_warning.is_none_or(|last| last.elapsed() >= LIMIT_WARNING_INTERVAL) {
+                warn!(
+                    "Refusing connections: open connection limit ({}) reached",
+                    config.connection_limit.unwrap_or_default()
+                );
+                last_limit_warning = Some(Instant::now());
+            }
+            debug!(
+                "Refusing connection from {}: connection limit reached",
+                remote
             );
-            conn.refuse();
-        } else if config.stateless_retry && !conn.remote_address_validated() {
-            info!(
+            incoming.refuse();
+        } else if config.stateless_retry && !incoming.remote_address_validated() {
+            debug!(
                 "Requiring connection from {} to validate its address",
-                conn.remote_address()
+                remote
             );
-            conn.retry().unwrap();
+            incoming.retry().unwrap();
         } else {
-            let peer_info = format!(
-                "client: {} (validated: {})",
-                conn.remote_address(),
-                conn.remote_address_validated()
-            );
-            let connection = match conn
-                .await
-                .context("accepting incoming quic client connection")
-            {
-                Ok(c) => c,
+            // Limit the connections per address. The address is validated at this point.
+            let Some(address_slot) = config.admission.try_acquire(remote.ip()) else {
+                debug!(
+                    "Refusing connection from {}: too many connections from this address",
+                    remote
+                );
+                incoming.refuse();
+                continue;
+            };
+
+            let connection = match incoming.await {
+                Ok(connection) => connection,
                 Err(e) => {
+                    config.admission.record_failure(remote.ip());
                     warn!(
                         "Failed to accept incoming QUIC connection from {}: {}",
-                        peer_info, e
+                        remote, e
                     );
                     continue;
                 }
             };
 
-            debug!(peer = %peer_info, "Accepting new QUIC client connection at {:?}", start.elapsed());
+            debug!(peer = %remote, "Accepting new QUIC client connection at {:?}", start.elapsed());
 
             let fut = handle_incoming_client(Arc::clone(&config), connection);
             tokio::spawn(async move {
                 if let Err(e) = fut.await {
                     warn!("Incoming connection dropped: {:#}", e)
                 }
+                // The connection no longer counts for its address.
+                drop(address_slot);
             });
         }
     }
