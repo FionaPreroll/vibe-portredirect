@@ -4,6 +4,7 @@
 
 use crate::app_data::ClientAppData;
 use crate::bi_stream::BiStream;
+use crate::protocol::close::CloseCode;
 use crate::protocol::control::request_listen_port;
 use crate::protocol::keepalive::run_keepalive_client_loop;
 use crate::quic::client::ClientConfig;
@@ -21,6 +22,9 @@ use tracing::{debug, info, instrument, warn};
 
 /// Handles the connection to the QUIC server, authenticates and keeps it alive.
 /// Called directly by run_quic_client.
+///
+/// Returns when the connection ends: `Ok` if the server ended the tunnel normally, otherwise an
+/// error describing why it ended.
 #[instrument(skip(config, conn))]
 pub async fn handle_quic_server_connection(
     config: Arc<ClientConfig<ClientAppData>>,
@@ -50,15 +54,23 @@ pub async fn handle_quic_server_connection(
 
     // Start the keepalive loop to maintain the QUIC connection.
     // This loop periodically sends a PING and expects a PONG response.
+    // If the keepalive fails, close the connection, which ends this handler.
+    let keepalive_conn = conn.clone();
     tokio::spawn(async move {
-        if let Err(e) = run_keepalive_client_loop(auth_stream).await {
+        let Err(e) = run_keepalive_client_loop(auth_stream).await;
+        if keepalive_conn.close_reason().is_none() {
             KEEPALIVE_ERRORS.inc();
-            warn!("Keepalive loop terminated with error: {}", e);
+            warn!("Keepalive failed, closing the connection: {:#}", e);
+            CloseCode::KeepaliveFailed.close(&keepalive_conn, "keepalive failed");
         }
     });
 
-    // Accept bidirectional QUIC streams for new forwarded connections.
-    while let Ok((send, recv)) = conn.accept_bi().await {
+    // Accept bidirectional QUIC streams for new forwarded connections, until the connection ends.
+    let end = loop {
+        let (send, recv) = match conn.accept_bi().await {
+            Ok(stream) => stream,
+            Err(e) => break e,
+        };
         CONNECTIONS_ACCEPTED.inc();
 
         let stream_id = recv.id();
@@ -75,9 +87,12 @@ pub async fn handle_quic_server_connection(
                 warn!("Error handling QUIC stream: {}", e);
             }
         });
-    }
+    };
 
-    debug!("Closed QUIC connection handler");
-    SERVER_CONNECTIONS_GRACEFULLY_CLOSED_TOTAL.inc();
-    Ok(())
+    debug!("Closed QUIC connection handler: {}", end);
+    if CloseCode::of(&end) == Some(CloseCode::Ok) {
+        SERVER_CONNECTIONS_GRACEFULLY_CLOSED_TOTAL.inc();
+        return Ok(());
+    }
+    Err(anyhow::Error::new(end).context("connection to the server ended"))
 }
