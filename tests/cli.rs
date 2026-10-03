@@ -894,25 +894,32 @@ async fn programs_let_running_connections_finish_on_sigterm() -> Result<()> {
 }
 
 #[tokio::test]
-async fn server_runs_without_its_metrics_endpoint() -> Result<()> {
+async fn programs_run_without_their_metrics_endpoint() -> Result<()> {
     let config_dir = tempfile::tempdir()?;
     // Another program uses the metrics port.
     let used = std::net::TcpListener::bind(localhost(0))?;
     let used = used.local_addr()?.to_string();
+    let metrics_args = ["--provide-metrics", "--metrics-listen", &used];
 
-    let mut server = start_server_with(
+    let server = start_server_with(
         config_dir.path(),
         free_udp_port(),
         free_tcp_port(),
-        &["--provide-metrics", "--metrics-listen", &used],
+        &metrics_args,
     )
     .await?;
-    server
-        .wait_for_output("Metrics server failed: failed to bind metrics server")
-        .await?;
+    let mut args = client_args(config_dir.path(), free_udp_port(), 1, free_tcp_port());
+    args.extend(metrics_args.map(String::from));
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let client = Program::start(CLIENT, &args, &[("PORTREDIRECT_PSK", PSK)]);
 
-    // Tunnels matter more than metrics, so the server goes on.
-    server.terminate();
-    assert_eq!(server.exit_code().await?, 0, "{}", server.output());
+    // Tunnels matter more than metrics, so both go on.
+    for mut program in [server, client] {
+        program
+            .wait_for_output("Metrics server failed: failed to bind metrics server")
+            .await?;
+        program.terminate();
+        assert_eq!(program.exit_code().await?, 0, "{}", program.output());
+    }
     Ok(())
 }

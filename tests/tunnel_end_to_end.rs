@@ -1388,6 +1388,65 @@ async fn server_resets_connections_for_which_the_client_accepts_no_stream() -> R
 }
 
 #[tokio::test]
+async fn client_reconnects_when_the_server_ends_the_control_stream() -> Result<()> {
+    let config_dir = setup();
+    let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
+    let (closed_tx, mut closed_rx) = mpsc::unbounded_channel();
+    let config = server_config(
+        config_dir.path(),
+        quic_port,
+        vec![PortSpec::Single(listen_port)],
+        ForwardingLimits::default(),
+    );
+    // A server that sets up the tunnel, then ends the control stream but not the connection.
+    let _server = spawn_server_with_handler(config, move |config, connection| {
+        let closed_tx = closed_tx.clone();
+        async move {
+            let (mut control_stream, _client) =
+                authenticate_quic_client(config, connection.clone()).await?;
+            let hello = receive_hello(&mut control_stream).await?;
+            let welcome = Greeting::new(SERVER_SOFTWARE, hello.listen_port);
+            send_welcome(&mut control_stream, &welcome).await?;
+            drop(control_stream);
+            let _ = closed_tx.send(connection.closed().await);
+            Ok(())
+        }
+    });
+    let failures = portredirect::client::metrics::METRICS
+        .keepalive_failures
+        .get();
+    let _client = start_client(
+        config_dir.path(),
+        quic_port,
+        TEST_PSK,
+        localhost(1),
+        listen_port,
+    );
+
+    with_timeout(async {
+        // The client closes each connection as failed keepalive, and connects again.
+        for _ in 0..2 {
+            let reason = closed_rx
+                .recv()
+                .await
+                .ok_or_else(|| anyhow!("the server ended"))?;
+            assert_eq!(
+                CloseCode::of(&reason),
+                Some(CloseCode::KeepaliveFailed),
+                "{:?}",
+                reason
+            );
+        }
+        let keepalive_failures = portredirect::client::metrics::METRICS
+            .keepalive_failures
+            .get();
+        assert!(keepalive_failures >= failures + 2, "{}", keepalive_failures);
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
 async fn responses_after_the_end_of_the_request_are_forwarded() -> Result<()> {
     let config_dir = setup();
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());

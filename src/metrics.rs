@@ -20,6 +20,7 @@ use prometheus::{
     Encoder, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry, TextEncoder,
 };
 use std::convert::Infallible;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -28,6 +29,9 @@ use tracing::{debug, info, warn};
 
 /// Time a client gets to send the request headers.
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Pause after a failure to accept a connection, e.g. when running out of file descriptors.
+const ACCEPT_ERROR_DELAY: Duration = Duration::from_millis(100);
 
 /// Registers `metric` in `registry` and returns it.
 ///
@@ -137,7 +141,7 @@ impl MetricsCounter for DummyCounter {
 /// (HTTP/1.1 only), until the program ends.
 ///
 /// Returns only if binding fails.
-pub async fn serve_metrics(registry: Registry, addr: SocketAddr) -> Result<()> {
+pub async fn serve_metrics(registry: Registry, addr: SocketAddr) -> Result<Infallible> {
     let listener = TcpListener::bind(addr)
         .await
         .with_context(|| format!("failed to bind metrics server to {}", addr))?;
@@ -146,17 +150,9 @@ pub async fn serve_metrics(registry: Registry, addr: SocketAddr) -> Result<()> {
 }
 
 /// Serves the metrics endpoint on an already bound listener.
-async fn serve_metrics_on(registry: Registry, listener: TcpListener) -> Result<()> {
+async fn serve_metrics_on(registry: Registry, listener: TcpListener) -> Result<Infallible> {
     loop {
-        let (stream, peer) = match listener.accept().await {
-            Ok(connection) => connection,
-            Err(e) => {
-                // Back off, e.g. if we ran out of file descriptors.
-                warn!("Failed to accept metrics connection: {}", e);
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                continue;
-            }
-        };
+        let (stream, peer) = accept_retrying(|| listener.accept()).await;
 
         let registry = registry.clone();
         tokio::spawn(async move {
@@ -173,6 +169,23 @@ async fn serve_metrics_on(registry: Registry, listener: TcpListener) -> Result<(
                 debug!("Metrics connection from {} failed: {}", peer, e);
             }
         });
+    }
+}
+
+/// Returns the next connection that `accept` returns. On errors, e.g. when the process ran out of
+/// file descriptors, logs them and tries again after a pause.
+async fn accept_retrying<T, Fut>(mut accept: impl FnMut() -> Fut) -> T
+where
+    Fut: Future<Output = std::io::Result<T>>,
+{
+    loop {
+        match accept().await {
+            Ok(accepted) => return accepted,
+            Err(e) => {
+                warn!("Failed to accept metrics connection: {}", e);
+                tokio::time::sleep(ACCEPT_ERROR_DELAY).await;
+            }
+        }
     }
 }
 
@@ -291,6 +304,25 @@ mod tests {
             "{}",
             response
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_accept_errors_are_retried_after_a_pause() {
+        let start = tokio::time::Instant::now();
+        let mut attempts = 0;
+        let accepted = accept_retrying(|| {
+            attempts += 1;
+            let attempt = attempts;
+            async move {
+                match attempt {
+                    1 | 2 => Err(std::io::Error::other("too many open files")),
+                    _ => Ok(attempt),
+                }
+            }
+        })
+        .await;
+        assert_eq!(accepted, 3);
+        assert_eq!(start.elapsed(), ACCEPT_ERROR_DELAY * 2);
     }
 
     #[tokio::test]

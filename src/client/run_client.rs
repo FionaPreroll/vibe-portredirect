@@ -54,9 +54,8 @@ pub async fn run_client(settings: ClientSettings) -> Result<()> {
     // Start the metrics server if enabled.
     if let Some(metrics_addr) = settings.metrics_addr {
         tokio::spawn(async move {
-            if let Err(e) = serve_metrics(METRICS.registry.clone(), metrics_addr).await {
-                error!("Metrics server failed: {:#}", e);
-            }
+            let Err(e) = serve_metrics(METRICS.registry.clone(), metrics_addr).await;
+            error!("Metrics server failed: {:#}", e);
         });
     }
 

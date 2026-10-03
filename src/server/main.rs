@@ -72,9 +72,8 @@ async fn main() -> Result<()> {
     }
     if let Some(metrics_addr) = config.metrics_addr {
         tokio::spawn(async move {
-            if let Err(e) = serve_metrics(METRICS.registry.clone(), metrics_addr).await {
-                error!("Metrics server failed: {:#}", e);
-            }
+            let Err(e) = serve_metrics(METRICS.registry.clone(), metrics_addr).await;
+            error!("Metrics server failed: {:#}", e);
         });
     }
 
