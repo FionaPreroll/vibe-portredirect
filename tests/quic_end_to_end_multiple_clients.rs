@@ -34,7 +34,11 @@ async fn test_quic_end_to_end_multiple_clients() {
     info!("Using config directory: {:?}", config_dir);
 
     // Define the test server port
-    let test_port = 65501; // HACK statically chosen port
+    // A UDP port that was free a moment ago, so tests running in parallel don't collide.
+    let test_port = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+        .and_then(|socket| socket.local_addr())
+        .expect("failed to find a free UDP port")
+        .port();
 
     // PSK is required so this tests needs one.
     let test_psk = "test_psk";
@@ -43,7 +47,7 @@ async fn test_quic_end_to_end_multiple_clients() {
 
     // Create the server configuration.
     let server_app_data =
-        ServerAppData::new(test_psk_server, "0.0.0.0".into(), vec![PortSpec::Single(0)]);
+        ServerAppData::new(test_psk_server, "0.0.0.0".into(), Vec::<PortSpec>::new());
     let server_config: server::ServerConfig<ServerAppData> =
         server::ServerConfig::create_default_config(
             config_dir.clone(),
