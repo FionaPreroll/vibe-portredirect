@@ -63,7 +63,7 @@ pub async fn handle_quic_server_connection(
 
         let stream_id = recv.id();
         let bi_stream = BiStream::new(recv.compat(), send.compat_write(), stream_id.to_string());
-        info!(
+        debug!(
             "Opened QUIC stream for new forwarded connection, id {}",
             stream_id
         );

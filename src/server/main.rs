@@ -5,15 +5,16 @@
 use anyhow::{anyhow, Context, Result};
 use clap::{CommandFactory, FromArgMatches, Parser};
 use portredirect::app_data::ServerAppData;
-use portredirect::get_config_dir;
 use portredirect::psk::{warn_if_psk_on_command_line, PskArgs};
 use portredirect::quic::server::{run_quic_server, ServerConfig};
 use portredirect::server::client_handler::handle_quic_client_connection;
 use portredirect::server::metrics_printer::print_metrics_loop;
 use portredirect::server::{ForwardingLimits, PortSpec};
 use portredirect::PortRedirectProtocol;
+use portredirect::{get_config_dir, init_logging};
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::time::Duration;
+use tracing::level_filters::LevelFilter;
 use tracing::{info, span, Level};
 
 /// Command-line arguments for the server side.
@@ -81,6 +82,10 @@ struct Args {
     /// Print metrics to stderr every second, if any value changes.
     #[clap(long)]
     print_metrics: bool,
+
+    /// Log messages up to this level: off, error, warn, info, debug or trace.
+    #[clap(long, default_value = "info")]
+    log_level: LevelFilter,
 }
 
 /// Default for --max-quic-connections.
@@ -89,7 +94,11 @@ const DEFAULT_MAX_QUIC_CONNECTIONS: u32 = 64;
 /// Program entry point.
 #[tokio::main]
 async fn main() -> Result<()> {
-    setup_tracing();
+    // Parse command-line arguments.
+    let matches = Args::command().get_matches();
+    let args = Args::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+
+    init_logging(args.log_level);
 
     // Create a root span for logging.
     let _root_span = span!(Level::INFO, "prserver_main").entered();
@@ -99,9 +108,6 @@ async fn main() -> Result<()> {
         .install_default()
         .expect("Failed to install rustls crypto provider");
 
-    // Parse command-line arguments.
-    let matches = Args::command().get_matches();
-    let args = Args::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     warn_if_psk_on_command_line(&matches);
     let psk = args.psk.load()?;
 
@@ -164,15 +170,6 @@ async fn main() -> Result<()> {
 
     info!("PortRedirect Server exited cleanly");
     Ok(())
-}
-
-/// Sets up tracing for logging.
-fn setup_tracing() {
-    tracing_subscriber::fmt()
-        .with_max_level(Level::DEBUG)
-        .with_target(true)
-        .with_line_number(true)
-        .init();
 }
 
 /// Resolves a socket address from a string.

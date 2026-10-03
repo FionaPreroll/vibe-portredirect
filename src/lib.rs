@@ -4,6 +4,7 @@
 
 use anyhow::{Context, Result};
 use std::{path::PathBuf, time::Duration};
+use tracing::level_filters::LevelFilter;
 
 pub mod app_data;
 pub mod bi_stream;
@@ -33,6 +34,15 @@ pub fn get_config_dir(override_config_dir: Option<String>) -> Result<PathBuf> {
     private_files::create_private_dir_all(&config_dir).context("create config dir")?;
 
     Ok(config_dir)
+}
+
+/// Sets up logging to stdout for messages up to `max_level`.
+pub fn init_logging(max_level: LevelFilter) {
+    tracing_subscriber::fmt()
+        .with_max_level(max_level)
+        .with_target(true)
+        .with_line_number(true)
+        .init();
 }
 
 pub struct PortRedirectProtocol;

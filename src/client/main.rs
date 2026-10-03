@@ -6,10 +6,11 @@ use anyhow::{Context, Result};
 use clap::{CommandFactory, FromArgMatches, Parser};
 use portredirect::app_data::ClientAppData;
 use portredirect::client::run_client::run_client;
-use portredirect::get_config_dir;
 use portredirect::psk::{warn_if_psk_on_command_line, PskArgs};
 use portredirect::PortRedirectProtocol;
-use std::net::ToSocketAddrs;
+use portredirect::{get_config_dir, init_logging};
+use std::net::{SocketAddr, ToSocketAddrs};
+use tracing::level_filters::LevelFilter;
 use tracing::{info, span, Level};
 
 /// Command-line arguments for the port redirector tool.
@@ -44,9 +45,14 @@ struct Args {
     #[clap(long, default_value = "0")]
     quic_local_port: u16,
 
-    /// Enable Prometheus metrics.
+    /// Serve Prometheus metrics via HTTP at /metrics, see --metrics-listen.
     #[clap(long)]
     provide_metrics: bool,
+
+    /// Address and port for --provide-metrics. The endpoint has no authentication, only make it
+    /// reachable from trusted networks.
+    #[clap(long, default_value = "127.0.0.1:9898")]
+    metrics_listen: SocketAddr,
 
     /// Maximum number of concurrently forwarded connections, i.e. connections to the destination.
     #[clap(
@@ -63,22 +69,21 @@ struct Args {
 
     #[command(flatten)]
     psk: PskArgs,
+
+    /// Log messages up to this level: off, error, warn, info, debug or trace.
+    #[clap(long, default_value = "info")]
+    log_level: LevelFilter,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logging.
-    tracing_subscriber::fmt()
-        .with_max_level(Level::DEBUG)
-        .with_target(true)
-        .with_line_number(true)
-        .init();
-
-    let _enter = span!(Level::INFO, "prclient_main").entered();
-
     // Parse command-line arguments.
     let matches = Args::command().get_matches();
     let args = Args::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+
+    init_logging(args.log_level);
+    let _enter = span!(Level::INFO, "prclient_main").entered();
+
     warn_if_psk_on_command_line(&matches);
     let psk = args.psk.load()?;
 
@@ -132,7 +137,7 @@ async fn main() -> Result<()> {
         quic_remote_addr,
         args.quic_remote_hostname_match,
         args.max_connections as usize,
-        args.provide_metrics,
+        args.provide_metrics.then_some(args.metrics_listen),
     )
     .await?;
 

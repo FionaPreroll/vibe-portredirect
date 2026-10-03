@@ -44,7 +44,7 @@ where
             warn!("Failed to flush PING: {}", e);
             break;
         }
-        info!("Sent PING");
+        debug!("Sent PING");
 
         // Read the PONG response with a timeout.
         let mut response_buf = Vec::with_capacity(16);
@@ -57,7 +57,7 @@ where
             Ok(Ok(_)) => {
                 if response_buf == PONG_MESSAGE {
                     pong_count += 1;
-                    info!("Received PONG, count: {}", pong_count);
+                    debug!("Received PONG, count: {}", pong_count);
                 } else {
                     warn!("Unexpected response: {:?}", response_buf);
                     break;
@@ -133,7 +133,7 @@ where
                 }
 
                 if buf == PING_MESSAGE {
-                    info!("Received PING, sending PONG");
+                    debug!("Received PING, sending PONG");
                     if let Err(e) = auth_stream.write_all(PONG_MESSAGE).await {
                         warn!("Failed to send PONG: {}", e);
                         break;

@@ -25,7 +25,7 @@ pub async fn run_client(
     quic_remote_addr: SocketAddr,
     quic_remote_hostname_match: Option<String>,
     max_connections: usize,
-    metrics_enabled: bool,
+    metrics_addr: Option<SocketAddr>,
 ) -> Result<()> {
     // Shared state for connection statistics.
     let stats = Arc::new(Mutex::new(ConnectionStats {
@@ -33,9 +33,9 @@ pub async fn run_client(
     }));
 
     // Start the metrics server if enabled.
-    if metrics_enabled {
-        tokio::spawn(async {
-            if let Err(e) = start_metrics_server(([0, 0, 0, 0], 9898)).await {
+    if let Some(metrics_addr) = metrics_addr {
+        tokio::spawn(async move {
+            if let Err(e) = start_metrics_server(metrics_addr).await {
                 tracing::error!("Metrics server failed: {:#}", e);
             }
         });
