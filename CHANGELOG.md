@@ -10,6 +10,10 @@ Versions 0.4.0 to 0.7.0 were not published on crates.io; the latest published ve
 
 ## [Unreleased]
 
+### Fixed
+
+- A client that stalled the TLS handshake, e.g. on purpose, held up all new connections to the server as long as the handshake lasted, 30 seconds for a client that stopped responding, because the server completed each handshake before accepting the next connection. Handshakes now run independently and are aborted after 10 seconds, which counts as a failed attempt for blocking the address.
+
 ## [0.7.0] - 2026-10-03
 
 Protocol version 5 (`pr-5`), incompatible with 0.6.0. It is designed to stay compatible from 1.0 on, see [docs/PROTOCOL.md](docs/PROTOCOL.md#versions-and-compatibility).

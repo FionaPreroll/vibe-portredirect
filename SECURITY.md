@@ -41,6 +41,7 @@ The wire protocol is described in [docs/PROTOCOL.md](docs/PROTOCOL.md).
   An unknown name fails like a wrong PSK, in the same time, so the server doesn't reveal which names exist.
 - Online guessing of the PSK is slow: an address is blocked for 10 minutes after 5 failed attempts within 10 minutes.
 - Limits on the resources a single host can use: QUIC connections, forwarded connections per client and per external address, and the time a forwarded connection may stay idle.
+  A client that stalls the TLS handshake doesn't hold up other clients; the server closes its connection after 10 seconds.
   See [Limits](docs/PROTOCOL.md#limits) for the defaults and options.
 
 **What it does not provide:**

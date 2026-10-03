@@ -2087,6 +2087,178 @@ async fn failed_handshakes_block_address() -> Result<()> {
     .await
 }
 
+/// A client that stops in the middle of the TLS handshake: it doesn't send its Finished, because
+/// verifying the server's certificate takes until the test releases it.
+struct StalledHandshake {
+    release: std::sync::mpsc::Sender<()>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl StalledHandshake {
+    /// Starts the handshake and returns once the server waits for the client's Finished.
+    async fn start(quic_port: u16) -> Result<Self> {
+        let (entered, entered_rx) = oneshot::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        // The verifier blocks its thread, so the client gets a runtime of its own.
+        let thread = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async move {
+                let verifier = StallingVerifier {
+                    entered: std::sync::Mutex::new(Some(entered)),
+                    release: std::sync::Mutex::new(release_rx),
+                };
+                let mut crypto = rustls::ClientConfig::builder()
+                    .dangerous()
+                    .with_custom_certificate_verifier(Arc::new(verifier))
+                    .with_no_client_auth();
+                crypto.alpn_protocols = vec![b"pr-5".to_vec()];
+                let mut endpoint = quinn::Endpoint::client(localhost(0)).unwrap();
+                endpoint.set_default_client_config(quinn::ClientConfig::new(Arc::new(
+                    quinn::crypto::rustls::QuicClientConfig::try_from(crypto).unwrap(),
+                )));
+                let result = endpoint
+                    .connect(localhost(quic_port), CERT_HOSTNAME)
+                    .unwrap()
+                    .await;
+                assert!(result.is_err(), "the stalled handshake succeeded");
+            });
+        });
+        timeout(Duration::from_secs(10), entered_rx)
+            .await
+            .map_err(|_| anyhow!("the handshake did not get to the server's certificate"))??;
+        Ok(Self { release, thread })
+    }
+
+    /// Lets the client go on, which then fails the handshake.
+    async fn release(self) -> Result<()> {
+        let _ = self.release.send(());
+        tokio::task::spawn_blocking(move || self.thread.join())
+            .await?
+            .map_err(|_| anyhow!("the stalled client panicked"))
+    }
+}
+
+/// A certificate verifier that waits until it is released, and then rejects the certificate.
+#[derive(Debug)]
+struct StallingVerifier {
+    entered: std::sync::Mutex<Option<oneshot::Sender<()>>>,
+    release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl rustls::client::danger::ServerCertVerifier for StallingVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        if let Some(entered) = self.entered.lock().unwrap().take() {
+            let _ = entered.send(());
+        }
+        let _ = self
+            .release
+            .lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(60));
+        Err(rustls::Error::General("stalled on purpose".into()))
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Err(rustls::Error::General("not used".into()))
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Err(rustls::Error::General("not used".into()))
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
+#[tokio::test]
+async fn stalled_handshake_does_not_hold_up_other_clients() -> Result<()> {
+    let config_dir = setup();
+    let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
+    let echo_addr = start_echo_server().await;
+    let _server = start_server(
+        config_dir.path(),
+        quic_port,
+        vec![PortSpec::Single(listen_port)],
+    );
+
+    with_timeout(async {
+        let stalled = StalledHandshake::start(quic_port).await?;
+
+        // Meanwhile, another client connects and forwards right away.
+        let _client = start_client(
+            config_dir.path(),
+            quic_port,
+            TEST_PSK,
+            echo_addr,
+            listen_port,
+        );
+        let stream = timeout(Duration::from_secs(5), connect_through_tunnel(listen_port))
+            .await
+            .map_err(|_| anyhow!("the stalled handshake held up the other client"))??;
+        assert_eq!(echo_roundtrip(stream, b"hello".to_vec()).await?, b"hello");
+
+        stalled.release().await
+    })
+    .await
+}
+
+#[tokio::test]
+async fn stalled_handshakes_time_out_and_count_as_failed_attempts() -> Result<()> {
+    let config_dir = setup();
+    let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
+    let mut config = server_config(
+        config_dir.path(),
+        quic_port,
+        vec![PortSpec::Single(listen_port)],
+        ForwardingLimits::default(),
+    );
+    config.handshake_timeout = Duration::from_millis(500);
+    let _server = spawn_server_with_handler(config, handle_quic_client_connection);
+
+    with_timeout(async {
+        // Clients that stall their handshakes, e.g. to tie up the server's connection slots.
+        let mut stalled = Vec::new();
+        for _ in 0..BlockingPolicy::default().max_failures {
+            stalled.push(StalledHandshake::start(quic_port).await?);
+        }
+
+        // The server gives up on them after its handshake timeout, while they still stall, and
+        // counts each as a failed attempt, so the address is blocked now.
+        sleep(Duration::from_millis(1500)).await;
+        let result = connect_raw(config_dir.path(), quic_port).await;
+        assert!(refused(&result), "unexpected result: {:?}", result.err());
+
+        for client in stalled {
+            client.release().await?;
+        }
+        Ok(())
+    })
+    .await
+}
+
 /// Keeps each connection open until the peer closes it.
 async fn hold_connection(
     _config: Arc<ServerConfig<ServerAppData>>,

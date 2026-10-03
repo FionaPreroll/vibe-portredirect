@@ -261,12 +261,14 @@ Addresses are counted per IPv4 address and per IPv6 /64 network, because a singl
 | --------------------------------------------------------- | ------------------- | -------------------------- | -------------------------------------------------------------------- |
 | QUIC connections, including unauthenticated ones          | 64                  | `--max-quic-connections`   | New connections are refused.                                         |
 | QUIC connections per address                              | 8                   |                            | New connections are refused.                                         |
+| Time to complete the TLS handshake                        | 10 s                |                            | The connection is closed, which counts as a failed attempt.          |
 | Failed handshakes or authentication attempts per address  | 5 within 10 minutes |                            | The address is blocked for 10 minutes: its connections are refused.  |
 | Forwarded connections per client                          | 512                 | `--max-connections`        | New external connections wait in the listen backlog.                 |
 | Forwarded connections per external address                | 64                  | `--max-connections-per-ip` | New external connections are closed right away.                      |
 | Time without data transfer on a forwarded connection      | 600 s               | `--idle-timeout`           | The connection is closed.                                            |
 
-Authentication timeouts count as failed attempts, and so do unknown client names.
+Handshake and authentication timeouts count as failed attempts, and so do unknown client names.
+Each connection's handshake runs on its own, so a client that stalls it doesn't hold up others.
 A successful authentication clears the address's failed attempts, unless it is blocked.
 Refusing a QUIC connection happens before the TLS handshake and closes it with the QUIC transport error `CONNECTION_REFUSED`.
 

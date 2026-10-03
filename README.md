@@ -87,7 +87,7 @@ portredirect_server \
 - **`--max-connections-per-ip`:** Maximum number of concurrently forwarded TCP connections per external IP address, for IPv6 per /64 network (default 64, `0` for no limit). Further connections are closed right away. Raise it if many users share an address, e.g. behind a NAT.
 - **`--idle-timeout`:** Close forwarded TCP connections after this many seconds without data transfer (default 600, `0` to never close idle connections). Raise it for protocols with long idle times, e.g. SSH without keep-alive messages.
 
-The server also limits the QUIC connections per address and blocks addresses for 10 minutes after repeated failed authentication, see [Limits](docs/PROTOCOL.md#limits).
+The server also limits the QUIC connections per address, gives clients 10 seconds for the TLS handshake and blocks addresses for 10 minutes after repeated failed attempts, see [Limits](docs/PROTOCOL.md#limits).
 
 ### Running the Backend Client
 
