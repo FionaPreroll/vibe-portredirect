@@ -77,7 +77,7 @@ portredirect_server \
 - **`--quic-psk-file`:** File containing the pre-shared key, see [PSK Best Practices](#psk-best-practices).
 - **`--config-dir`:** Where the certificate and private key are stored (default `~/.config/portredirect`). If only one of them is there, the server doesn't start, instead of generating a new pair that clients wouldn't trust.
 - **`--print-metrics`:** Print connection and traffic counters to stderr when they change.
-- **`--log-level`:** `off`, `error`, `warn`, `info` (default), `debug` or `trace`.
+- **`--log-level`:** `off`, `error`, `warn`, `info` (default), `debug` or `trace`. Logs go to stderr. The `RUST_LOG` environment variable, if set, takes precedence and can set levels per module, e.g. `RUST_LOG=info,portredirect::forward=debug`.
 
 **Limits** for the resources a single host can use:
 
@@ -110,7 +110,7 @@ portredirect_client \
 - **`--config-dir`:** Where the server's certificate `cert.der` is read from (default `~/.config/portredirect`).
 - **`--max-connections`:** Maximum number of concurrently forwarded connections (default 512).
 - **`--provide-metrics`:** Serve Prometheus metrics at `http://127.0.0.1:9898/metrics`, or at the address given with `--metrics-listen`. The endpoint has no authentication, only make it reachable from trusted networks.
-- **`--log-level`:** `off`, `error`, `warn`, `info` (default), `debug` or `trace`.
+- **`--log-level`:** As for the server.
 
 > **Important:** Start the server first to generate its certificate, then copy **only the certificate** `~/.config/portredirect/cert.der` from the server to the client's configuration directory (by default the same path).
 > Never copy the private key `key.der`: anyone who has it can impersonate your server. The server creates it readable only by its owner (mode `0600`) and warns if it is accessible by others.
@@ -193,7 +193,7 @@ bats tests/<test_file.bats>
 
 ## Command-Line Help
 
-For a complete list of options:
+Both programs print their version with `--version`. For a complete list of options:
 
 - **Server Help:**  
 

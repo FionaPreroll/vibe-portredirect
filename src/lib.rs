@@ -3,9 +3,11 @@
 // License: GPL-3.0-only
 
 use anyhow::{Context, Result};
+use std::io::IsTerminal;
 use std::{path::PathBuf, time::Duration};
 use tracing::level_filters::LevelFilter;
 use tracing::{info, warn};
+use tracing_subscriber::EnvFilter;
 
 pub mod app_data;
 pub mod bi_stream;
@@ -37,10 +39,24 @@ pub fn get_config_dir(override_config_dir: Option<String>) -> Result<PathBuf> {
     Ok(config_dir)
 }
 
-/// Sets up logging to stdout for messages up to `max_level`.
+/// Sets up logging to stderr for messages up to `max_level`, with colors only on a terminal.
+///
+/// The `RUST_LOG` environment variable, if set, takes precedence and can set levels per module,
+/// e.g. `RUST_LOG=info,portredirect::forward=debug`.
 pub fn init_logging(max_level: LevelFilter) {
+    let filter = match std::env::var("RUST_LOG") {
+        Ok(directives) if !directives.trim().is_empty() => EnvFilter::try_new(&directives)
+            .unwrap_or_else(|e| {
+                // Logging isn't set up yet.
+                eprintln!("Ignoring invalid RUST_LOG {:?}: {}", directives, e);
+                EnvFilter::default().add_directive(max_level.into())
+            }),
+        _ => EnvFilter::default().add_directive(max_level.into()),
+    };
     tracing_subscriber::fmt()
-        .with_max_level(max_level)
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .with_ansi(std::io::stderr().is_terminal())
         .with_target(true)
         .with_line_number(true)
         .init();

@@ -21,6 +21,7 @@ use tracing::{error, info, span, Level};
 /// SIGINT or SIGTERM, and with code 1 if it can't work as configured, e.g. because the server
 /// rejects its PSK or port.
 #[derive(Parser)]
+#[command(name = "portredirect_client", version)]
 struct Args {
     /// Full path to configuration directory, with the server's certificate cert.der.
     #[clap(long)]
@@ -80,7 +81,8 @@ struct Args {
     #[command(flatten)]
     psk: PskArgs,
 
-    /// Log messages up to this level: off, error, warn, info, debug or trace.
+    /// Log messages up to this level: off, error, warn, info, debug or trace. The RUST_LOG
+    /// environment variable, if set, takes precedence and can set levels per module.
     #[clap(long, default_value = "info")]
     log_level: LevelFilter,
 }
