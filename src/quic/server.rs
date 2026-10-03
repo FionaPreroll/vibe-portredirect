@@ -644,6 +644,20 @@ mod tests {
     }
 
     #[test]
+    fn test_failed_key_write_leaves_the_certificate_alone() -> Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        // Writing the private key fails, before the certificate is written.
+        let key_path = temp_dir.path().join("missing-directory").join("key.der");
+        let cert_path = temp_dir.path().join("cert.der");
+        fs::write(&cert_path, b"existing certificate")?;
+
+        assert!(generate_quic_cert("localhost".into(), key_path, cert_path.clone()).is_err());
+
+        assert_eq!(fs::read(&cert_path)?, b"existing certificate");
+        Ok(())
+    }
+
+    #[test]
     fn test_load_pem_without_key_fails() -> Result<()> {
         let temp_dir = tempfile::tempdir()?;
         let cert_path = temp_dir.path().join("cert.pem");
