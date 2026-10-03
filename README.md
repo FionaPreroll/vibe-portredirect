@@ -75,7 +75,7 @@ portredirect_server \
 - **`--quic-server-host` & `--quic-server-port`:** Where to listen for the QUIC tunnel (UDP).
 - **`--quic-cert-hostname`:** IP address or DNS name the generated certificate is issued for, the client verifies it. Only used when the certificate is generated on first start (default `127.0.0.1`).
 - **`--quic-psk-file`:** File containing the pre-shared key, see [PSK Best Practices](#psk-best-practices).
-- **`--config-dir`:** Where the certificate and private key are stored (default `~/.config/portredirect`).
+- **`--config-dir`:** Where the certificate and private key are stored (default `~/.config/portredirect`). If only one of them is there, the server doesn't start, instead of generating a new pair that clients wouldn't trust.
 - **`--print-metrics`:** Print connection and traffic counters to stderr when they change.
 - **`--log-level`:** `off`, `error`, `warn`, `info` (default), `debug` or `trace`.
 
