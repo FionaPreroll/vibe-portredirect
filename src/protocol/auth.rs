@@ -80,8 +80,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     // 1. Send the challenge.
-    let mut nonce: Nonce = [0u8; NONCE_LENGTH];
-    getrandom::fill(&mut nonce).map_err(|e| anyhow!("failed to get random bytes: {}", e))?;
+    let nonce = random_nonce()?;
     send(stream, CHALLENGE_HEADER, &nonce)
         .await
         .context("failed to send challenge")?;
@@ -147,6 +146,13 @@ where
         .into());
     }
     Ok(())
+}
+
+/// Returns a nonce from the operating system's secure random number generator.
+fn random_nonce() -> Result<Nonce> {
+    let mut nonce: Nonce = [0u8; NONCE_LENGTH];
+    getrandom::fill(&mut nonce).map_err(|e| anyhow!("failed to get random bytes: {}", e))?;
+    Ok(nonce)
 }
 
 /// Returns the proof for `label`, i.e. HMAC-SHA256 with the PSK as key over
@@ -346,7 +352,7 @@ mod tests {
     #[test]
     fn test_client_proof_is_no_server_proof() {
         let psk = SecretString::from("test-secret");
-        let nonce = [3u8; NONCE_LENGTH];
+        let nonce = random_nonce().unwrap();
         let client_proof = sign(&psk, CLIENT_PROOF_LABEL, &BINDING, &nonce);
         assert!(!verify(
             &psk,
