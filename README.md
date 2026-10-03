@@ -15,7 +15,7 @@ Both use a pre-shared key (PSK) for authentication. The server auto-generates a 
 
 ### **Bling:**
 
-[![codecov](https://codecov.io/gh/unspezifisch/portredirect/graph/badge.svg?token=TJSQNU6NMR)](https://codecov.io/gh/unspezifisch/portredirect)
+[![codecov](https://codecov.io/gh/FionaPreroll/vibe-portredirect/graph/badge.svg)](https://codecov.io/gh/FionaPreroll/vibe-portredirect)
 
 ### Concept
 
@@ -52,7 +52,7 @@ cargo install --locked --path .
 
 `--locked` uses the dependency versions from `Cargo.lock`, which are the ones tested and audited in CI.
 
-> **Note:** The `portredirect` 0.3.0 package on crates.io predates protocol version 2 (see [docs/PROTOCOL.md](docs/PROTOCOL.md)) and can't talk to this version. Server and client must speak the same protocol version.
+> **Note:** The `portredirect` package on crates.io is published by the original project (see [History](#history)). Its version 0.3.0 predates protocol version 2 (see [docs/PROTOCOL.md](docs/PROTOCOL.md)) and can't talk to this version. Server and client must speak the same protocol version.
 
 ## Usage
 
@@ -187,6 +187,11 @@ PortRedirect is ideal for simple TCP-to-QUIC tunneling setups:
 - **Scalability:** Not yet optimized for extremely high concurrency, a client forwards at most 100 connections at the same time.
 - **Reliability:** The client does not reconnect yet, run it with a service manager that restarts it.
 - **Security:** We try our best but no guarantees, see the known limitations in [SECURITY](SECURITY.md#known-limitations).
+
+## History
+
+This project independently continues the development of [unspezifisch/portredirect](https://github.com/unspezifisch/portredirect).
+Thanks to unspezifisch for creating PortRedirect.
 
 ## License
 
