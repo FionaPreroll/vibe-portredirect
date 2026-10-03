@@ -1,4 +1,4 @@
-# PortRedirect Protocol (version 2)
+# PortRedirect Protocol (version 3)
 
 This document describes how `portredirect_client` and `portredirect_server` talk to each other.
 It reflects the implementation in `src/protocol/` and `src/quic/`; if they disagree, the code wins and this document needs fixing.
@@ -16,57 +16,89 @@ It reflects the implementation in `src/protocol/` and `src/quic/`; if they disag
 ```
 
 1. The client connects to the server via QUIC and verifies the server's certificate.
-2. The server opens the **control stream** and challenges the client to prove it knows the pre-shared key (PSK).
+2. The server opens the **control stream**. Client and server prove to each other that they know the pre-shared key (PSK).
 3. The client asks the server to listen on a TCP port; the server binds it and confirms.
 4. For every external TCP connection the server accepts, it opens a **data stream** to the client, which connects to the destination and forwards bytes in both directions.
 5. The client sends keepalive messages on the control stream for as long as the tunnel should exist.
+6. A side that ends the connection closes it with a [close code](#close-codes) that tells why. The client connects again, unless the code means that connecting again would fail the same way.
 
 ## Transport
 
-- QUIC with TLS 1.3, ALPN protocol identifier `pr-2`.
+- QUIC with TLS 1.3, ALPN protocol identifier `pr-3`.
   The identifier changes with every incompatible protocol change; peers speaking a different version fail the TLS handshake ("peer doesn't support any known protocol").
+  Version 2 (`pr-2`, PortRedirect 0.4.0) authenticated only the client, without binding the proof to the TLS session, and closed all connections with code 0.
   Version 1 (`pr-1`, e.g. `portredirect` 0.3.0 on crates.io) had no listen port negotiation.
 - **Server authentication:** the server presents a certificate, by default a self-signed one it generates on first start (`cert.der`, `key.der` in its configuration directory).
   The client trusts exactly the certificate in its own `cert.der` (copied from the server) and verifies that it is issued for `--quic-remote-hostname-match`, or for the IP address of `--quic-remote-host` if not given.
-- **Client authentication:** none at the TLS level; the client proves knowledge of the PSK on the control stream, see below.
+  In addition, the server proves on the control stream that it knows the PSK.
+- **Client authentication:** none at the TLS level; the client proves on the control stream that it knows the PSK, see below.
 - **Streams:** only the server opens streams, all of them bidirectional.
   The server allows the client to open zero streams, so a client cannot send anything except on streams the server opened.
+  The client accepts one stream more than its `--max-connections`, for the control stream.
 - **Address validation:** the server answers new connections with a stateless retry, so a client must be able to receive packets at its source address before the server keeps state for it.
-- Further transport settings of the server: QUIC keep-alive packets every 25 s, idle timeout 30 s (Quinn default), spin bit disabled, round-robin stream scheduling.
+- **Admission control:** the server refuses connections beyond its [limits](#limits), and from addresses that failed to authenticate repeatedly, before the TLS handshake.
+- Further transport settings: both sides send QUIC keep-alive packets every 25 s, the idle timeout is 30 s (Quinn default), the spin bit is disabled; the server schedules its streams round-robin.
 
 ## Control stream
 
 The first stream of a connection is opened by the server and stays open for the connection's lifetime.
-Messages are ASCII text or fixed-size binary records, as shown below (`\n` is a line feed, `uN` an N-bit unsigned integer in network byte order).
+Messages are ASCII text or fixed-size binary records, as shown below (`\n` is a line feed, `uN` an N-bit unsigned integer in network byte order, `[N]` N raw bytes).
 
-If the server rejects anything, it closes the whole QUIC connection with application error code 0 and a reason starting with `ERR`, see [Connection close reasons](#connection-close-reasons).
+If a side rejects anything, it closes the whole QUIC connection with a [close code](#close-codes).
 
 ### 1. Authentication
 
-Server to client, at most 256 bytes:
+Both sides prove that they know the PSK, with proofs that are bound to the TLS session.
+
+**Session binding:** both sides export 32 bytes of keying material from the TLS session ([RFC 8446, section 7.5](https://www.rfc-editor.org/rfc/rfc8446#section-7.5)), with the label `EXPORTER-portredirect-v3-authentication` and an empty context.
+The value is the same on both ends of a connection and unique to it, so a proof is worthless in any other connection, e.g. when replayed or relayed.
+
+**Proofs** are HMAC-SHA256 tags (32 bytes), keyed with the bytes of the PSK, over an ASCII label, the session binding and the nonce:
 
 ```text
-WHO THE HECK ARE YOU?\n
-this-is-the-challenge-<random>-at-<minutes>-pr-v1\n
+client proof = HMAC-SHA256(PSK, "portredirect v3 client proof" || binding || nonce)
+server proof = HMAC-SHA256(PSK, "portredirect v3 server proof" || binding || nonce)
 ```
 
-- `<random>`: 32 bytes from the operating system's secure random number generator, hex encoded (64 characters).
-- `<minutes>`: minutes since the Unix epoch on the server. It is informational only; the server does not check it, replay protection comes from the random part.
+(`||` is concatenation.) The labels differ, so a client proof can't serve as server proof or vice versa.
 
-Client to server, exactly 129 bytes:
+**Messages:**
+
+1. Server to client, 41 bytes:
+
+   ```text
+   CHALLENGE <nonce: [32]>
+   ```
+
+   (no space; the literal `CHALLENGE` is followed directly by the nonce)
+   `<nonce>` are 32 bytes from the operating system's secure random number generator.
+
+2. Client to server, 40 bytes:
+
+   ```text
+   RESPONSE <client proof: [32]>
+   ```
+
+   If the proof is wrong, the server closes the connection with code 1 without sending anything else.
+
+3. Server to client, 40 bytes:
+
+   ```text
+   ACCEPTED <server proof: [32]>
+   ```
+
+   If the proof is wrong, the client closes the connection with code 1.
+
+Both sides verify proofs in constant time.
+The client proves its knowledge first: anyone can connect to the server, but only a server with the certificate's private key gets a client's proof, so nobody else can use one to guess the PSK offline.
+The server closes the connection with code 2 if authentication is not finished within 10 seconds.
+
+**Example:** with the PSK `test-psk`, the binding bytes `0x00`, `0x01`, …, `0x1f` and the nonce bytes `0x20`, `0x21`, …, `0x3f`, the proofs are:
 
 ```text
-<response>\n
+client proof: d9183d723457d964b08ee797ee6f8e8d9555c3bcb88cf4aed96c597ac50dbfe1
+server proof: 3e3e8adcd46b77001d02198f2981a38f0b57ada39b2e42588844a42b82b24139
 ```
-
-- `<response>`: SHA-512 of the challenge line (without the line feed) immediately followed by the PSK bytes, hex encoded in lower case (128 characters).
-
-Server to client:
-
-- `HAPPY\n` if the response matches; continue with step 2.
-- `BAD\n` otherwise, and the server closes the connection with `ERR failed authentication`.
-
-The server closes the connection with `ERR authentication timed out` if authentication is not finished within 10 seconds.
 
 ### 2. Listen port
 
@@ -87,7 +119,7 @@ LISTENING <bound port: u16>
 (again without a space)
 
 From now on, the server accepts external TCP connections on that port for this client.
-Errors close the connection: `ERR port not allowed`, `ERR failed binding tcp listener` (e.g. the port is in use, also by a previous connection of the same client that has not timed out yet), `ERR failed configuration` (malformed request), `ERR configuration timed out` (no request within 10 seconds).
+On errors, the server closes the connection: with code 5 if the port is not allowed, 6 if it could not listen on the port (e.g. the port is in use, also by a previous connection of the same client that has not timed out yet), 3 for a malformed request and 4 if no request arrives within 10 seconds.
 
 ### 3. Keepalive
 
@@ -97,9 +129,9 @@ Errors close the connection: `ERR port not allowed`, `ERR failed binding tcp lis
 | `PONG\n`    | server to client | Answer to each `PING`.                                    |
 | `BYE\n`     | client to server | Ends the connection. Not sent by the current client.      |
 
-- The client stops its keepalive loop if a `PONG` does not arrive within 30 seconds, or anything else arrives instead.
-- The server ends the connection if it receives no message for 60 seconds, an unexpected message, or `BYE`.
-  It then stops the TCP listener and closes the connection with `OK normal shutdown`.
+- The client closes the connection with code 7 if a `PONG` does not arrive within 30 seconds, or anything else arrives instead.
+- The server ends the connection if it receives no message for 60 seconds (code 7), an unexpected or longer than 16 bytes message (code 3), `BYE` or the end of the control stream (code 0).
+  It then stops the TCP listener and closes the connection.
 
 ## Data streams
 
@@ -108,19 +140,44 @@ The client connects to its destination (`--destination-host`, `--destination-por
 
 - When one side's TCP peer closes its sending direction (FIN), the stream direction is finished, and the other side shuts down the corresponding TCP sending direction. Half-closed connections are supported.
 - The stream carries only payload bytes; there is no framing or metadata such as the external client's address.
-- The client accepts at most 100 concurrent data streams (Quinn default). Further external connections wait until a stream is closed.
+- If the client accepts no further stream within 10 seconds, because it already forwards its `--max-connections`, the server closes the external connection.
+- If the client can't connect to the destination within 10 seconds, it closes the stream, and the server closes the external connection.
+- The server closes connections without data transfer in either direction for `--idle-timeout` seconds.
 
-## Connection close reasons
+## Limits
 
-| Reason                                 | Cause                                                  |
-| -------------------------------------- | ------------------------------------------------------ |
-| `ERR failed authentication`            | Wrong PSK or malformed response.                       |
-| `ERR authentication timed out`         | No valid response within 10 seconds.                   |
-| `ERR failed configuration`             | Malformed listen port request.                         |
-| `ERR configuration timed out`          | No listen port request within 10 seconds.              |
-| `ERR port not allowed`                 | Port is not in the server's `--allowed-client-ports`.  |
-| `ERR failed binding tcp listener`      | The server could not listen on the port.               |
-| `ERR failed confirming configuration`  | Sending `LISTENING` failed.                            |
-| `OK normal shutdown`                   | Keepalive ended, see above.                            |
+The server limits the resources a single host can use.
+Addresses are counted per IPv4 address and per IPv6 /64 network, because a single host often has a whole /64; IPv4-mapped IPv6 addresses count as IPv4.
 
-All of them use application error code 0.
+| What                                                      | Default             | Server option              | When exceeded                                                        |
+| --------------------------------------------------------- | ------------------- | -------------------------- | -------------------------------------------------------------------- |
+| QUIC connections, including unauthenticated ones          | 64                  | `--max-quic-connections`   | New connections are refused.                                         |
+| QUIC connections per address                              | 8                   |                            | New connections are refused.                                         |
+| Failed handshakes or authentication attempts per address  | 5 within 10 minutes |                            | The address is blocked for 10 minutes: its connections are refused.  |
+| Forwarded connections per client                          | 512                 | `--max-connections`        | New external connections wait in the listen backlog.                 |
+| Forwarded connections per external address                | 64                  | `--max-connections-per-ip` | New external connections are closed right away.                      |
+| Time without data transfer on a forwarded connection      | 600 s               | `--idle-timeout`           | The connection is closed.                                            |
+
+Authentication timeouts count as failed attempts.
+A successful authentication clears the address's failed attempts, unless it is blocked.
+Refusing a QUIC connection happens before the TLS handshake and closes it with the QUIC transport error `CONNECTION_REFUSED`.
+
+## Close codes
+
+Both sides close the QUIC connection with one of these application error codes and a reason phrase for logs.
+
+| Code | Meaning                                                                                   | Sent by | Client connects again |
+| ---: | ----------------------------------------------------------------------------------------- | ------- | --------------------- |
+|    0 | Normal end: shutdown of server or client, `BYE` or end of the control stream.             | both    | yes                   |
+|    1 | Authentication failed: the peer did not prove that it knows the PSK.                      | both    | no                    |
+|    2 | Authentication timed out.                                                                 | server  | yes                   |
+|    3 | Protocol violation: a malformed listen port request or an unexpected control message.    | server  | no                    |
+|    4 | Configuration timed out: no listen port request within 10 seconds.                        | server  | yes                   |
+|    5 | Port not allowed by the server's `--allowed-client-ports`.                                | server  | no                    |
+|    6 | Port unavailable: the server could not listen on the port, e.g. because it is in use.    | server  | yes                   |
+|    7 | Keepalive failed.                                                                         | both    | yes                   |
+|    8 | Internal error, e.g. a failure to send a message.                                         | both    | yes                   |
+
+The client also exits instead of connecting again on TLS errors (e.g. an untrusted certificate or another protocol version) and invalid connection parameters.
+Otherwise, it connects again with exponential backoff: after 1 second, doubling up to 60 seconds, each delay randomized to 50–100 % of its value.
+After a connection worked for a minute, the delays start over.
