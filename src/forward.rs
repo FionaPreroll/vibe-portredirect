@@ -3,7 +3,13 @@
 // License: GPL-3.0-only
 
 use anyhow::{Context, Result};
-use tokio::io::{copy_bidirectional_with_sizes, AsyncRead, AsyncWrite};
+use std::io;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::task::{Context as TaskContext, Poll};
+use std::time::Duration;
+use tokio::io::{copy_bidirectional_with_sizes, AsyncRead, AsyncWrite, ReadBuf};
+use tokio::time::Instant;
 use tracing::info;
 
 use crate::metrics_helper::MetricsCounter;
@@ -24,11 +30,13 @@ use crate::metrics_helper::MetricsCounter;
 /// - `id`: A stream identifier (displayable) used for logging purposes.
 /// - `stream_a_counter`: A counter that is incremented by the number of bytes read from stream A.
 /// - `stream_b_counter`: A counter that is incremented by the number of bytes read from stream B.
+/// - `idle_timeout`: If set, forwarding stops when no data was transferred in either direction
+///   for this long. This counts as a normal end and returns `Ok(())`.
 ///
 /// # Returns
 ///
-/// Returns `Ok(())` if the bidirectional copy completes (or a graceful shutdown is detected),
-/// or an error wrapped with context if a non-graceful error occurs.
+/// Returns `Ok(())` if the bidirectional copy completes (or a graceful shutdown or idle timeout is
+/// detected), or an error wrapped with context if a non-graceful error occurs.
 ///
 /// # Errors
 ///
@@ -46,7 +54,7 @@ use crate::metrics_helper::MetricsCounter;
 /// let (mut a, mut b) = duplex(64);
 /// let counter_a = DummyCounter::new();
 /// let counter_b = DummyCounter::new();
-/// forward_bidirectional(&mut a, &mut b, "stream1", &counter_a, &counter_b).await?;
+/// forward_bidirectional(&mut a, &mut b, "stream1", &counter_a, &counter_b, None).await?;
 /// # Ok(())
 /// # }
 /// ```
@@ -56,6 +64,7 @@ pub async fn forward_bidirectional<StreamA, StreamB, StreamName, CounterA, Count
     id: StreamName,
     stream_a_counter: CounterA,
     stream_b_counter: CounterB,
+    idle_timeout: Option<Duration>,
 ) -> Result<()>
 where
     StreamA: AsyncRead + AsyncWrite + Unpin,
@@ -64,16 +73,35 @@ where
     CounterA: MetricsCounter,
     CounterB: MetricsCounter,
 {
+    let activity = Activity::new();
+    let mut a = Tracked::new(a, &activity, &stream_a_counter);
+    let mut b = Tracked::new(b, &activity, &stream_b_counter);
+
     let buf_size = crate::PortRedirectProtocol::QUIC_STREAM_READ_BUFFER_SIZE;
-    let result = copy_bidirectional_with_sizes(a, b, buf_size, buf_size).await;
+    let copy = copy_bidirectional_with_sizes(&mut a, &mut b, buf_size, buf_size);
+    let result = match idle_timeout {
+        Some(idle_timeout) => tokio::select! {
+            result = copy => result.map(Some),
+            () = activity.idle_for(idle_timeout) => Ok(None),
+        },
+        None => copy.await.map(Some),
+    };
 
     match result {
-        Ok((bytes_a, bytes_b)) => {
-            stream_a_counter.inc_by(bytes_a);
-            stream_b_counter.inc_by(bytes_b);
+        Ok(Some(_)) => {
             info!(
                 "Stream (id={}): forwarded (A:B) ({}:{}) bytes",
-                id, bytes_a, bytes_b
+                id, a.bytes_read, b.bytes_read
+            );
+            Ok(())
+        }
+        Ok(None) => {
+            info!(
+                "Stream (id={}): closed after {:?} without data transfer, forwarded (A:B) ({}:{}) bytes",
+                id,
+                idle_timeout.unwrap_or_default(),
+                a.bytes_read,
+                b.bytes_read
             );
             Ok(())
         }
@@ -86,6 +114,98 @@ where
                 Err(err).context("Bidirectional copy failed")
             }
         }
+    }
+}
+
+/// Tracks when data was last transferred, shared by both directions of a forwarding.
+struct Activity {
+    start: Instant,
+    /// Milliseconds since `start` at the last transfer.
+    last_transfer_millis: AtomicU64,
+}
+
+impl Activity {
+    fn new() -> Self {
+        Self {
+            start: Instant::now(),
+            last_transfer_millis: AtomicU64::new(0),
+        }
+    }
+
+    fn record_transfer(&self) {
+        let millis = u64::try_from(self.start.elapsed().as_millis()).unwrap_or(u64::MAX);
+        self.last_transfer_millis.store(millis, Ordering::Relaxed);
+    }
+
+    fn last_transfer(&self) -> Instant {
+        self.start + Duration::from_millis(self.last_transfer_millis.load(Ordering::Relaxed))
+    }
+
+    /// Completes once no data was transferred for `timeout`.
+    async fn idle_for(&self, timeout: Duration) {
+        loop {
+            let deadline = self.last_transfer() + timeout;
+            if Instant::now() >= deadline {
+                return;
+            }
+            tokio::time::sleep_until(deadline).await;
+        }
+    }
+}
+
+/// Wraps a stream to count the bytes read from it and to record the activity.
+struct Tracked<'a, S, C> {
+    inner: &'a mut S,
+    activity: &'a Activity,
+    counter: &'a C,
+    bytes_read: u64,
+}
+
+impl<'a, S, C> Tracked<'a, S, C> {
+    fn new(inner: &'a mut S, activity: &'a Activity, counter: &'a C) -> Self {
+        Self {
+            inner,
+            activity,
+            counter,
+            bytes_read: 0,
+        }
+    }
+}
+
+impl<S: AsyncRead + Unpin, C: MetricsCounter> AsyncRead for Tracked<'_, S, C> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let filled_before = buf.filled().len();
+        let result = Pin::new(&mut *this.inner).poll_read(cx, buf);
+        let bytes = (buf.filled().len() - filled_before) as u64;
+        if bytes > 0 {
+            this.bytes_read += bytes;
+            this.counter.inc_by(bytes);
+            this.activity.record_transfer();
+        }
+        result
+    }
+}
+
+impl<S: AsyncWrite + Unpin, C> AsyncWrite for Tracked<'_, S, C> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut *self.get_mut().inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut *self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut *self.get_mut().inner).poll_shutdown(cx)
     }
 }
 
@@ -217,12 +337,15 @@ mod tests {
             "A",
             &dummy_counter_a,
             &dummy_counter_b,
+            None,
         )
         .await?;
 
         // After bidirectional copy, stream_a should have received stream_b's data, and vice versa.
         assert_eq!(stream_a.write_data, b"world");
         assert_eq!(stream_b.write_data, b"hello");
+        assert_eq!(dummy_counter_a.get(), 5);
+        assert_eq!(dummy_counter_b.get(), 5);
 
         Ok(())
     }
@@ -243,6 +366,7 @@ mod tests {
             "fail",
             &dummy_counter_a,
             &dummy_counter_b,
+            None,
         )
         .await;
         assert!(result.is_err());
@@ -314,9 +438,85 @@ mod tests {
             "normal",
             &dummy_counter_a,
             &dummy_counter_b,
+            None,
         )
         .await?;
 
         Ok(())
+    }
+
+    /// Runs `forward_bidirectional` between the inner ends of two duplex pipes and returns the
+    /// outer ends, which play the two peers.
+    fn spawn_forwarding(
+        idle_timeout: Option<Duration>,
+    ) -> (
+        tokio::io::DuplexStream,
+        tokio::io::DuplexStream,
+        tokio::task::JoinHandle<Result<()>>,
+    ) {
+        let (peer_a, mut inner_a) = tokio::io::duplex(1024);
+        let (peer_b, mut inner_b) = tokio::io::duplex(1024);
+        let forwarding = tokio::spawn(async move {
+            let counter_a = DummyCounter::new();
+            let counter_b = DummyCounter::new();
+            forward_bidirectional(
+                &mut inner_a,
+                &mut inner_b,
+                "idle",
+                &counter_a,
+                &counter_b,
+                idle_timeout,
+            )
+            .await
+        });
+        (peer_a, peer_b, forwarding)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_idle_timeout_ends_inactive_forwarding() -> Result<()> {
+        let start = Instant::now();
+        let (_peer_a, _peer_b, forwarding) = spawn_forwarding(Some(Duration::from_secs(10)));
+
+        forwarding.await??;
+
+        assert!(start.elapsed() >= Duration::from_secs(10));
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_data_transfer_resets_idle_timeout() -> Result<()> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let start = Instant::now();
+        let (mut peer_a, mut peer_b, forwarding) = spawn_forwarding(Some(Duration::from_secs(10)));
+
+        // Transfer a byte every 6 seconds, in alternating directions.
+        let mut byte = [0u8; 1];
+        for round in 0..4 {
+            tokio::time::sleep(Duration::from_secs(6)).await;
+            if round % 2 == 0 {
+                peer_a.write_all(b"x").await?;
+                peer_b.read_exact(&mut byte).await?;
+            } else {
+                peer_b.write_all(b"y").await?;
+                peer_a.read_exact(&mut byte).await?;
+            }
+            assert!(!forwarding.is_finished(), "forwarding ended while active");
+        }
+
+        // Then stay idle: the forwarding ends 10 seconds after the last transfer.
+        forwarding.await??;
+        assert!(start.elapsed() >= Duration::from_secs(24 + 10));
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_no_idle_timeout_without_limit() {
+        let (_peer_a, _peer_b, forwarding) = spawn_forwarding(None);
+
+        tokio::time::sleep(Duration::from_secs(24 * 3600)).await;
+
+        assert!(!forwarding.is_finished());
+        forwarding.abort();
     }
 }

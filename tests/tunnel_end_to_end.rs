@@ -9,12 +9,12 @@ use portredirect::client::server_handler::handle_quic_server_connection;
 use portredirect::quic::client::{run_quic_client, ClientConfig};
 use portredirect::quic::server::{load_or_generate_quic_cert, run_quic_server, ServerConfig};
 use portredirect::server::client_handler::handle_quic_client_connection;
-use portredirect::server::PortSpec;
+use portredirect::server::{ForwardingLimits, PortSpec};
 use std::future::Future;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout, Duration, Instant};
@@ -98,7 +98,22 @@ async fn start_echo_server() -> SocketAddr {
 }
 
 fn start_server(config_dir: &Path, quic_port: u16, allowed_ports: Vec<PortSpec>) -> JoinHandle<()> {
-    let app_data = ServerAppData::new(TEST_PSK.into(), "127.0.0.1".into(), allowed_ports);
+    start_server_with_limits(
+        config_dir,
+        quic_port,
+        allowed_ports,
+        ForwardingLimits::default(),
+    )
+}
+
+fn start_server_with_limits(
+    config_dir: &Path,
+    quic_port: u16,
+    allowed_ports: Vec<PortSpec>,
+    limits: ForwardingLimits,
+) -> JoinHandle<()> {
+    let app_data = ServerAppData::new(TEST_PSK.into(), "127.0.0.1".into(), allowed_ports)
+        .with_forwarding_limits(limits);
     let config = ServerConfig::create_default_config(
         config_dir.to_path_buf(),
         CERT_HOSTNAME.into(),
@@ -157,6 +172,36 @@ async fn connect_through_tunnel(port: u16) -> Result<TcpStream> {
             }
             Err(_) => sleep(Duration::from_millis(50)).await,
         }
+    }
+}
+
+/// Connects to the server's external TCP port from the local address `source`.
+///
+/// On Linux, all of 127.0.0.0/8 is local, which lets tests act as different hosts.
+async fn connect_from(source: Ipv4Addr, port: u16) -> std::io::Result<TcpStream> {
+    let socket = TcpSocket::new_v4()?;
+    socket.bind(SocketAddr::from((source, 0)))?;
+    socket.connect(localhost(port)).await
+}
+
+/// Sends `message` through an echoing tunnel connection and checks that it comes back.
+async fn echo_once(stream: &mut TcpStream, message: &[u8]) -> Result<()> {
+    stream.write_all(message).await?;
+    let mut echoed = vec![0u8; message.len()];
+    timeout(Duration::from_secs(5), stream.read_exact(&mut echoed))
+        .await
+        .map_err(|_| anyhow!("no echo within 5 seconds"))??;
+    anyhow::ensure!(echoed == message, "echo differs from message");
+    Ok(())
+}
+
+/// Returns whether the peer closed the connection within `within`, without sending data.
+async fn closed_by_peer(stream: &mut TcpStream, within: Duration) -> bool {
+    let mut buf = [0u8; 16];
+    match timeout(within, stream.read(&mut buf)).await {
+        Ok(Ok(0)) | Ok(Err(_)) => true,
+        Ok(Ok(_)) => panic!("unexpected data from an idle connection"),
+        Err(_) => false,
     }
 }
 
@@ -325,6 +370,161 @@ async fn server_rejects_disallowed_port() -> Result<()> {
         );
 
         assert!(TcpStream::connect(localhost(listen_port)).await.is_err());
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn idle_connections_are_closed() -> Result<()> {
+    let config_dir = setup();
+    let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
+    let echo_addr = start_echo_server().await;
+
+    let limits = ForwardingLimits {
+        idle_timeout: Some(Duration::from_secs(1)),
+        ..ForwardingLimits::default()
+    };
+    let _server = start_server_with_limits(
+        config_dir.path(),
+        quic_port,
+        vec![PortSpec::Single(listen_port)],
+        limits,
+    );
+    let _client = start_client(
+        config_dir.path(),
+        quic_port,
+        TEST_PSK,
+        echo_addr,
+        listen_port,
+    );
+
+    with_timeout(async {
+        let mut stream = connect_through_tunnel(listen_port).await?;
+
+        // Transfers keep the connection open beyond the idle timeout.
+        for _ in 0..4 {
+            sleep(Duration::from_millis(500)).await;
+            echo_once(&mut stream, b"still here").await?;
+        }
+
+        // Without transfers, the server closes it.
+        assert!(closed_by_peer(&mut stream, Duration::from_secs(5)).await);
+        Ok(())
+    })
+    .await
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn connections_per_address_are_limited() -> Result<()> {
+    let config_dir = setup();
+    let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
+    let echo_addr = start_echo_server().await;
+    let (busy_host, other_host) = (Ipv4Addr::new(127, 0, 0, 2), Ipv4Addr::new(127, 0, 0, 3));
+
+    let limits = ForwardingLimits {
+        max_connections_per_ip: 2,
+        ..ForwardingLimits::default()
+    };
+    let _server = start_server_with_limits(
+        config_dir.path(),
+        quic_port,
+        vec![PortSpec::Single(listen_port)],
+        limits,
+    );
+    let _client = start_client(
+        config_dir.path(),
+        quic_port,
+        TEST_PSK,
+        echo_addr,
+        listen_port,
+    );
+
+    with_timeout(async {
+        let ready = connect_through_tunnel(listen_port).await?;
+        assert_eq!(echo_roundtrip(ready, b"ready".to_vec()).await?, b"ready");
+
+        // Two connections from one address are forwarded, a third one is closed.
+        let mut first = connect_from(busy_host, listen_port).await?;
+        let mut second = connect_from(busy_host, listen_port).await?;
+        echo_once(&mut first, b"first").await?;
+        echo_once(&mut second, b"second").await?;
+        let mut third = connect_from(busy_host, listen_port).await?;
+        assert!(closed_by_peer(&mut third, Duration::from_secs(5)).await);
+
+        // Other addresses are not affected.
+        let mut other = connect_from(other_host, listen_port).await?;
+        echo_once(&mut other, b"other").await?;
+
+        // Once a connection ends, its address can connect again.
+        drop(first);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let mut retry = connect_from(busy_host, listen_port).await?;
+            if echo_once(&mut retry, b"again").await.is_ok() {
+                break;
+            }
+            anyhow::ensure!(Instant::now() < deadline, "slot was not freed");
+            sleep(Duration::from_millis(50)).await;
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// Many idle connections from one host must not block the tunnel for others.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn idle_connections_from_one_address_do_not_block_others() -> Result<()> {
+    let config_dir = setup();
+    let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
+    let echo_addr = start_echo_server().await;
+    let (attacker, user) = (Ipv4Addr::new(127, 0, 0, 2), Ipv4Addr::new(127, 0, 0, 3));
+
+    let _server = start_server(
+        config_dir.path(),
+        quic_port,
+        vec![PortSpec::Single(listen_port)],
+    );
+    let _client = start_client(
+        config_dir.path(),
+        quic_port,
+        TEST_PSK,
+        echo_addr,
+        listen_port,
+    );
+
+    with_timeout(async {
+        let ready = connect_through_tunnel(listen_port).await?;
+        assert_eq!(echo_roundtrip(ready, b"ready".to_vec()).await?, b"ready");
+
+        // Open 100 connections from one address and keep them idle.
+        let mut checks = tokio::task::JoinSet::new();
+        for _ in 0..100 {
+            let mut stream = connect_from(attacker, listen_port).await?;
+            checks.spawn(async move {
+                let closed = closed_by_peer(&mut stream, Duration::from_secs(2)).await;
+                (stream, closed)
+            });
+        }
+
+        // Only the allowed number per address is kept open.
+        let mut idle = Vec::new();
+        let mut closed = 0;
+        while let Some(check) = checks.join_next().await {
+            let (stream, was_closed) = check?;
+            closed += usize::from(was_closed);
+            idle.push(stream);
+        }
+        assert_eq!(
+            closed,
+            100 - ForwardingLimits::DEFAULT_MAX_CONNECTIONS_PER_IP
+        );
+
+        // Another host still gets through.
+        let stream = connect_from(user, listen_port).await?;
+        assert_eq!(echo_roundtrip(stream, b"hello".to_vec()).await?, b"hello");
         Ok(())
     })
     .await

@@ -10,7 +10,8 @@ use rustls::pki_types::CertificateDer;
 use std::{fs, io, net::SocketAddr, path::PathBuf, sync::Arc, time::Instant};
 use tracing::{debug, error, info, instrument};
 
-use super::ALPN_QUIC_PORTREDIRECT;
+use super::{client_transport_config, ALPN_QUIC_PORTREDIRECT};
+use crate::PortRedirectProtocol;
 
 #[derive(Debug)]
 #[allow(unused)]
@@ -21,6 +22,8 @@ pub struct ClientConfig<AppDataType> {
 
     pub local_socket: SocketAddr,
     pub remote_socket: SocketAddr,
+    /// Maximum number of concurrently forwarded connections, i.e. streams the server may open.
+    /// Defaults to `PortRedirectProtocol::DEFAULT_MAX_FORWARDED_CONNECTIONS`.
     pub connection_limit: Option<usize>,
 
     pub app_data: AppDataType,
@@ -93,8 +96,13 @@ where
         .unwrap_or_else(|| config.remote_socket.ip().to_string());
 
     // QUIC client setup.
-    let client_config =
+    let mut client_config =
         quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(client_crypto)?));
+    client_config.transport_config(Arc::new(client_transport_config(
+        config
+            .connection_limit
+            .unwrap_or(PortRedirectProtocol::DEFAULT_MAX_FORWARDED_CONNECTIONS),
+    )));
 
     let mut endpoint = quinn::Endpoint::client(config.local_socket)?;
     endpoint.set_default_client_config(client_config);

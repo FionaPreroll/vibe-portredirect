@@ -9,6 +9,7 @@ pub mod app_data;
 pub mod bi_stream;
 pub mod client;
 pub mod forward;
+pub mod limits;
 pub mod metrics_helper;
 pub mod private_files;
 pub mod protocol;
@@ -41,6 +42,10 @@ impl PortRedirectProtocol {
     pub const CONNECTION_KEEPALIVE_READ_TIMEOUT: Duration = Duration::from_secs(30);
     pub const AUTHENTICATION_TIMEOUT: Duration = Duration::from_secs(10);
     pub const CONFIGURATION_TIMEOUT: Duration = Duration::from_secs(10);
+    /// Interval of QUIC keep-alive packets, below QUIC's default idle timeout of 30 seconds.
+    pub const QUIC_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(25);
+    /// Default maximum number of concurrently forwarded connections per tunnel.
+    pub const DEFAULT_MAX_FORWARDED_CONNECTIONS: usize = 512;
     pub const CHALLENGE_REQUEST_BUFFER_LENGTH: usize = 256;
 
     // TODO choose these values non-arbitrarily

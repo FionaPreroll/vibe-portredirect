@@ -24,6 +24,7 @@ pub async fn run_client(
     tcp_local_addr: SocketAddr,
     quic_remote_addr: SocketAddr,
     quic_remote_hostname_match: Option<String>,
+    max_connections: usize,
     metrics_enabled: bool,
 ) -> Result<()> {
     // Shared state for connection statistics.
@@ -69,7 +70,7 @@ pub async fn run_client(
         quic_remote_addr,
         // Name to verify the server certificate against, defaults to the remote IP address.
         quic_remote_hostname_match,
-        None,
+        Some(max_connections),
         app_config,
     );
 

@@ -8,6 +8,7 @@ use portredirect::app_data::ClientAppData;
 use portredirect::client::run_client::run_client;
 use portredirect::get_config_dir;
 use portredirect::psk::{warn_if_psk_on_command_line, PskArgs};
+use portredirect::PortRedirectProtocol;
 use std::net::ToSocketAddrs;
 use tracing::{info, span, Level};
 
@@ -46,6 +47,14 @@ struct Args {
     /// Enable Prometheus metrics.
     #[clap(long)]
     provide_metrics: bool,
+
+    /// Maximum number of concurrently forwarded connections, i.e. connections to the destination.
+    #[clap(
+        long,
+        default_value_t = PortRedirectProtocol::DEFAULT_MAX_FORWARDED_CONNECTIONS as u32,
+        value_parser = clap::value_parser!(u32).range(1..)
+    )]
+    max_connections: u32,
 
     /// Name the server's TLS certificate must be issued for (Subject Alt Name), if it differs
     /// from --quic-remote-host. Must match the server's --quic-cert-hostname.
@@ -122,6 +131,7 @@ async fn main() -> Result<()> {
         quic_local_addr,
         quic_remote_addr,
         args.quic_remote_hostname_match,
+        args.max_connections as usize,
         args.provide_metrics,
     )
     .await?;

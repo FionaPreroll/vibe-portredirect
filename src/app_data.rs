@@ -7,7 +7,7 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
-use crate::server::PortSpec;
+use crate::server::{ForwardingLimits, PortSpec};
 
 // Storage for application data for handler functions.
 #[derive(Clone, Debug)]
@@ -20,6 +20,9 @@ pub struct ServerAppData {
 
     // Allowed ports for clients to request.
     pub local_bind_ports: Vec<PortSpec>,
+
+    // Limits for the connections forwarded for each client.
+    pub forwarding_limits: ForwardingLimits,
 }
 
 impl ServerAppData {
@@ -32,7 +35,14 @@ impl ServerAppData {
             connection_auth_psk,
             local_bind_ip,
             local_bind_ports,
+            forwarding_limits: ForwardingLimits::default(),
         }
+    }
+
+    /// Replaces the default limits for the connections forwarded for each client.
+    pub fn with_forwarding_limits(mut self, forwarding_limits: ForwardingLimits) -> Self {
+        self.forwarding_limits = forwarding_limits;
+        self
     }
 }
 

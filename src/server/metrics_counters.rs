@@ -21,6 +21,12 @@ lazy_static::lazy_static! {
         "Total number of failures accepting TCP connections"
     ).expect("Failed to create counter");
 
+    pub static ref TCP_CONNECTIONS_REFUSED: IntCounter =
+    register_int_counter!(
+        "portredirect_server_tcp_connections_refused_total",
+        "Total number of TCP connections closed right away, as their address had too many connections"
+    ).expect("Failed to create counter");
+
     pub static ref QUIC_DATA_STREAM_OPENING_ERRORS: IntCounter =
     register_int_counter!(
         "portredirect_server_quic_data_stream_opening_errors_total",

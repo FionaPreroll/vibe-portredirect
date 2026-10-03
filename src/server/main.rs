@@ -10,8 +10,10 @@ use portredirect::psk::{warn_if_psk_on_command_line, PskArgs};
 use portredirect::quic::server::{run_quic_server, ServerConfig};
 use portredirect::server::client_handler::handle_quic_client_connection;
 use portredirect::server::metrics_printer::print_metrics_loop;
-use portredirect::server::PortSpec;
+use portredirect::server::{ForwardingLimits, PortSpec};
+use portredirect::PortRedirectProtocol;
 use std::net::{SocketAddr, ToSocketAddrs};
+use std::time::Duration;
 use tracing::{info, span, Level};
 
 /// Command-line arguments for the server side.
@@ -47,6 +49,25 @@ struct Args {
 
     #[command(flatten)]
     psk: PskArgs,
+
+    /// Maximum number of concurrently forwarded TCP connections per client.
+    /// Further connections wait until one ends.
+    #[clap(
+        long,
+        default_value_t = PortRedirectProtocol::DEFAULT_MAX_FORWARDED_CONNECTIONS as u32,
+        value_parser = clap::value_parser!(u32).range(1..)
+    )]
+    max_connections: u32,
+
+    /// Maximum number of concurrently forwarded TCP connections per external IP address
+    /// (IPv6: per /64 network), 0 for no limit. Further connections are closed right away.
+    #[clap(long, default_value_t = ForwardingLimits::DEFAULT_MAX_CONNECTIONS_PER_IP as u32)]
+    max_connections_per_ip: u32,
+
+    /// Close forwarded TCP connections after this many seconds without data transfer,
+    /// 0 to never close idle connections.
+    #[clap(long, default_value_t = ForwardingLimits::DEFAULT_IDLE_TIMEOUT.as_secs())]
+    idle_timeout: u64,
 
     /// Print metrics to stderr every second, if any value changes.
     #[clap(long)]
@@ -99,7 +120,13 @@ async fn main() -> Result<()> {
     .context("Failed to resolve QUIC bind address")?;
 
     // Set up QUIC server configuration.
-    let app_data = ServerAppData::new(psk, args.local_host, allowed_client_ports);
+    let forwarding_limits = ForwardingLimits {
+        max_connections: args.max_connections as usize,
+        max_connections_per_ip: args.max_connections_per_ip as usize,
+        idle_timeout: (args.idle_timeout > 0).then(|| Duration::from_secs(args.idle_timeout)),
+    };
+    let app_data = ServerAppData::new(psk, args.local_host, allowed_client_ports)
+        .with_forwarding_limits(forwarding_limits);
     info!("QUIC will listen on {}", quic_addr);
 
     let quic_config = ServerConfig::create_default_config(

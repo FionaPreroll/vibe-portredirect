@@ -11,8 +11,13 @@ use crate::quic::client::ClientConfig;
 
 use anyhow::{anyhow, Error, Result};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::time::timeout;
 use tracing::{debug, instrument};
+
+/// Time to wait for the destination to accept a connection.
+const DESTINATION_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Bridges a QUIC stream to a new TCP connection (client side).
 #[instrument[skip(config, quic_stream)]]
@@ -24,9 +29,20 @@ where
     QuicStreamType: AsyncRead + AsyncWrite + Unpin + std::fmt::Display,
 {
     // Create client-side TCP connection to the destination
-    let mut tcp_stream = tokio::net::TcpStream::connect(&config.app_data.forward_destination)
-        .await
-        .map_err(|e| anyhow!("failed to connect to destination: {}", e))?;
+    let destination = config.app_data.forward_destination;
+    let mut tcp_stream = timeout(
+        DESTINATION_CONNECT_TIMEOUT,
+        tokio::net::TcpStream::connect(destination),
+    )
+    .await
+    .map_err(|_| {
+        anyhow!(
+            "connecting to destination {} timed out after {:?}",
+            destination,
+            DESTINATION_CONNECT_TIMEOUT
+        )
+    })?
+    .map_err(|e| anyhow!("failed to connect to destination {}: {}", destination, e))?;
 
     // Run QUIC stream handler that forwards TCP connection to server
     let stream_name = format!("Client-A:TCP-B:QUIC({})", quic_stream);
@@ -42,6 +58,8 @@ where
         // Force dereferencing here because the counter is a LazyStatic.
         &*BYTES_TRANSMITTED_A,
         &*BYTES_TRANSMITTED_B,
+        // The server closes idle connections.
+        None,
     )
     .await?;
 

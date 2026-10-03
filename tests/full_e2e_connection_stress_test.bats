@@ -12,9 +12,10 @@ setup() {
     # Build the project, when not running in CI
     [ -e .ci ] || cargo build --release
 
-    # Start portredirect server in background
+    # Start portredirect server in background.
+    # All load comes from one address, so don't limit the connections per address.
     ./target/release/portredirect_server \
-        --local-host 127.0.0.1 --allowed-client-ports 1111 \
+        --local-host 127.0.0.1 --allowed-client-ports 1111 --max-connections-per-ip 0 \
         --quic-server-host 127.0.0.1 --quic-server-port 4433 --quic-psk ilovespezifisch \
         --print-metrics \
         >"$LOG_DIR/portredirect_server.log" 2>&1 &
