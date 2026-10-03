@@ -48,8 +48,8 @@ setup() {
 teardown() {
     get_metrics "$LOG_DIR/portredirect_client_metrics.log"
 
-    # Kill background processes
-    kill $SERVER_PID $CLIENT_PID || true
+    # Stop background processes, including the netcat listener if the test failed
+    stop_processes $SERVER_PID $CLIENT_PID $NC_PID
 }
 
 send_and_verify() {
@@ -63,6 +63,7 @@ send_and_verify() {
 
     # Start netcat listener on port 2222 (bridged by portredirect)
     nc -l -p 2222 >received_$filename &
+    NC_PID=$!
     sleep 1 # Allow listener to start
 
     # Send the file via netcat to port 1111, which is redirected to 2222

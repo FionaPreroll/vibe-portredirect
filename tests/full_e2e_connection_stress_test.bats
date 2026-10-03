@@ -39,7 +39,7 @@ setup() {
 
 teardown() {
     get_metrics "$LOG_DIR/portredirect_client_metrics.log"
-    kill $SERVER_PID $CLIENT_PID
+    stop_processes $SERVER_PID $CLIENT_PID
 }
 
 pr_log_error_check() {

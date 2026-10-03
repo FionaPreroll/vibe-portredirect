@@ -75,7 +75,7 @@ setup() {
 teardown() {
     get_metrics "$LOG_DIR/portredirect_client_metrics.log"
 
-    kill $SERVER_PID $CLIENT_PID $IPERF_PID || true
+    stop_processes $SERVER_PID $CLIENT_PID $IPERF_PID
 }
 
 @test "Baseline iperf3 test (direct connection)" {
