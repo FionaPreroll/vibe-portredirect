@@ -6,6 +6,9 @@ use crate::protocol::close::CloseCode;
 use crate::protocol::control::{configure_quic_client, confirm_client_configuration};
 use crate::protocol::keepalive::{run_control_channel_loop, ControlChannelEnd};
 use crate::quic::server::ServerConfig;
+use crate::server::metrics_counters::{
+    CLIENT_CONNECTIONS_CLOSED_TOTAL, CLIENT_CONNECTIONS_TOTAL, KEEPALIVE_ERRORS,
+};
 use crate::server::AllowedPorts;
 use crate::PortRedirectProtocol;
 use crate::{app_data::ServerAppData, server::tcp_listener::handle_tcp_listener};
@@ -39,6 +42,7 @@ pub async fn handle_quic_client_connection(
         Ok(Ok(stream)) => {
             // Auth succeeded. Continue with the control stream.
             config.admission.record_success(remote.ip());
+            CLIENT_CONNECTIONS_TOTAL.inc();
             stream
         }
         Ok(Err(err)) => {
@@ -132,6 +136,11 @@ pub async fn handle_quic_client_connection(
         _ => "tunnel closed",
     };
     end.close_code().close(&quic_conn, reason);
+    match end.close_code() {
+        CloseCode::Ok => CLIENT_CONNECTIONS_CLOSED_TOTAL.inc(),
+        CloseCode::KeepaliveFailed => KEEPALIVE_ERRORS.inc(),
+        _ => {}
+    }
 
     // Await the TCP listener task.
     debug!("Waiting for TCP listener task to finish");

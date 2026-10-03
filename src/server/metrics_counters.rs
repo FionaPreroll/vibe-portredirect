@@ -60,24 +60,24 @@ lazy_static::lazy_static! {
             "Total number of gracefully completed QUIC/TCP forwardings."
         ).expect("Failed to create counter");
 
-    /// Total number of errors encountered in the keepalive loop.
+    /// Total number of client connections closed because no keepalive message arrived in time.
     pub static ref KEEPALIVE_ERRORS: IntCounter =
         register_int_counter!(
             "portredirect_server_keepalive_errors_total",
-            "Total number of errors in the keepalive loop"
+            "Total number of client connections closed because no keepalive message arrived in time"
         ).expect("Failed to create keepalive_errors_total counter");
 
-    /// Total number of times the client connected to the QUIC/PRRS server.
-    pub static ref SERVER_CONNECTIONS_OPENED_TOTAL: IntCounter =
+    /// Total number of client connections that authenticated successfully.
+    pub static ref CLIENT_CONNECTIONS_TOTAL: IntCounter =
         register_int_counter!(
-            "portredirect_server_server_connections_opened_total",
-            "Total number of times the client connected to the server"
-        ).expect("Failed to create server_connections_opened_total counter");
+            "portredirect_server_client_connections_total",
+            "Total number of client connections that authenticated successfully"
+        ).expect("Failed to create client_connections_total counter");
 
-    /// Total number of times the server connection was closed cleanly.
-    pub static ref SERVER_CONNECTIONS_GRACEFULLY_CLOSED_TOTAL: IntCounter =
+    /// Total number of authenticated client connections that ended normally.
+    pub static ref CLIENT_CONNECTIONS_CLOSED_TOTAL: IntCounter =
         register_int_counter!(
-            "portredirect_server_server_connections_gracefully_closed_total",
-            "Total number of times the server connection was closed cleanly"
-        ).expect("Failed to create server_connections_gracefully_closed_total counter");
+            "portredirect_server_client_connections_closed_total",
+            "Total number of authenticated client connections that ended normally"
+        ).expect("Failed to create client_connections_closed_total counter");
 }

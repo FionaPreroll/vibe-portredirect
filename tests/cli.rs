@@ -174,11 +174,25 @@ async fn start_echo_server() -> Result<SocketAddr> {
     Ok(addr)
 }
 
+/// Sends an HTTP GET request for `path` and returns the whole response.
+async fn http_get(addr: SocketAddr, path: &str) -> Result<String> {
+    let mut stream = TcpStream::connect(addr).await?;
+    let request = format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+        path, addr
+    );
+    stream.write_all(request.as_bytes()).await?;
+    let mut response = String::new();
+    timeout(WAIT_TIMEOUT, stream.read_to_string(&mut response)).await??;
+    Ok(response)
+}
+
 fn path_str(path: &Path) -> &str {
     path.to_str().expect("non-UTF-8 path")
 }
 
 /// Starts a server with the PSK in the environment and waits until it is ready.
+/// It prints its metrics whenever they change.
 async fn start_server(config_dir: &Path, quic_port: u16, listen_port: u16) -> Result<Program> {
     let server = Program::start(
         SERVER,
@@ -193,6 +207,7 @@ async fn start_server(config_dir: &Path, quic_port: u16, listen_port: u16) -> Re
             &quic_port.to_string(),
             "--quic-cert-hostname",
             "localhost",
+            "--print-metrics",
         ],
         &[("PORTREDIRECT_QUIC_PSK", PSK)],
     );
@@ -290,8 +305,18 @@ async fn programs_forward_and_exit_cleanly_on_sigterm() -> Result<()> {
     let psk_file = client_dir.path().join("psk");
     write_psk_file(&psk_file, PSK, 0o600)?;
 
+    let metrics_port = free_tcp_port();
     let mut args = client_args(client_dir.path(), quic_port, echo_addr.port(), listen_port);
-    args.extend(["--quic-psk-file".into(), path_str(&psk_file).into()]);
+    args.extend(
+        [
+            "--quic-psk-file",
+            path_str(&psk_file),
+            "--provide-metrics",
+            "--metrics-listen",
+            &localhost(metrics_port).to_string(),
+        ]
+        .map(String::from),
+    );
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let mut client = Program::start(CLIENT, &args, &[]);
     client.wait_for_output("Tunnel established").await?;
@@ -302,6 +327,15 @@ async fn programs_forward_and_exit_cleanly_on_sigterm() -> Result<()> {
     timeout(WAIT_TIMEOUT, stream.read_exact(&mut echoed)).await??;
     assert_eq!(&echoed, b"hello");
 
+    // The client's metrics count the connection to the server.
+    let metrics = http_get(localhost(metrics_port), "/metrics").await?;
+    assert!(metrics.starts_with("HTTP/1.1 200 OK"), "{}", metrics);
+    assert!(
+        metrics.contains("\nserver_connections_opened_total 1\n"),
+        "{}",
+        metrics
+    );
+
     // The client closes its connection, so the server releases the port right away.
     client.terminate();
     assert_eq!(client.exit_code().await?, 0, "{}", client.output());
@@ -310,6 +344,11 @@ async fn programs_forward_and_exit_cleanly_on_sigterm() -> Result<()> {
         anyhow::ensure!(Instant::now() < deadline, "the server kept the port");
         sleep(Duration::from_millis(50)).await;
     }
+
+    // The server's metrics count the client's connection and its normal end.
+    server
+        .wait_for_output("clients_connected: 1 | clients_closed: 1")
+        .await?;
 
     server.terminate();
     assert_eq!(server.exit_code().await?, 0, "{}", server.output());
