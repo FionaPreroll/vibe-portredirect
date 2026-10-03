@@ -341,6 +341,14 @@ async fn logs_go_to_stderr_without_colors_and_follow_rust_log() -> Result<()> {
     let output = client.output();
     assert!(!output.contains("Configuration directory"), "{}", output);
     assert!(output.contains("copy cert.der"), "{}", output);
+
+    // An invalid RUST_LOG is reported and ignored in favor of --log-level.
+    let mut client = Program::start(CLIENT, &quiet_args, &[("RUST_LOG", "portredirect=loud")]);
+    assert_eq!(client.exit_code().await?, 1);
+    let output = client.output();
+    assert!(output.contains("Ignoring invalid RUST_LOG"), "{}", output);
+    assert!(output.contains("Configuration directory"), "{}", output);
+    assert_eq!(client.stdout(), "");
     Ok(())
 }
 
