@@ -11,7 +11,7 @@ use portredirect::client::run_client::{run_client, ClientSettings};
 use portredirect::client::server_handler::handle_quic_server_connection;
 use portredirect::forward::forward_tcp_and_quic;
 use portredirect::limits::{BlockingPolicy, QuicAdmission};
-use portredirect::metrics_helper::DummyCounter;
+use portredirect::metrics::DummyCounter;
 use portredirect::protocol::auth::{client_authenticate, session_binding, ClientName};
 use portredirect::protocol::close::CloseCode;
 use portredirect::protocol::control::{receive_hello, send_welcome, SERVER_SOFTWARE};
@@ -22,6 +22,7 @@ use portredirect::quic::server::{load_or_generate_quic_cert, run_quic_server, Se
 use portredirect::server::auth::authenticate_quic_client;
 use portredirect::server::client_handler::handle_quic_client_connection;
 use portredirect::server::clients::{ClientEntry, ClientList};
+use portredirect::server::metrics::{ClientMetrics, METRICS};
 use portredirect::server::{ForwardingLimits, PortSpec};
 use portredirect::shutdown::Shutdown;
 use portredirect::PortRedirectProtocol;
@@ -1244,6 +1245,101 @@ async fn client_shuts_down_while_setting_up_the_tunnel() -> Result<()> {
         // The client closed the connection normally.
         let reason = closed_rx.await?;
         assert_eq!(CloseCode::of(&reason), Some(CloseCode::Ok), "{:?}", reason);
+        Ok(())
+    })
+    .await
+}
+
+/// Waits until `value` returns `expected`.
+async fn wait_for_metric(value: impl Fn() -> i64, expected: i64, what: &str) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while value() != expected {
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "{} is {}, not {}",
+            what,
+            value(),
+            expected
+        );
+        sleep(Duration::from_millis(20)).await;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn server_metrics_count_per_client() -> Result<()> {
+    let config_dir = setup();
+    let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
+    let echo_addr = start_echo_server().await;
+    // The metrics are shared by all tests, but these clients only appear here.
+    let mut config = server_config_with_clients(
+        config_dir.path(),
+        quic_port,
+        &[
+            ("metrics-a", &[TEST_PSK], listen_port),
+            ("metrics-b", &["metrics-b-psk-0123456789"], free_tcp_port()),
+        ],
+    );
+    config.app_data.forwarding_limits.max_connections_per_ip = 1;
+    let _server = spawn_server_with_handler(config, handle_quic_client_connection);
+    let client = start_named_client(
+        config_dir.path(),
+        quic_port,
+        "metrics-a",
+        TEST_PSK,
+        echo_addr,
+        listen_port,
+    );
+    let a: ClientMetrics = METRICS.client(&"metrics-a".parse().unwrap());
+    let b = METRICS.client(&"metrics-b".parse().unwrap());
+    let failures = METRICS.authentication_failures.get();
+
+    with_timeout(async {
+        let mut first = connect_through_tunnel(listen_port).await?;
+        echo_once(&mut first, b"hello").await?;
+        assert_eq!((a.tunnels.get(), a.tunnels_active.get()), (1, 1));
+        assert_eq!(a.forwarded_connections_active.get(), 1);
+
+        // A second connection from the same address is refused.
+        let mut second = TcpStream::connect(localhost(listen_port)).await?;
+        assert!(closed_by_peer(&mut second, Duration::from_secs(5)).await);
+        assert_eq!(a.forwarded_connections_refused.get(), 1);
+
+        drop(first);
+        wait_for_metric(
+            || a.forwarded_connections_active.get(),
+            0,
+            "running connections",
+        )
+        .await?;
+        assert_eq!(a.forwarded_connections.get(), 1);
+        assert_eq!(a.bytes_from_external.get(), 5);
+        assert_eq!(a.bytes_to_external.get(), 5);
+        assert_eq!(a.forwarded_connections_aborted.get(), 0);
+
+        // An external client that resets its connection aborts it.
+        let reset = TcpStream::connect(localhost(listen_port)).await?;
+        sleep(Duration::from_millis(200)).await;
+        reset.set_zero_linger()?;
+        drop(reset);
+        wait_for_metric(
+            || a.forwarded_connections_aborted.get() as i64,
+            1,
+            "aborted connections",
+        )
+        .await?;
+
+        // A wrong PSK counts as failed attempt, without a client name.
+        let result = connect_once(config_dir.path(), quic_port, "wrong-psk", listen_port).await;
+        assert!(result.is_err(), "{:?}", result);
+        assert!(METRICS.authentication_failures.get() > failures);
+
+        client.stop().await?;
+        wait_for_metric(|| a.tunnels_active.get(), 0, "active tunnels").await?;
+        assert_eq!((a.keepalive_failures.get(), a.accept_errors.get()), (0, 0));
+
+        // The other client's metrics are untouched.
+        assert_eq!((b.tunnels.get(), b.forwarded_connections.get()), (0, 0));
         Ok(())
     })
     .await

@@ -4,12 +4,9 @@
 
 use crate::forward::reset_tcp;
 use crate::limits::AddressConnectionLimit;
+use crate::metrics::Active;
 use crate::protocol::data_stream::send_connection_header;
-use crate::server::metrics_counters::{
-    QUIC_DATA_STREAM_OPENING_ERRORS, TCP_CONNECTIONS_ACCEPTED, TCP_CONNECTIONS_FAILED_ACCEPTING,
-    TCP_CONNECTIONS_REFUSED, TCP_QUIC_CONNECTIONS_CLOSED_ERROR,
-    TCP_QUIC_CONNECTIONS_CLOSED_GRACEFUL,
-};
+use crate::server::metrics::ClientMetrics;
 use crate::server::port_registry::PortLease;
 use crate::server::tcp_forwarder::forward_tcp_to_quic_stream;
 use crate::{app_data::ServerAppData, quic::server::ServerConfig};
@@ -32,18 +29,20 @@ const ACCEPT_ERROR_DELAY: Duration = Duration::from_secs(1);
 
 /// Accepts external TCP connections on `listener` and forwards each through a new QUIC stream,
 /// until `cancel_token` is cancelled. Then closes the listener and releases the port's `lease`.
+/// Counts in the client's `metrics`.
 #[cfg_attr(
     not(coverage),
-    tracing::instrument(skip(config, quic_conn, listener, lease, cancel_token))
+    tracing::instrument(skip(config, quic_conn, listener, lease, metrics, cancel_token))
 )]
 pub async fn handle_tcp_listener(
     config: Arc<ServerConfig<ServerAppData>>,
     quic_conn: quinn::Connection,
     listener: TcpListener,
     lease: PortLease,
+    metrics: ClientMetrics,
     cancel_token: CancellationToken,
 ) -> Result<()> {
-    let result = accept_connections(&config, &quic_conn, &listener, &cancel_token).await;
+    let result = accept_connections(&config, &quic_conn, &listener, &metrics, &cancel_token).await;
     // Close the listener before releasing the port, so another connection can listen on it.
     drop(listener);
     info!("Stopped listening on TCP port {}", lease.port());
@@ -55,6 +54,7 @@ async fn accept_connections(
     config: &ServerConfig<ServerAppData>,
     quic_conn: &quinn::Connection,
     listener: &TcpListener,
+    metrics: &ClientMetrics,
     cancel_token: &CancellationToken,
 ) -> Result<()> {
     let limits = config.app_data.forwarding_limits;
@@ -85,17 +85,15 @@ async fn accept_connections(
         let (tcp_stream, peer_addr) = match accept_result {
             Ok(connection) => connection,
             Err(e) => {
-                TCP_CONNECTIONS_FAILED_ACCEPTING.inc();
+                metrics.accept_errors.inc();
                 warn!("Failed to accept TCP connection: {}", e);
                 tokio::time::sleep(ACCEPT_ERROR_DELAY).await;
                 continue;
             }
         };
-        TCP_CONNECTIONS_ACCEPTED.inc();
-
         // Limit the connections per address, so a single host can't use up all slots.
         let Some(address_slot) = address_limit.try_acquire(peer_addr.ip()) else {
-            TCP_CONNECTIONS_REFUSED.inc();
+            metrics.forwarded_connections_refused.inc();
             debug!(
                 "Closing TCP connection from {}: too many connections from this address",
                 peer_addr
@@ -103,13 +101,21 @@ async fn accept_connections(
             continue;
         };
         debug!("Accepted TCP connection from {}", peer_addr);
+        metrics.forwarded_connections.inc();
 
         // Draining the shutdown waits for the connection.
-        let quic_conn = quic_conn.clone();
+        let (quic_conn, metrics) = (quic_conn.clone(), metrics.clone());
         config.shutdown.spawn(
             async move {
-                forward_external_connection(quic_conn, tcp_stream, peer_addr, limits.idle_timeout)
-                    .await;
+                let _active = Active::new(&metrics.forwarded_connections_active);
+                forward_external_connection(
+                    quic_conn,
+                    tcp_stream,
+                    peer_addr,
+                    limits.idle_timeout,
+                    &metrics,
+                )
+                .await;
                 // The connection's slots are free again.
                 drop((slot, address_slot));
             }
@@ -128,6 +134,7 @@ async fn forward_external_connection(
     tcp_stream: TcpStream,
     peer_addr: SocketAddr,
     idle_timeout: Option<Duration>,
+    metrics: &ClientMetrics,
 ) {
     let start_time = Instant::now();
 
@@ -135,13 +142,13 @@ async fn forward_external_connection(
     let (mut send, recv) = match timeout(STREAM_OPEN_TIMEOUT, quic_conn.open_bi()).await {
         Ok(Ok(stream)) => stream,
         Ok(Err(e)) => {
-            QUIC_DATA_STREAM_OPENING_ERRORS.inc();
+            metrics.forwarded_connections_failed.inc();
             warn!("Failed to open QUIC stream for {}: {}", peer_addr, e);
             reset_tcp(&tcp_stream);
             return;
         }
         Err(_) => {
-            QUIC_DATA_STREAM_OPENING_ERRORS.inc();
+            metrics.forwarded_connections_failed.inc();
             warn!(
                 "Client accepted no stream for {} within {:?}, resetting the connection",
                 peer_addr, STREAM_OPEN_TIMEOUT
@@ -160,20 +167,20 @@ async fn forward_external_connection(
     // The header tells the client about the new stream right away, even if the external client
     // waits for the destination to speak first.
     if let Err(e) = send_connection_header(&mut send, peer_addr).await {
-        QUIC_DATA_STREAM_OPENING_ERRORS.inc();
+        metrics.forwarded_connections_failed.inc();
         warn!("Failed to start QUIC stream for {}: {:#}", peer_addr, e);
         reset_tcp(&tcp_stream);
         return;
     }
 
-    if let Err(e) = forward_tcp_to_quic_stream(tcp_stream, send, recv, idle_timeout).await {
-        TCP_QUIC_CONNECTIONS_CLOSED_ERROR.inc();
+    if let Err(e) = forward_tcp_to_quic_stream(tcp_stream, send, recv, idle_timeout, metrics).await
+    {
+        metrics.forwarded_connections_aborted.inc();
         info!(
             "Connection from {} (stream {}) aborted: {:#}",
             peer_addr, stream_id, e
         );
     } else {
-        TCP_QUIC_CONNECTIONS_CLOSED_GRACEFUL.inc();
         debug!("TCP-to-QUIC stream (id {}) completed", stream_id);
     }
 

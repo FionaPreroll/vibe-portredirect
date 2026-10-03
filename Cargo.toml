@@ -23,7 +23,6 @@ getrandom = "0.4.3"
 http-body-util = "0.1.5"
 hyper = { version = "1.9.0", features = ["server", "http1"] }
 hyper-util = { version = "0.1.21", features = ["tokio"] }
-lazy_static = "1.5.0"
 prometheus = { version = "0.14.0", default-features = false }
 quinn = { version = "0.11.12", features = ["futures-io"] }
 rcgen = { version = "0.14.10", features = ["pem", "crypto"] }

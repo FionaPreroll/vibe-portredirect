@@ -221,13 +221,8 @@ fn path_str(path: &Path) -> &str {
     path.to_str().expect("non-UTF-8 path")
 }
 
-/// Starts a server with the PSK in the environment and waits until it is ready.
-/// It prints its metrics whenever they change.
-async fn start_server(config_dir: &Path, quic_port: u16, listen_port: u16) -> Result<Program> {
-    start_server_with(config_dir, quic_port, listen_port, &[]).await
-}
-
-/// Like [`start_server`], with additional arguments.
+/// Starts a server with the PSK in the environment and `extra_args`, and waits until it is
+/// ready. It prints its metrics whenever they change.
 async fn start_server_with(
     config_dir: &Path,
     quic_port: u16,
@@ -446,7 +441,18 @@ async fn programs_forward_and_exit_cleanly_on_sigterm() -> Result<()> {
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
     let echo_addr = start_echo_server().await?;
 
-    let mut server = start_server(server_dir.path(), quic_port, listen_port).await?;
+    let server_metrics = localhost(free_tcp_port());
+    let mut server = start_server_with(
+        server_dir.path(),
+        quic_port,
+        listen_port,
+        &[
+            "--provide-metrics",
+            "--metrics-listen",
+            &server_metrics.to_string(),
+        ],
+    )
+    .await?;
     fs::copy(
         server_dir.path().join("cert.der"),
         client_dir.path().join("cert.der"),
@@ -472,23 +478,40 @@ async fn programs_forward_and_exit_cleanly_on_sigterm() -> Result<()> {
 
     assert_echo(listen_port).await?;
 
-    // The client's metrics count the connection to the server.
+    // The client's metrics count the tunnel and the forwarded connection, its own only.
     let metrics = http_get(localhost(metrics_port), "/metrics").await?;
     assert!(metrics.starts_with("HTTP/1.1 200 OK"), "{}", metrics);
-    assert!(
-        metrics.contains("\nserver_connections_opened_total 1\n"),
-        "{}",
-        metrics
-    );
+    for line in [
+        "\nportredirect_client_tunnels_total 1\n",
+        "\nportredirect_client_tunnel_up 1\n",
+        "\nportredirect_client_forwarded_connections_total 1\n",
+        "\nportredirect_client_bytes_to_destination_total 5\n",
+        "\nportredirect_client_keepalive_failures_total 0\n",
+    ] {
+        assert!(metrics.contains(line), "no {:?} in:\n{}", line, metrics);
+    }
+    assert!(!metrics.contains("portredirect_server_"), "{}", metrics);
+
+    // The server's metrics name the client.
+    let metrics = http_get(server_metrics, "/metrics").await?;
+    for line in [
+        "\nportredirect_server_tunnels_active{client=\"default\"} 1\n",
+        "\nportredirect_server_forwarded_connections_total{client=\"default\"} 1\n",
+        "\nportredirect_server_bytes_from_external_total{client=\"default\"} 5\n",
+        "\nportredirect_server_authentication_failures_total 0\n",
+    ] {
+        assert!(metrics.contains(line), "no {:?} in:\n{}", line, metrics);
+    }
+    assert!(!metrics.contains("portredirect_client_"), "{}", metrics);
 
     // The client closes its connection, so the server releases the port right away.
     client.terminate();
     assert_eq!(client.exit_code().await?, 0, "{}", client.output());
     wait_until_closed(listen_port).await?;
 
-    // The server's metrics count the client's connection and its normal end.
+    // The server prints its metrics: the tunnel was set up and is down again.
     server
-        .wait_for_output("clients_connected: 1 | clients_closed: 1")
+        .wait_for_output("tunnels_active: 0 | tunnels_total: 1")
         .await?;
 
     server.terminate();

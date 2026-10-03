@@ -14,7 +14,7 @@ pub mod client;
 pub mod config;
 pub mod forward;
 pub mod limits;
-pub mod metrics_helper;
+pub mod metrics;
 pub mod private_files;
 pub mod protocol;
 pub mod psk;

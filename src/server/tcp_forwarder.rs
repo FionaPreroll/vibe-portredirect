@@ -3,7 +3,7 @@
 //
 // License: GPL-3.0-only
 
-use super::metrics_counters::{BYTES_TRANSMITTED_A, BYTES_TRANSMITTED_B};
+use super::metrics::ClientMetrics;
 
 use crate::forward::forward_tcp_and_quic;
 
@@ -15,12 +15,17 @@ use tracing::debug;
 /// [`forward_tcp_and_quic`].
 ///
 /// Forwarding ends when no data was transferred for `idle_timeout`, if given.
-#[cfg_attr(not(coverage), tracing::instrument(skip(tcp_stream, send, recv)))]
+/// Counts the bytes in the client's `metrics`.
+#[cfg_attr(
+    not(coverage),
+    tracing::instrument(skip(tcp_stream, send, recv, metrics))
+)]
 pub async fn forward_tcp_to_quic_stream(
     tcp_stream: tokio::net::TcpStream,
     send: quinn::SendStream,
     recv: quinn::RecvStream,
     idle_timeout: Option<Duration>,
+    metrics: &ClientMetrics,
 ) -> Result<()> {
     // On the server side, the TCP stream is already open, as it was externally initiated.
     let stream_name = format!("Server-A:TCP-B:QUIC({})", recv.id());
@@ -34,9 +39,8 @@ pub async fn forward_tcp_to_quic_stream(
         send,
         recv,
         &stream_name,
-        // Force dereferencing here because the counter is a LazyStatic.
-        &*BYTES_TRANSMITTED_A,
-        &*BYTES_TRANSMITTED_B,
+        &metrics.bytes_from_external,
+        &metrics.bytes_to_external,
         idle_timeout,
     )
     .await?;

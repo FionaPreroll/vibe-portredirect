@@ -2,11 +2,12 @@
 //
 // License: GPL-3.0-only
 
-use super::metrics::start_metrics_server;
+use super::metrics::METRICS;
 use super::reconnect::{is_permanent_error, Backoff};
 use super::server_handler::handle_quic_server_connection;
 
 use crate::app_data::ClientAppData;
+use crate::metrics::serve_metrics;
 use crate::protocol::close::CloseCode;
 use crate::protocol::message::ProtocolViolation;
 use crate::quic::client::{ClientConfig, QuicClient};
@@ -53,7 +54,7 @@ pub async fn run_client(settings: ClientSettings) -> Result<()> {
     // Start the metrics server if enabled.
     if let Some(metrics_addr) = settings.metrics_addr {
         tokio::spawn(async move {
-            if let Err(e) = start_metrics_server(metrics_addr).await {
+            if let Err(e) = serve_metrics(METRICS.registry.clone(), metrics_addr).await {
                 error!("Metrics server failed: {:#}", e);
             }
         });
@@ -134,6 +135,7 @@ struct ConnectionAttempt {
 /// Connects to the server and handles the connection until it ends, or until the client shut
 /// down.
 async fn run_connection(client: &QuicClient<ClientAppData>) -> ConnectionAttempt {
+    METRICS.connection_attempts.inc();
     let connected = tokio::select! {
         connected = client.connect() => connected,
         () = client.config().shutdown.draining() => Err(anyhow::anyhow!("shutting down")),

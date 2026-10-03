@@ -78,7 +78,8 @@ portredirect_server \
 - **`--psk-file`:** File containing the pre-shared key, see [PSK Best Practices](#psk-best-practices).
 - **`--config-file`:** TOML file with settings, e.g. a list of clients, see [Configuration File](#configuration-file).
 - **`--config-dir`:** Where the certificate and private key are stored (default `~/.config/portredirect`). If only one of them is there, the server doesn't start, instead of generating a new pair that clients wouldn't trust.
-- **`--print-metrics`:** Print connection and traffic counters to stderr when they change.
+- **`--provide-metrics`:** Serve Prometheus metrics at `http://127.0.0.1:9899/metrics`, or at the address given with `--metrics-listen`, see [Metrics](#metrics). The endpoint has no authentication, only make it reachable from trusted networks.
+- **`--print-metrics`:** Print the metrics to stderr when they change, each summed over all clients.
 - **`--shutdown-timeout`:** Seconds that running forwarded connections may take to finish when the server shuts down (default 5), see [Shutting Down](#shutting-down).
 - **`--log-level`:** `off`, `error`, `warn`, `info` (default), `debug` or `trace`. Logs go to stderr. The `RUST_LOG` environment variable, if set, takes precedence and can set levels per module, e.g. `RUST_LOG=info,portredirect::forward=debug`.
 
@@ -114,7 +115,7 @@ portredirect_client \
 - **`--config-file`:** TOML file with settings, see [Configuration File](#configuration-file).
 - **`--config-dir`:** Where the server's certificate `cert.der` is read from (default `~/.config/portredirect`).
 - **`--max-connections`:** Maximum number of concurrently forwarded connections (default 512).
-- **`--provide-metrics`:** Serve Prometheus metrics at `http://127.0.0.1:9898/metrics`, or at the address given with `--metrics-listen`. The endpoint has no authentication, only make it reachable from trusted networks.
+- **`--provide-metrics`:** Serve Prometheus metrics at `http://127.0.0.1:9898/metrics`, or at the address given with `--metrics-listen`, see [Metrics](#metrics). The endpoint has no authentication, only make it reachable from trusted networks.
 - **`--shutdown-timeout`** and **`--log-level`:** As for the server.
 
 > **Important:** Start the server first to generate its certificate, then copy **only the certificate** `~/.config/portredirect/cert.der` from the server to the client's configuration directory (by default the same path).
@@ -213,6 +214,42 @@ On `SIGINT` or `SIGTERM`, both programs shut down gracefully, e.g. for an update
 
 A second `SIGINT` or `SIGTERM` closes the running connections right away.
 Keep the timeout shorter than the time a service manager waits before it kills the program, e.g. `TimeoutStopSec` of systemd (90 seconds by default) or the stop timeout of Docker (10 seconds by default).
+
+### Metrics
+
+With `--provide-metrics`, both programs serve [Prometheus](https://prometheus.io) metrics at `/metrics`: the client on `127.0.0.1:9898` by default, the server on `127.0.0.1:9899`.
+All metrics are listed from the start, with 0. Metrics of the server's clients have the label `client` with the client's name; they are listed for all configured clients.
+
+| Server metric (`portredirect_server_…`)           | Type    | Labels   | Meaning                                                                                       |
+| ------------------------------------------------- | ------- | -------- | --------------------------------------------------------------------------------------------- |
+| `quic_connections_refused_total`                  | counter | `reason` | QUIC connections refused before the TLS handshake: `blocked`, `connection_limit`, `address_limit` or `shutting_down`. |
+| `authentication_failures_total`                   | counter |          | Failed TLS handshakes and authentication attempts, which count towards blocking an address.   |
+| `tunnels_total`                                   | counter | `client` | Tunnels set up: the client authenticated and the server listens for it.                      |
+| `tunnels_active`                                  | gauge   | `client` | Tunnels that are up.                                                                          |
+| `keepalive_failures_total`                        | counter | `client` | Tunnels closed because no keepalive message arrived in time.                                 |
+| `forwarded_connections_total`                     | counter | `client` | External connections forwarded through the tunnel.                                           |
+| `forwarded_connections_active`                    | gauge   | `client` | Forwarded connections that are running.                                                       |
+| `forwarded_connections_refused_total`             | counter | `client` | External connections closed right away, as their address had too many connections.          |
+| `forwarded_connections_failed_total`              | counter | `client` | External connections that couldn't be forwarded, as the client accepted no stream for them.  |
+| `forwarded_connections_aborted_total`             | counter | `client` | Forwarded connections that ended with an error, e.g. an abort.                               |
+| `accept_errors_total`                             | counter | `client` | Failures to accept an external connection, e.g. for lack of file descriptors.                |
+| `bytes_from_external_total`                       | counter | `client` | Bytes received from external connections.                                                    |
+| `bytes_to_external_total`                         | counter | `client` | Bytes sent to external connections.                                                          |
+
+| Client metric (`portredirect_client_…`)           | Type    | Meaning                                                                             |
+| ------------------------------------------------- | ------- | ----------------------------------------------------------------------------------- |
+| `connection_attempts_total`                       | counter | Attempts to connect to the server.                                                  |
+| `tunnels_total`                                   | counter | Tunnels set up: the client connected, authenticated and the server listens for it. |
+| `tunnel_up`                                       | gauge   | 1 while the tunnel is up, else 0. Alert on it.                                      |
+| `keepalive_failures_total`                        | counter | Tunnels closed because the server didn't answer keepalive messages.                |
+| `forwarded_connections_total`                     | counter | Connections the server forwarded through the tunnel.                               |
+| `forwarded_connections_active`                    | gauge   | Forwarded connections that are running.                                             |
+| `forwarded_connections_aborted_total`             | counter | Forwarded connections that ended with an error, e.g. an abort.                     |
+| `destination_connect_failures_total`              | counter | Forwarded connections for which the destination couldn't be reached.              |
+| `bytes_to_destination_total`                      | counter | Bytes sent to the destination.                                                      |
+| `bytes_from_destination_total`                    | counter | Bytes received from the destination.                                                |
+
+From 1.0 on, the names and labels of the metrics only change with a new major version.
 
 ### PSK Best Practices
 

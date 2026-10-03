@@ -83,6 +83,11 @@ impl ClientList {
         self.0.get(name)
     }
 
+    /// Returns the names of the clients, in order.
+    pub fn names(&self) -> impl Iterator<Item = &ClientName> {
+        self.0.keys()
+    }
+
     /// Returns the number of clients.
     pub fn len(&self) -> usize {
         self.0.len()
@@ -223,6 +228,8 @@ mod tests {
             client("office", &["b", "c"], "8000-8100"),
         ])?;
         assert_eq!(list.len(), 2);
+        let names: Vec<&str> = list.names().map(ClientName::as_str).collect();
+        assert_eq!(names, ["home", "office"]);
         assert!(list.get(&name("office")).unwrap().ports.allows(8050));
         assert_eq!(list.psks(&name("office")).unwrap().len(), 2);
         assert!(list.get(&name("lab")).is_none());

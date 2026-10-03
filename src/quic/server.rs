@@ -22,6 +22,7 @@ use crate::limits::QuicAdmission;
 use crate::private_files::{warn_if_accessible_by_others, write_private_file};
 use crate::protocol::close::CloseCode;
 use crate::quic::{configure_transport_config, ALPN_QUIC_PORTREDIRECT};
+use crate::server::metrics::{RefusalReason, METRICS};
 use crate::shutdown::Shutdown;
 
 /// Minimum time between two warnings about the connection limit.
@@ -438,6 +439,7 @@ where
         if config.admission.is_blocked(remote.ip()) {
             // Refusing is cheap, it happens before the TLS handshake.
             debug!("Refusing connection from {}: address is blocked", remote);
+            METRICS.refused(RefusalReason::Blocked);
             incoming.refuse();
         } else if config
             .connection_limit
@@ -455,6 +457,7 @@ where
                 "Refusing connection from {}: connection limit reached",
                 remote
             );
+            METRICS.refused(RefusalReason::ConnectionLimit);
             incoming.refuse();
         } else if config.stateless_retry && !incoming.remote_address_validated() {
             debug!(
@@ -469,6 +472,7 @@ where
                     "Refusing connection from {}: too many connections from this address",
                     remote
                 );
+                METRICS.refused(RefusalReason::AddressLimit);
                 incoming.refuse();
                 continue;
             };
@@ -483,6 +487,7 @@ where
                     Ok(Ok(connection)) => connection,
                     Ok(Err(e)) => {
                         config.admission.record_failure(remote.ip());
+                        METRICS.authentication_failures.inc();
                         warn!(
                             "Failed to accept incoming QUIC connection from {}: {}",
                             remote, e
@@ -492,6 +497,7 @@ where
                     Err(_) => {
                         // Dropping the handshake closes the connection.
                         config.admission.record_failure(remote.ip());
+                        METRICS.authentication_failures.inc();
                         warn!(
                             "TLS handshake with {} not completed within {:?}, closing the connection",
                             remote, handshake_timeout
@@ -530,6 +536,7 @@ async fn refuse_connections(endpoint: quinn::Endpoint) {
     while let Some(incoming) = endpoint.accept().await {
         let remote = incoming.remote_address();
         debug!("Refusing connection from {}: shutting down", remote);
+        METRICS.refused(RefusalReason::ShuttingDown);
         incoming.refuse();
     }
 }
