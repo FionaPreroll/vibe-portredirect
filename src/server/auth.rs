@@ -2,18 +2,20 @@
 //
 // License: GPL-3.0-only
 
-use crate::protocol::auth::server_authenticate;
-use crate::protocol::utils::SystemTimeProvider;
+use crate::protocol::auth::{server_authenticate, session_binding};
 use crate::quic::server::ServerConfig;
 use crate::{app_data::ServerAppData, bi_stream::BiStream};
 
-use anyhow::{anyhow, Result};
+use anyhow::{Context, Result};
 use std::sync::Arc;
 use tokio_util::compat::{Compat, FuturesAsyncReadCompatExt, FuturesAsyncWriteCompatExt};
 use tracing::{debug, info, instrument};
 
-// Authenticates the PR QUIC client to us, the server.
-// Called by handle_quic_client_connection.
+/// Opens the control stream, which stays open for the lifetime of the connection, and
+/// authenticates the client over it: verifies that the client knows the PSK and proves that we
+/// know it, too.
+///
+/// Called by handle_quic_client_connection, which closes the connection on failure.
 #[instrument(skip(config, conn))]
 pub async fn authenticate_quic_client(
     config: Arc<ServerConfig<ServerAppData>>,
@@ -21,11 +23,10 @@ pub async fn authenticate_quic_client(
 ) -> Result<BiStream<Compat<quinn::RecvStream>, Compat<quinn::SendStream>>> {
     debug!("Authenticating PR QUIC client");
 
-    // Open control channel, which will stay open for the lifetime of the connection.
     let (send, recv) = conn
         .open_bi()
         .await
-        .map_err(|e| anyhow!("failed to open AUTH stream: {}", e))?;
+        .context("failed to open the control stream")?;
     let stream_id = recv.id();
     debug!("opened control channel with stream id {}", stream_id);
 
@@ -33,22 +34,15 @@ pub async fn authenticate_quic_client(
     let mut control_channel =
         BiStream::new(recv.compat(), send.compat_write(), stream_id.to_string());
 
-    match server_authenticate(
+    // The caller logs failures.
+    let binding = session_binding(&conn)?;
+    server_authenticate(
         &mut control_channel,
-        config.app_data.connection_auth_psk.to_owned(),
-        &SystemTimeProvider,
+        &config.app_data.connection_auth_psk,
+        &binding,
     )
-    .await
-    {
-        Ok(()) => {
-            info!("Authenticated PR QUIC client OK");
-        }
-        Err(e) => {
-            // The caller logs the failure.
-            debug!("Failed to authenticate PR QUIC client: {:?}", e);
-            return Err(e);
-        }
-    }
+    .await?;
+    info!("Authenticated PR QUIC client OK");
 
     Ok(control_channel)
 }

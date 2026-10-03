@@ -88,7 +88,6 @@ impl PortRedirectProtocol {
     pub const QUIC_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(25);
     /// Default maximum number of concurrently forwarded connections per tunnel.
     pub const DEFAULT_MAX_FORWARDED_CONNECTIONS: usize = 512;
-    pub const CHALLENGE_REQUEST_BUFFER_LENGTH: usize = 256;
 
     // TODO choose these values non-arbitrarily
     pub const QUIC_STREAM_READ_BUFFER_SIZE: usize = 64 * 1024; // 64 KiB

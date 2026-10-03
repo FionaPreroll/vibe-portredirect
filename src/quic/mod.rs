@@ -9,9 +9,10 @@ use crate::PortRedirectProtocol;
 pub mod client;
 pub mod server;
 
-// QUIC ALPN field: port redirect protocol v2.
-// Bump this whenever the protocol changes incompatibly (v2: LISTENPORT/LISTENING handshake).
-pub const ALPN_QUIC_PORTREDIRECT: &[&[u8]] = &[b"pr-2"];
+// QUIC ALPN field: port redirect protocol v3.
+// Bump this whenever the protocol changes incompatibly (v2: LISTENPORT/LISTENING handshake,
+// v3: mutual authentication bound to the TLS session and application close codes).
+pub const ALPN_QUIC_PORTREDIRECT: &[&[u8]] = &[b"pr-3"];
 
 pub fn configure_transport_config(transport_config: &mut TransportConfig) {
     // QUIC connection advanced configuration
