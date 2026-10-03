@@ -12,6 +12,7 @@
 #   test_cargo    : Run Cargo tests.
 #   test_python   : Run Python unit tests (Data Cruncher and Connection Stress Test).
 #   test_bats     : Run BATS end-to-end tests (needs bats, iperf3, nc, pv, curl and Python dependencies).
+#   coverage      : Measure the test coverage of the Cargo tests (needs cargo-llvm-cov).
 #   clean         : Clean build artifacts using Cargo's built-in clean command.
 #   run_server    : Run the 'portredirect_server' binary with extra arguments. Pass args via the ARGS variable.
 #   run_client    : Run the 'portredirect_client' binary with extra arguments. Pass args via the ARGS variable.
@@ -45,7 +46,7 @@
 #       Runs the client binary with additional arguments.
 #############################################
 
-.PHONY: all docs build release lint lint_fix test test_bats test_cargo test_cargo_debug test_python clean run_server run_client
+.PHONY: all docs build release lint lint_fix test test_bats test_cargo test_cargo_debug test_python coverage clean run_server run_client
 
 # Default target: build for release.
 all: test release
@@ -126,6 +127,14 @@ test_cargo:
 test_cargo_debug:
 	@echo "Running Cargo tests..."
 	@RUST_BACKTRACE=full RUST_LOG=tracing=debug cargo test $(ARGS)
+
+# Measure the test coverage of the Cargo tests, including the binaries they start.
+# Prints a summary per file and writes an HTML report with the covered lines to
+# target/llvm-cov/html. Install the tool with: cargo install cargo-llvm-cov
+coverage:
+	@echo "Measuring test coverage..."
+	@cargo llvm-cov --workspace --html $(ARGS)
+	@cargo llvm-cov report --summary-only
 
 # Run Python unit tests.
 # * (This target is called by CI as well.)

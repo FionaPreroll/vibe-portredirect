@@ -17,11 +17,11 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, instrument};
+use tracing::debug;
 
 // Handles one PR QUIC client connection.
 // Called by run_quic_server.
-#[instrument(skip(config, quic_conn))]
+#[cfg_attr(not(coverage), tracing::instrument(skip(config, quic_conn)))]
 pub async fn handle_quic_client_connection(
     config: Arc<ServerConfig<ServerAppData>>,
     quic_conn: quinn::Connection,

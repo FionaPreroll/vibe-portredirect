@@ -21,7 +21,7 @@ use tokio::sync::Semaphore;
 use tokio::time::timeout;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, info, warn};
 
 /// Time to wait for the client to accept another stream before an external connection is dropped.
 const STREAM_OPEN_TIMEOUT: Duration = Duration::from_secs(10);
@@ -29,7 +29,10 @@ const STREAM_OPEN_TIMEOUT: Duration = Duration::from_secs(10);
 /// Pause after a failure to accept a connection, e.g. when running out of file descriptors.
 const ACCEPT_ERROR_DELAY: Duration = Duration::from_secs(1);
 
-#[instrument(skip(config, quic_conn, listener, cancel_token))]
+#[cfg_attr(
+    not(coverage),
+    tracing::instrument(skip(config, quic_conn, listener, cancel_token))
+)]
 pub async fn handle_tcp_listener(
     config: Arc<ServerConfig<ServerAppData>>,
     quic_conn: quinn::Connection,

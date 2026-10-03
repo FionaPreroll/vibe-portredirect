@@ -9,13 +9,13 @@ use crate::{app_data::ClientAppData, bi_stream::BiStream};
 use anyhow::{Context, Result};
 use std::sync::Arc;
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
-use tracing::{debug, info, instrument};
+use tracing::{debug, info};
 
 /// Accepts the control stream, which the server opens first, and authenticates over it: proves
 /// that we know the PSK and verifies that the server knows it, too.
 ///
 /// Closes the connection if the server fails to prove its knowledge of the PSK.
-#[instrument(skip(config, conn))]
+#[cfg_attr(not(coverage), tracing::instrument(skip(config, conn)))]
 pub async fn handle_quic_auth_client_side(
     config: Arc<ClientConfig<ClientAppData>>,
     conn: quinn::Connection,

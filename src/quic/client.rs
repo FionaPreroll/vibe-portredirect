@@ -9,7 +9,7 @@ use quinn::crypto::rustls::QuicClientConfig;
 use rustls::pki_types::CertificateDer;
 use std::time::Duration;
 use std::{fs, net::SocketAddr, path::PathBuf, sync::Arc, time::Instant};
-use tracing::{info, instrument};
+use tracing::info;
 
 use super::{client_transport_config, ALPN_QUIC_PORTREDIRECT};
 use crate::protocol::close::CloseCode;
@@ -151,7 +151,7 @@ impl<AppDataType> QuicClient<AppDataType> {
 ///
 /// Prerequisite: A rustls CryptoProvider must be available before calling this function,
 /// call CryptoProvider::install_default() before this point.
-#[instrument(skip(config, handle_incoming))]
+#[cfg_attr(not(coverage), tracing::instrument(skip(config, handle_incoming)))]
 pub async fn run_quic_client<F, Fut, AppDataType>(
     config: ClientConfig<AppDataType>,
     handle_incoming: F,

@@ -18,14 +18,14 @@ use anyhow::{Context, Result};
 use std::sync::Arc;
 use tokio::time::timeout;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, info, warn};
 
 /// Handles the connection to the QUIC server, authenticates and keeps it alive.
 /// Called directly by run_quic_client.
 ///
 /// Returns when the connection ends: `Ok` if the server ended the tunnel normally, otherwise an
 /// error describing why it ended.
-#[instrument(skip(config, conn))]
+#[cfg_attr(not(coverage), tracing::instrument(skip(config, conn)))]
 pub async fn handle_quic_server_connection(
     config: Arc<ClientConfig<ClientAppData>>,
     conn: quinn::Connection,

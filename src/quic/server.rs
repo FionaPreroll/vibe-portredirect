@@ -358,7 +358,10 @@ where
 /// Runs the QUIC server like [`run_quic_server`] until `shutdown` completes.
 ///
 /// On shutdown, all connections are closed, so clients notice right away.
-#[instrument(skip(config, handle_incoming_client, shutdown))]
+#[cfg_attr(
+    not(coverage),
+    tracing::instrument(skip(config, handle_incoming_client, shutdown))
+)]
 pub async fn run_quic_server_until<F, Fut, AppDataType>(
     config: ServerConfig<AppDataType>,
     handle_incoming_client: F,

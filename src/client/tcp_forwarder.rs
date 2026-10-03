@@ -14,13 +14,13 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::time::timeout;
-use tracing::{debug, instrument};
+use tracing::debug;
 
 /// Time to wait for the destination to accept a connection.
 const DESTINATION_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Bridges a QUIC stream to a new TCP connection (client side).
-#[instrument[skip(config, quic_stream)]]
+#[cfg_attr(not(coverage), tracing::instrument(skip(config, quic_stream)))]
 pub async fn forward_tcp_to_quic_stream<QuicStreamType>(
     config: Arc<ClientConfig<ClientAppData>>,
     mut quic_stream: QuicStreamType,

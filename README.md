@@ -173,6 +173,9 @@ make test
 
 The Cargo tests include end-to-end tests of a complete tunnel in `tests/tunnel_end_to_end.rs`.
 
+To see which code the Cargo tests cover, install [cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov) and run `make coverage`.
+It prints a summary per file and writes an HTML report with the covered lines to `target/llvm-cov/html`.
+
 Before committing, run the linters (`cargo fmt --check`, `cargo clippy` and, if installed, `black`):
 
 ```sh
