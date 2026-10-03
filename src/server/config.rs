@@ -57,12 +57,19 @@ pub struct Args {
 
     /// Host to listen on for external TCP connections, on the ports the clients ask for.
     /// Required, here or in the configuration file.
-    #[clap(long, required_unless_present = "config_file")]
+    #[clap(
+        long,
+        required_unless_present_any = ["config_file", "print_quic_cert_fingerprint"]
+    )]
     pub listen_host: Option<String>,
 
     /// Allowed ports for clients to request, e.g., "80,443,1000-2000". Required, here or in the
     /// configuration file, unless it lists clients with their own ports.
-    #[clap(long, value_delimiter = ',', required_unless_present = "config_file")]
+    #[clap(
+        long,
+        value_delimiter = ',',
+        required_unless_present_any = ["config_file", "print_quic_cert_fingerprint"]
+    )]
     pub allowed_client_ports: Option<Vec<PortSpec>>,
 
     /// Host to listen on for QUIC connections from clients.
@@ -77,6 +84,12 @@ pub struct Args {
     /// it, see their --quic-cert-hostname.
     #[clap(long, default_value = "127.0.0.1")]
     pub quic_cert_hostname: String,
+
+    /// Print the fingerprint of the server's certificate and exit. Clients can trust the
+    /// certificate by it, see their --quic-cert-fingerprint. If there is no certificate, generates
+    /// one first, e.g. to prepare a new one in another --config-dir.
+    #[clap(long)]
+    pub print_quic_cert_fingerprint: bool,
 
     #[command(flatten)]
     pub psk: PskArgs,
@@ -254,9 +267,26 @@ impl Clients {
     }
 }
 
-impl Config {
-    /// Returns the configuration given by the program's command line, the environment and the
-    /// configuration file. Exits with code 2 if it is invalid, like for invalid arguments.
+/// What the server program does.
+#[derive(Debug)]
+pub enum Command {
+    /// Runs the server.
+    Run(Box<Config>),
+    /// Prints the fingerprint of the server's certificate, see --print-quic-cert-fingerprint.
+    PrintCertFingerprint(CertificateConfig),
+}
+
+/// The settings for --print-quic-cert-fingerprint.
+#[derive(Debug)]
+pub struct CertificateConfig {
+    pub config_dir: Option<PathBuf>,
+    pub quic_cert_hostname: String,
+    pub log_level: LevelFilter,
+}
+
+impl Command {
+    /// Returns what the program's command line, the environment and the configuration file ask
+    /// for. Exits with code 2 if they are invalid, like for invalid arguments.
     pub fn from_command_line() -> Self {
         let renamed = check_renamed_options(std::env::args_os().skip(1), RENAMED_OPTIONS)
             .and_then(|()| check_renamed_environment());
@@ -273,15 +303,35 @@ impl Config {
         })
     }
 
-    /// Returns the configuration given by the command-line `matches`, the environment and the
-    /// configuration file.
+    /// Returns what the command-line `matches`, the environment and the configuration file ask
+    /// for.
     pub fn from_matches(matches: &ArgMatches) -> Result<Self> {
         let args = Args::from_arg_matches(matches)?;
         let file = match &args.config_file {
             Some(path) => ConfigFile::read(path)?,
             None => ConfigFile::default(),
         };
+        if args.print_quic_cert_fingerprint {
+            // The server doesn't run, so it needs no clients.
+            return Ok(Self::PrintCertFingerprint(CertificateConfig {
+                config_dir: merge_option(matches, "config_dir", args.config_dir, file.config_dir),
+                quic_cert_hostname: merge(
+                    matches,
+                    "quic_cert_hostname",
+                    args.quic_cert_hostname,
+                    file.quic_cert_hostname,
+                ),
+                log_level: merge(matches, "log_level", args.log_level, file.log_level),
+            }));
+        }
+        Config::from_args(matches, args, file).map(|config| Self::Run(Box::new(config)))
+    }
+}
 
+impl Config {
+    /// Returns the configuration given by the command-line `matches`, parsed into `args`, the
+    /// environment and the configuration `file`.
+    fn from_args(matches: &ArgMatches, args: Args, file: ConfigFile) -> Result<Self> {
         let psk = args.psk.source(matches);
         let clients = match file.clients {
             Some(clients) => {
@@ -443,11 +493,19 @@ mod tests {
     use secrecy::ExposeSecret;
     use std::fs;
 
-    /// Returns the configuration given by the command-line `args`.
-    fn config(args: &[&str]) -> Result<Config> {
+    /// Returns what the command-line `args` ask for.
+    fn command(args: &[&str]) -> Result<Command> {
         let matches =
             Args::command().try_get_matches_from(["portredirect_server"].iter().chain(args))?;
-        Config::from_matches(&matches)
+        Command::from_matches(&matches)
+    }
+
+    /// Returns the configuration given by the command-line `args`.
+    fn config(args: &[&str]) -> Result<Config> {
+        match command(args)? {
+            Command::Run(config) => Ok(*config),
+            Command::PrintCertFingerprint(_) => bail!("prints the fingerprint instead of running"),
+        }
     }
 
     /// Returns the configuration given by the command-line `args` and a configuration file with
@@ -845,6 +903,58 @@ mod tests {
             "",
         ])?;
         assert!(single.clients.load().is_err());
+        Ok(())
+    }
+
+    /// Returns the settings for printing the certificate's fingerprint, given by `args` and a
+    /// configuration file with `text`, if any.
+    fn certificate_config(text: Option<&str>, args: &[&str]) -> Result<CertificateConfig> {
+        let dir = tempfile::tempdir()?;
+        let mut args = args.to_vec();
+        let path = dir.path().join("server.toml");
+        if let Some(text) = text {
+            fs::write(&path, text)?;
+            args.extend(["--config-file", path.to_str().unwrap()]);
+        }
+        match command(&args)? {
+            Command::PrintCertFingerprint(config) => Ok(config),
+            Command::Run(_) => bail!("runs instead of printing the fingerprint"),
+        }
+    }
+
+    #[test]
+    fn test_printing_the_fingerprint_needs_only_the_certificate_settings() -> Result<()> {
+        let print = "--print-quic-cert-fingerprint";
+        // No clients, PSK or ports.
+        let defaults = certificate_config(None, &[print])?;
+        assert_eq!(defaults.config_dir, None);
+        assert_eq!(defaults.quic_cert_hostname, "127.0.0.1");
+        assert_eq!(defaults.log_level, LevelFilter::INFO);
+        let err = config(&[print]).unwrap_err();
+        assert_eq!(err.to_string(), "prints the fingerprint instead of running");
+
+        let from_file = certificate_config(Some(FILE), &[print])?;
+        assert!(from_file.config_dir.unwrap().ends_with("state"));
+        assert_eq!(from_file.quic_cert_hostname, "tunnel.example.com");
+        assert_eq!(from_file.log_level, LevelFilter::DEBUG);
+
+        let args = [
+            print,
+            "--config-dir",
+            "/var/lib/portredirect",
+            "--quic-cert-hostname",
+            "localhost",
+            "--log-level",
+            "warn",
+        ];
+        let overridden = certificate_config(Some(FILE), &args)?;
+        assert_eq!(overridden.config_dir, Some("/var/lib/portredirect".into()));
+        assert_eq!(overridden.quic_cert_hostname, "localhost");
+        assert_eq!(overridden.log_level, LevelFilter::WARN);
+
+        // Without the option, the server runs.
+        let err = certificate_config(Some(FILE), &[]).unwrap_err();
+        assert_eq!(err.to_string(), "runs instead of printing the fingerprint");
         Ok(())
     }
 

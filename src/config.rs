@@ -142,6 +142,56 @@ where
     parsed(deserializer).map(Some)
 }
 
+/// Deserializes the values of an option that can be given several times: a string, or an array
+/// of strings, each written like on the command line, see [`parsed`]. Needs `#[serde(default)]`.
+pub fn optional_parsed_list<'de, D, T>(deserializer: D) -> Result<Option<Vec<T>>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: FromStr,
+    T::Err: Display,
+{
+    let Strings(strings) = Strings::deserialize(deserializer)?;
+    if strings.is_empty() {
+        return Err(de::Error::custom("the list is empty"));
+    }
+    strings
+        .iter()
+        .map(|string| string.parse().map_err(de::Error::custom))
+        .collect::<Result<_, _>>()
+        .map(Some)
+}
+
+/// A string or an array of strings, see [`optional_parsed_list`].
+struct Strings(Vec<String>);
+
+impl<'de> Deserialize<'de> for Strings {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(StringsVisitor)
+    }
+}
+
+struct StringsVisitor;
+
+impl<'de> Visitor<'de> for StringsVisitor {
+    type Value = Strings;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a string or an array of strings")
+    }
+
+    fn visit_str<E: de::Error>(self, string: &str) -> Result<Strings, E> {
+        Ok(Strings(vec![string.to_string()]))
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut items: A) -> Result<Strings, A::Error> {
+        let mut strings = Vec::new();
+        while let Some(string) = items.next_element()? {
+            strings.push(string);
+        }
+        Ok(Strings(strings))
+    }
+}
+
 /// Deserializes ports: a string like on the command line, e.g. `"80,443,8000-8100"`, a port
 /// number, or an array of port numbers and such strings, e.g. `[80, 443, "8000-8100"]`.
 pub fn ports<'de, D>(deserializer: D) -> Result<Vec<PortSpec>, D::Error>

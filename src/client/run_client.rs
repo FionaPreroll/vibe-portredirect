@@ -11,6 +11,7 @@ use crate::metrics::serve_metrics;
 use crate::protocol::close::CloseCode;
 use crate::protocol::message::ProtocolViolation;
 use crate::quic::client::{ClientConfig, QuicClient};
+use crate::quic::fingerprint::CertFingerprint;
 use crate::shutdown::Shutdown;
 
 use anyhow::{Context, Result};
@@ -27,12 +28,14 @@ const STABLE_CONNECTION_DURATION: Duration = Duration::from_secs(60);
 /// Settings of the client, see the command-line options of `portredirect_client`.
 pub struct ClientSettings {
     pub app_data: ClientAppData,
-    /// Directory with the server's certificate `cert.der`.
+    /// Directory with the server's certificate `cert.der`, unless `cert_fingerprints` are given.
     pub config_dir: PathBuf,
     pub quic_local_addr: SocketAddr,
     pub quic_remote_addr: SocketAddr,
     /// Name the server's certificate must be issued for, defaults to the remote IP address.
     pub quic_cert_hostname: Option<String>,
+    /// Fingerprints of the server certificates to trust instead of `cert.der`, if any.
+    pub cert_fingerprints: Vec<CertFingerprint>,
     /// Maximum number of concurrently forwarded connections.
     pub max_connections: usize,
     /// Address to serve Prometheus metrics on, if any.
@@ -70,6 +73,7 @@ pub async fn run_client(settings: ClientSettings) -> Result<()> {
         settings.app_data,
     );
     quic_client_config.shutdown = shutdown.clone();
+    quic_client_config.cert_fingerprints = settings.cert_fingerprints;
     let client = QuicClient::new(quic_client_config)?;
 
     let mut backoff = settings.reconnect_backoff;

@@ -702,11 +702,26 @@ ports = [{listen_port}]
     );
     assert!(server.output().contains(&standby), "{}", server.output());
 
+    // Instead of a copy of the certificate, the client gets its fingerprint, which the server
+    // also logs.
+    let mut print = Program::start(
+        SERVER,
+        &[
+            "--config-file",
+            path_str(&server_config),
+            "--print-quic-cert-fingerprint",
+        ],
+        &[],
+    );
+    assert_eq!(print.exit_code().await?, 0, "{}", print.output());
+    let fingerprint = print.stdout().trim().to_string();
+    let logged = format!(
+        "Certificate fingerprint, for the clients' --quic-cert-fingerprint: {}",
+        fingerprint
+    );
+    assert!(server.output().contains(&logged), "{}", server.output());
+
     // The client already uses the office's next PSK.
-    fs::copy(
-        server_dir.path().join("state").join("cert.der"),
-        client_dir.path().join("cert.der"),
-    )?;
     write_psk_file(&client_dir.path().join("psk"), office_next_psk, 0o600)?;
     let client_config = client_dir.path().join("client.toml");
     fs::write(
@@ -720,7 +735,7 @@ remote-listen-port = {listen_port}
 client-name = "office"
 quic-remote-host = "127.0.0.1"
 quic-remote-port = {quic_port}
-quic-cert-hostname = "localhost"
+quic-cert-fingerprint = "{fingerprint}"
 psk-file = "psk"
 log-level = "error"
 "#,
@@ -763,6 +778,36 @@ log-level = "error"
 
     server.terminate();
     assert_eq!(server.exit_code().await?, 0, "{}", server.output());
+    Ok(())
+}
+
+#[tokio::test]
+async fn server_prints_the_fingerprint_of_its_certificate() -> Result<()> {
+    let config_dir = tempfile::tempdir()?;
+    let args = [
+        "--config-dir",
+        path_str(config_dir.path()),
+        "--print-quic-cert-fingerprint",
+    ];
+
+    // Without a certificate, the server generates one first. It needs no clients, as it doesn't
+    // run.
+    let mut generated = Program::start(SERVER, &args, &[]);
+    assert_eq!(generated.exit_code().await?, 0, "{}", generated.output());
+    let certificate = fs::read(config_dir.path().join("cert.der"))?;
+    let digest = ring::digest::digest(&ring::digest::SHA256, &certificate);
+    let hex: String = digest
+        .as_ref()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect();
+    // As sha256sum prints it.
+    assert_eq!(generated.stdout(), format!("sha256:{}\n", hex));
+
+    // Then it prints the fingerprint of the same certificate.
+    let mut loaded = Program::start(SERVER, &args, &[]);
+    assert_eq!(loaded.exit_code().await?, 0, "{}", loaded.output());
+    assert_eq!(loaded.stdout(), generated.stdout());
     Ok(())
 }
 

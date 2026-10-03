@@ -57,6 +57,7 @@ digraph {
     "portredirect::psk" [label="pub(crate) mod|psk", fillcolor="#f8c04c"]; // "mod" node
     "portredirect::quic" [label="pub(crate) mod|quic", fillcolor="#f8c04c"]; // "mod" node
     "portredirect::quic::client" [label="pub(crate) mod|quic::client", fillcolor="#f8c04c"]; // "mod" node
+    "portredirect::quic::fingerprint" [label="pub(crate) mod|quic::fingerprint", fillcolor="#f8c04c"]; // "mod" node
     "portredirect::quic::server" [label="pub(crate) mod|quic::server", fillcolor="#f8c04c"]; // "mod" node
     "portredirect::server" [label="pub(crate) mod|server", fillcolor="#f8c04c"]; // "mod" node
     "portredirect::server::auth" [label="pub(crate) mod|server::auth", fillcolor="#f8c04c"]; // "mod" node
@@ -99,6 +100,7 @@ digraph {
     "portredirect::protocol" -> "portredirect::protocol::message" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge
     "portredirect::protocol::message" -> "portredirect::protocol::message::param" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge
     "portredirect::quic" -> "portredirect::quic::client" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge
+    "portredirect::quic" -> "portredirect::quic::fingerprint" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge
     "portredirect::quic" -> "portredirect::quic::server" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge
     "portredirect::server" -> "portredirect::server::auth" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge
     "portredirect::server" -> "portredirect::server::client_handler" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge

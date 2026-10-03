@@ -19,6 +19,7 @@ use crate::config::{
 };
 use crate::protocol::auth::ClientName;
 use crate::psk::{PskArgs, PskSource, PSK_ENV_VAR};
+use crate::quic::fingerprint::CertFingerprint;
 use crate::shutdown::DEFAULT_SHUTDOWN_TIMEOUT;
 use crate::PortRedirectProtocol;
 
@@ -44,7 +45,8 @@ pub struct Args {
     #[clap(long, value_name = "PATH")]
     pub config_file: Option<PathBuf>,
 
-    /// Full path to configuration directory, with the server's certificate cert.der.
+    /// Full path to configuration directory, with the server's certificate cert.der, unless
+    /// --quic-cert-fingerprint is given.
     #[clap(long, value_name = "PATH")]
     pub config_dir: Option<PathBuf>,
 
@@ -114,9 +116,16 @@ pub struct Args {
     pub max_connections: u32,
 
     /// Name the server's TLS certificate must be issued for (Subject Alt Name), if it differs
-    /// from --quic-remote-host. Must match the server's --quic-cert-hostname.
+    /// from --quic-remote-host. Must match the server's --quic-cert-hostname. Not checked with
+    /// --quic-cert-fingerprint.
     #[clap(long)]
     pub quic_cert_hostname: Option<String>,
+
+    /// Trust the server's certificate by its fingerprint instead of cert.der: sha256: and 64 hex
+    /// digits, as the server's --print-quic-cert-fingerprint prints. Give it several times to
+    /// trust several certificates, e.g. while the server's certificate changes.
+    #[clap(long, value_name = "FINGERPRINT")]
+    pub quic_cert_fingerprint: Vec<CertFingerprint>,
 
     #[command(flatten)]
     pub psk: PskArgs,
@@ -150,6 +159,8 @@ pub struct ConfigFile {
     pub metrics_listen: Option<SocketAddr>,
     pub max_connections: Option<NonZeroU32>,
     pub quic_cert_hostname: Option<String>,
+    #[serde(default, deserialize_with = "config::optional_parsed_list")]
+    pub quic_cert_fingerprint: Option<Vec<CertFingerprint>>,
     pub psk_file: Option<PathBuf>,
     pub shutdown_timeout: Option<u64>,
     #[serde(default, deserialize_with = "config::optional_parsed")]
@@ -186,6 +197,8 @@ pub struct Config {
     pub metrics_addr: Option<SocketAddr>,
     pub max_connections: usize,
     pub quic_cert_hostname: Option<String>,
+    /// Fingerprints of the server certificates to trust instead of cert.der, if any.
+    pub quic_cert_fingerprints: Vec<CertFingerprint>,
     pub psk: PskSource,
     /// How long running forwarded connections may take to finish when shutting down.
     pub shutdown_timeout: Duration,
@@ -306,6 +319,12 @@ impl Config {
                 args.quic_cert_hostname,
                 file.quic_cert_hostname,
             ),
+            quic_cert_fingerprints: merge(
+                matches,
+                "quic_cert_fingerprint",
+                args.quic_cert_fingerprint,
+                file.quic_cert_fingerprint,
+            ),
             psk,
             shutdown_timeout: Duration::from_secs(merge(
                 matches,
@@ -362,10 +381,16 @@ mod tests {
         metrics-listen = "127.0.0.1:9999"
         max-connections = 20
         quic-cert-hostname = "tunnel"
+        quic-cert-fingerprint = "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         psk-file = "psk"
         shutdown-timeout = 30
         log-level = "debug"
     "#;
+
+    /// The fingerprint in [`FILE`], of "abc".
+    fn abc() -> CertFingerprint {
+        CertFingerprint::of(b"abc")
+    }
 
     const REQUIRED_ARGS: [&str; 12] = [
         "--destination-host",
@@ -400,6 +425,7 @@ mod tests {
             PortRedirectProtocol::DEFAULT_MAX_FORWARDED_CONNECTIONS
         );
         assert_eq!(config.quic_cert_hostname, None);
+        assert!(config.quic_cert_fingerprints.is_empty());
         assert!(
             matches!(&config.psk, PskSource::File(path) if path == Path::new("/etc/portredirect/psk"))
         );
@@ -427,6 +453,7 @@ mod tests {
         assert_eq!(config.metrics_addr, Some("127.0.0.1:9999".parse()?));
         assert_eq!(config.max_connections, 20);
         assert_eq!(config.quic_cert_hostname.as_deref(), Some("tunnel"));
+        assert_eq!(config.quic_cert_fingerprints, [abc()]);
         assert!(matches!(&config.psk, PskSource::File(path) if path == &dir.path().join("psk")));
         assert_eq!(config.shutdown_timeout, Duration::from_secs(30));
         assert_eq!(config.log_level, LevelFilter::DEBUG);
@@ -464,6 +491,10 @@ mod tests {
                 "30",
                 "--quic-cert-hostname",
                 "localhost",
+                "--quic-cert-fingerprint",
+                &CertFingerprint::of(b"one").to_string(),
+                "--quic-cert-fingerprint",
+                &CertFingerprint::of(b"two").to_string(),
                 "--psk",
                 "secret",
                 "--shutdown-timeout",
@@ -486,6 +517,10 @@ mod tests {
         assert_eq!(config.metrics_addr, Some("127.0.0.1:9898".parse()?));
         assert_eq!(config.max_connections, 30);
         assert_eq!(config.quic_cert_hostname.as_deref(), Some("localhost"));
+        assert_eq!(
+            config.quic_cert_fingerprints,
+            [CertFingerprint::of(b"one"), CertFingerprint::of(b"two")]
+        );
         assert!(matches!(config.psk, PskSource::CommandLine(_)));
         assert_eq!(config.psk.load()?.expose_secret(), "secret");
         assert_eq!(config.shutdown_timeout, Duration::ZERO);
@@ -533,6 +568,22 @@ mod tests {
     }
 
     #[test]
+    fn test_several_fingerprints_in_the_configuration_file() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let text = format!(
+            "quic-cert-fingerprint = [\"{}\", \"{}\"]",
+            abc(),
+            CertFingerprint::of(b"other")
+        );
+        let config = config_with_file(dir.path(), &text, &REQUIRED_ARGS)?;
+        assert_eq!(
+            config.quic_cert_fingerprints,
+            [abc(), CertFingerprint::of(b"other")]
+        );
+        Ok(())
+    }
+
+    #[test]
     fn test_invalid_values_are_rejected() {
         for (text, expected) in [
             ("destination-port = 0", "nonzero"),
@@ -544,9 +595,34 @@ mod tests {
             ("metrics-listen = \"localhost\"", "invalid socket address"),
             ("psk = \"secret\"", "unknown field `psk`"),
             ("provide-metrics = \"yes\"", "invalid type"),
+            (
+                "quic-cert-fingerprint = \"sha256:abc\"",
+                "invalid certificate fingerprint \"sha256:abc\"",
+            ),
+            (
+                "quic-cert-fingerprint = [\"sha256:abc\"]",
+                "invalid certificate fingerprint \"sha256:abc\"",
+            ),
+            ("quic-cert-fingerprint = []", "the list is empty"),
+            (
+                "quic-cert-fingerprint = 1",
+                "expected a string or an array of strings",
+            ),
+            (
+                "quic-cert-fingerprint = [1]",
+                "invalid type: integer `1`, expected a string",
+            ),
         ] {
             let message = error_with_file(text);
             assert!(message.contains(expected), "{:?}: {}", text, message);
         }
+        let mut args = REQUIRED_ARGS.to_vec();
+        args.extend(["--quic-cert-fingerprint", "sha256:abc"]);
+        let err = config(&args).unwrap_err();
+        assert!(
+            err.to_string().contains("invalid certificate fingerprint"),
+            "{}",
+            err
+        );
     }
 }

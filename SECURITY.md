@@ -23,9 +23,10 @@ The wire protocol is described in [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
 **Trust assumptions:**
 
-- The server's private key (`key.der`) stays on the server. The client trusts exactly the certificate it was given (`cert.der`).
+- The server's private key (`key.der`) stays on the server. The client trusts exactly the certificates it was given, by their SHA-256 fingerprints (`--quic-cert-fingerprint`) or as a copy (`cert.der`).
   Whoever has the private key can make clients connect to them, but can't complete the authentication without the PSK.
   They do get the clients' proofs of the PSK, though, so a weak PSK could be guessed offline.
+  If the private key may have been exposed, change the certificate as the README describes, and remove the old fingerprint from all clients: until then, they still trust it.
 - The pre-shared key (PSK) is known only to the server and its clients, and is long and random (see the README).
   PortRedirect warns about PSKs shorter than 16 bytes, but accepts them.
   Clients authenticate with a name and the PSK of that name. Give each client its own name and PSK in the server's configuration file: then a client may only use the ports listed for its name, and only clients with the same name can replace each other's connections. A server configured with a single PSK and `--allowed-client-ports` has a single client, `default`: all clients that know its PSK may use all allowed ports and can replace each other's connections.
@@ -35,7 +36,7 @@ The wire protocol is described in [docs/PROTOCOL.md](docs/PROTOCOL.md).
 **What the tunnel provides:**
 
 - Confidentiality and integrity of the forwarded data between client and server (QUIC with TLS 1.3).
-- Mutual authentication: the client only uses a server that has the private key of the certificate it holds and proves that it knows the client's PSK.
+- Mutual authentication: the client only uses a server that has the private key of a certificate it trusts and proves that it knows the client's PSK.
   Only clients that know the PSK of their name can make the server listen on a TCP port, and only on the ports allowed for that name.
   Before authentication, a client cannot open streams or cause the server to open TCP ports.
 - The proofs of the PSK are HMACs bound to the TLS session and the client's name, so they can't be replayed or relayed into another connection, and are verified in constant time.

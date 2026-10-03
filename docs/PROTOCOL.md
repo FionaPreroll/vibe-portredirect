@@ -46,7 +46,9 @@ Version 5 is designed to stay compatible:
 - QUIC with TLS 1.3, ALPN protocol identifier `pr-5`.
   Peers speaking a different version, or offering none, fail the TLS handshake ("peer doesn't support any known protocol").
 - **Server authentication:** the server presents a certificate, by default a self-signed one it generates on first start (`cert.der`, `key.der` in its configuration directory).
-  The client trusts exactly the certificate in its own `cert.der` (copied from the server) and verifies that it is issued for `--quic-cert-hostname`, or for the IP address of `--quic-remote-host` if not given.
+  The client trusts exactly the certificates whose SHA-256 fingerprints it was given (`--quic-cert-fingerprint`), whatever names they are issued for.
+  Without fingerprints, it trusts exactly the certificate in its own `cert.der` (copied from the server) and verifies that it is issued for `--quic-cert-hostname`, or for the IP address of `--quic-remote-host` if not given.
+  Either way, the server proves in the TLS handshake that it has the certificate's private key.
   In addition, the server proves on the control stream that it knows the client's PSK.
 - **Client authentication:** none at the TLS level; the client names itself and proves on the control stream that it knows its PSK, see below.
 - **Streams:** only the server opens streams, all of them bidirectional.

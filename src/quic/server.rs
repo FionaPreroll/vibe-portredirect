@@ -11,7 +11,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use std::{
     fs,
     net::SocketAddr,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -21,6 +21,7 @@ use tracing::{debug, info, instrument, warn};
 use crate::limits::QuicAdmission;
 use crate::private_files::{warn_if_accessible_by_others, write_private_file};
 use crate::protocol::close::CloseCode;
+use crate::quic::fingerprint::CertFingerprint;
 use crate::quic::{configure_transport_config, ALPN_QUIC_PORTREDIRECT};
 use crate::server::metrics::{RefusalReason, METRICS};
 use crate::shutdown::Shutdown;
@@ -33,6 +34,12 @@ const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Time a client has to complete the TLS handshake, see [`ServerConfig::handshake_timeout`].
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The server's certificate in its configuration directory.
+const CERT_FILE: &str = "cert.der";
+
+/// The private key of the server's certificate in its configuration directory.
+const KEY_FILE: &str = "key.der";
 
 /// Configuration for the QUIC server.
 ///
@@ -91,8 +98,8 @@ impl<AppDataType> ServerConfig<AppDataType> {
     ) -> Self {
         ServerConfig {
             cert_hostname: cert_alt_name,
-            cert_file: config_dir.join("cert.der"),
-            key_file: config_dir.join("key.der"),
+            cert_file: config_dir.join(CERT_FILE),
+            key_file: config_dir.join(KEY_FILE),
             listen: bind_socket,
             stateless_retry: true, // Be more secure by default
             connection_limit,
@@ -146,6 +153,18 @@ pub fn load_or_generate_quic_cert(
             key_path.display()
         )),
     }
+}
+
+/// Returns the fingerprint of the server's certificate in `config_dir`. Like the server when it
+/// starts, generates the certificate first if there is none, issued for `cert_alt_name`.
+pub fn cert_fingerprint(config_dir: &Path, cert_alt_name: String) -> Result<CertFingerprint> {
+    let (cert_chain, _key) = load_or_generate_quic_cert(
+        cert_alt_name,
+        config_dir.join(KEY_FILE),
+        config_dir.join(CERT_FILE),
+    )?;
+    let certificate = cert_chain.first().context("no certificate")?;
+    Ok(CertFingerprint::of(certificate))
 }
 
 /// Loads a QUIC-compatible certificate and private key from the specified file paths.
@@ -278,6 +297,11 @@ where
         config.cert_file.clone(),
     )
     .context("loading or generating cert")?;
+    let fingerprint = CertFingerprint::of(cert_chain.first().context("no certificate")?);
+    info!(
+        "Certificate fingerprint, for the clients' --quic-cert-fingerprint: {}",
+        fingerprint
+    );
 
     info!(
         "Configuring rustls server ({} certs, key: {:?})",
@@ -565,6 +589,26 @@ mod tests {
         assert!(generate_quic_cert("localhost".into(), key_path, cert_path.clone()).is_err());
 
         assert_eq!(fs::read(&cert_path)?, b"existing certificate");
+        Ok(())
+    }
+
+    #[test]
+    fn test_fingerprint_of_the_certificate_in_the_configuration_directory() -> Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+
+        // Generated first, if there is no certificate yet, then loaded.
+        let generated = cert_fingerprint(temp_dir.path(), "localhost".into())?;
+        let certificate = fs::read(temp_dir.path().join(CERT_FILE))?;
+        assert_eq!(generated, CertFingerprint::of(&certificate));
+        assert_eq!(
+            cert_fingerprint(temp_dir.path(), "other".into())?,
+            generated
+        );
+
+        // Like the server, it doesn't replace a certificate whose key is missing.
+        fs::remove_file(temp_dir.path().join(KEY_FILE))?;
+        assert!(cert_fingerprint(temp_dir.path(), "localhost".into()).is_err());
+        assert_eq!(fs::read(temp_dir.path().join(CERT_FILE))?, certificate);
         Ok(())
     }
 
