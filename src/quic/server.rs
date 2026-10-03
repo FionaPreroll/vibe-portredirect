@@ -332,15 +332,16 @@ pub fn generate_quic_cert(
     let key = PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der());
     let cert = CertificateDer::from(cert.cert);
 
-    // Write private key and certificate to files. If that fails, don't leave one of them behind,
-    // which would keep the next start from generating a new pair.
-    let written = write_private_file(&key_path, key.secret_pkcs8_der())
-        .context("failed to write private key")
-        .and_then(|()| fs::write(&cert_path, &cert).context("failed to write certificate"));
-    if let Err(e) = written {
+    // Write private key and certificate to files. If that fails, remove what was written, so the
+    // next start can generate a new pair instead of finding only one of them.
+    if let Err(e) = write_private_file(&key_path, key.secret_pkcs8_der()) {
+        let _ = fs::remove_file(&key_path);
+        return Err(e).context("failed to write private key");
+    }
+    if let Err(e) = fs::write(&cert_path, &cert) {
         let _ = fs::remove_file(&key_path);
         let _ = fs::remove_file(&cert_path);
-        return Err(e);
+        return Err(e).context("failed to write certificate");
     }
 
     Ok((vec![cert], key.into()))
