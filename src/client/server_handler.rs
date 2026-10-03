@@ -141,10 +141,10 @@ async fn set_up_tunnel(
     .await
     .context("timed out waiting for the server to confirm the listen port")?
     .with_context(|| format!("server did not listen on TCP port {}", requested_port))?;
+    let (software, port) = (welcome.software(), welcome.listen_port);
     info!(
         "Tunnel established, server ({:?}) listens on TCP port {}",
-        welcome.software(),
-        welcome.listen_port
+        software, port
     );
     Ok(control_stream)
 }

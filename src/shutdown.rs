@@ -103,17 +103,18 @@ impl Shutdown {
     /// Lets the running forwarded connections finish, see [`Shutdown::connections_finished`], and
     /// logs how it went.
     pub async fn finish_connections(&self) {
+        let (timeout, running) = (self.timeout, self.running());
         info!(
             "Waiting up to {:?} for running forwarded connections to finish: {}",
-            self.timeout,
-            self.running()
+            timeout, running
         );
         if self.connections_finished().await {
             info!("All forwarded connections finished");
         } else {
+            let running = self.running();
             info!(
                 "Closing forwarded connections that didn't finish: {}",
-                self.running()
+                running
             );
         }
     }
@@ -135,11 +136,10 @@ impl Shutdown {
 /// Requests `shutdown` to drain on the first SIGINT or SIGTERM, and to stop on the second.
 async fn request_on_signals(shutdown: Shutdown) {
     let mut signals = Signals::new();
-    let signal = signals.recv().await;
+    let (signal, timeout) = (signals.recv().await, shutdown.timeout());
     info!(
         "Received {}, shutting down: running connections may finish within {:?}, another signal closes them right away",
-        signal,
-        shutdown.timeout()
+        signal, timeout
     );
     shutdown.drain();
     let signal = signals.recv().await;

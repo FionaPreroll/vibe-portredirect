@@ -528,10 +528,8 @@ where
 /// Refuses all new connections, e.g. while the server shuts down.
 async fn refuse_connections(endpoint: quinn::Endpoint) {
     while let Some(incoming) = endpoint.accept().await {
-        debug!(
-            "Refusing connection from {}: shutting down",
-            incoming.remote_address()
-        );
+        let remote = incoming.remote_address();
+        debug!("Refusing connection from {}: shutting down", remote);
         incoming.refuse();
     }
 }
