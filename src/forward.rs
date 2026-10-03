@@ -20,8 +20,8 @@ use crate::metrics_helper::MetricsCounter;
 /// `PortRedirectProtocol::QUIC_STREAM_READ_BUFFER_SIZE`. As data is transferred, the provided counters
 /// are incremented by the number of bytes forwarded in each direction. If the copy completes without
 /// errors, the function returns `Ok(())`. If an error occurs, it is wrapped with additional context.
-/// However, if the error message contains `"error 0"`, this is interpreted as a graceful shutdown,
-/// and the function returns success.
+/// However, if a QUIC peer stopped or reset the stream with error code 0, e.g. because it dropped
+/// the stream after its TCP connection ended, this counts as a normal end and returns success.
 ///
 /// # Parameters
 ///
@@ -35,13 +35,13 @@ use crate::metrics_helper::MetricsCounter;
 ///
 /// # Returns
 ///
-/// Returns `Ok(())` if the bidirectional copy completes (or a graceful shutdown or idle timeout is
-/// detected), or an error wrapped with context if a non-graceful error occurs.
+/// Returns `Ok(())` if the bidirectional copy completes (or the QUIC peer ends the stream with
+/// error code 0, or the idle timeout expires), or an error wrapped with context otherwise.
 ///
 /// # Errors
 ///
-/// If the underlying I/O operations fail with an error that does **not** contain `"error 0"` in its
-/// description, an error with additional context `"Bidirectional copy failed"` is returned.
+/// If the underlying I/O operations fail for another reason, an error with additional context
+/// `"Bidirectional copy failed"` is returned.
 ///
 /// # Examples
 ///
@@ -106,8 +106,7 @@ where
             Ok(())
         }
         Err(err) => {
-            // If the error indicates a graceful shutdown, log it and return success.
-            if err.to_string().contains("error 0") {
+            if is_graceful_stream_end(&err) {
                 info!("Stream (id={}): graceful shutdown detected: {}", id, err);
                 Ok(())
             } else {
@@ -115,6 +114,23 @@ where
             }
         }
     }
+}
+
+/// Returns whether `error` means that the QUIC peer ended the stream on purpose, with error code
+/// 0: it stopped reading (STOP_SENDING) or reset its sending side (RESET_STREAM). quinn stops a
+/// stream with code 0 when it is dropped before it was read to the end, e.g. after the peer's TCP
+/// connection ended.
+pub fn is_graceful_stream_end(error: &io::Error) -> bool {
+    let Some(inner) = error.get_ref() else {
+        return false;
+    };
+    matches!(
+        inner.downcast_ref::<quinn::WriteError>(),
+        Some(quinn::WriteError::Stopped(code)) if code.into_inner() == 0
+    ) || matches!(
+        inner.downcast_ref::<quinn::ReadError>(),
+        Some(quinn::ReadError::Reset(code)) if code.into_inner() == 0
+    )
 }
 
 /// Tracks when data was last transferred, shared by both directions of a forwarding.
@@ -378,30 +394,26 @@ mod tests {
         );
     }
 
-    /// A stream that simulates a graceful shutdown error by returning errors containing "error 0".
-    struct GracefulStream;
+    /// A stream whose reads and writes fail with the error that `make_error` returns.
+    struct ErrorStream(fn() -> std::io::Error);
 
-    impl AsyncRead for GracefulStream {
+    impl AsyncRead for ErrorStream {
         fn poll_read(
             self: Pin<&mut Self>,
             _cx: &mut Context<'_>,
             _buf: &mut ReadBuf<'_>,
         ) -> Poll<Result<(), std::io::Error>> {
-            Poll::Ready(Err(std::io::Error::other(
-                "sending stopped by peer: error 0",
-            )))
+            Poll::Ready(Err((self.0)()))
         }
     }
 
-    impl AsyncWrite for GracefulStream {
+    impl AsyncWrite for ErrorStream {
         fn poll_write(
             self: Pin<&mut Self>,
             _cx: &mut Context<'_>,
             _buf: &[u8],
         ) -> Poll<Result<usize, std::io::Error>> {
-            Poll::Ready(Err(std::io::Error::other(
-                "sending stopped by peer: error 0",
-            )))
+            Poll::Ready(Err((self.0)()))
         }
 
         fn poll_flush(
@@ -419,30 +431,47 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_forward_bidirectional_graceful_shutdown() -> Result<()> {
-        // Use a normal TestStream for one side.
+    /// Forwards between a working stream and one that fails with `make_error`.
+    async fn forward_with_failing_peer(make_error: fn() -> std::io::Error) -> Result<()> {
         let mut normal_stream = TestStream::new(b"normal");
-        // Use the graceful stream for the other side.
-        let mut graceful_stream = GracefulStream;
-
-        // Create dummy counters for both directions.
-        let dummy_counter_a = DummyCounter::new();
-        let dummy_counter_b = DummyCounter::new();
-
-        // When one side produces an error containing "error 0", our forward_bidirectional
-        // function should treat it as a graceful shutdown and return Ok(()).
+        let mut failing_stream = ErrorStream(make_error);
         forward_bidirectional(
             &mut normal_stream,
-            &mut graceful_stream,
-            "normal",
-            &dummy_counter_a,
-            &dummy_counter_b,
+            &mut failing_stream,
+            "failing peer",
+            &DummyCounter::new(),
+            &DummyCounter::new(),
             None,
         )
-        .await?;
+        .await
+    }
 
+    fn code(code: u32) -> quinn::VarInt {
+        quinn::VarInt::from_u32(code)
+    }
+
+    #[tokio::test]
+    async fn test_peer_ending_stream_with_code_0_is_a_normal_end() -> Result<()> {
+        // The errors as quinn's streams return them, see quinn's From impls for io::Error.
+        forward_with_failing_peer(|| quinn::WriteError::Stopped(code(0)).into()).await?;
+        forward_with_failing_peer(|| quinn::ReadError::Reset(code(0)).into()).await?;
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_other_stream_errors_are_failures() {
+        let errors: [fn() -> std::io::Error; 5] = [
+            || quinn::WriteError::Stopped(code(1)).into(),
+            || quinn::ReadError::Reset(code(7)).into(),
+            || quinn::WriteError::ClosedStream.into(),
+            // Only quinn's error types count, not the message.
+            || std::io::Error::other("sending stopped by peer: error 0"),
+            || std::io::ErrorKind::ConnectionReset.into(),
+        ];
+        for make_error in errors {
+            let result = forward_with_failing_peer(make_error).await;
+            assert!(result.is_err(), "{} must be a failure", make_error());
+        }
     }
 
     /// Runs `forward_bidirectional` between the inner ends of two duplex pipes and returns the
