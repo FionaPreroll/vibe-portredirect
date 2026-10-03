@@ -4,7 +4,6 @@
 #![cfg(unix)]
 
 use anyhow::{anyhow, Result};
-use portredirect::quic::server::load_or_generate_quic_cert;
 use std::fs;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::os::unix::fs::PermissionsExt;
@@ -596,14 +595,9 @@ async fn client_without_certificate_exits_with_code_1() -> Result<()> {
 #[tokio::test]
 async fn server_does_not_start_without_its_private_key() -> Result<()> {
     let config_dir = tempfile::tempdir()?;
-    let key_path = config_dir.path().join("key.der");
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    load_or_generate_quic_cert(
-        "localhost".into(),
-        key_path.clone(),
-        config_dir.path().join("cert.der"),
-    )?;
-    fs::remove_file(&key_path)?;
+    // The certificate the server generated on its first start, but not its private key.
+    let certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
+    fs::write(config_dir.path().join("cert.der"), certificate.cert.der())?;
 
     let mut server = Program::start(
         SERVER,

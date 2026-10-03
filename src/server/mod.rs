@@ -2,14 +2,15 @@
 //
 // License: GPL-3.0-only
 
-pub mod auth;
-pub mod client_handler;
-pub mod clients;
-pub mod config;
-pub mod metrics;
-pub mod port_registry;
-pub mod tcp_forwarder;
-pub mod tcp_listener;
+pub(crate) mod auth;
+pub(crate) mod client_handler;
+pub(crate) mod clients;
+pub(crate) mod config;
+pub(crate) mod main;
+pub(crate) mod metrics;
+pub(crate) mod port_registry;
+pub(crate) mod tcp_forwarder;
+pub(crate) mod tcp_listener;
 
 use std::str::FromStr;
 use std::time::Duration;
@@ -98,22 +99,6 @@ impl PortSpec {
 /// Trait to check if a collection of PortSpec allows a given port.
 pub trait AllowedPorts {
     /// Returns true if any `PortSpec` in the collection allows the given port.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use portredirect::server::{PortSpec, AllowedPorts};
-    ///
-    /// let port = 12345;
-    /// let allowed_ports: Vec<PortSpec> = vec![
-    ///     PortSpec::Single(80),
-    ///     PortSpec::Range(8000, 9000),
-    ///     PortSpec::Single(12345),
-    /// ];
-    ///
-    /// assert!(allowed_ports.allows(port));
-    /// println!("Port {} is allowed.", port);
-    /// ```
     fn allows(&self, port: u16) -> bool;
 }
 

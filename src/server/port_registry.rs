@@ -142,6 +142,7 @@ impl<C: Replaceable> PortRegistry<C> {
     }
 
     /// Returns the client that holds `port`, if any.
+    #[cfg(test)]
     pub fn holder(&self, port: u16) -> Option<ClientName> {
         self.lock().get(&port).map(|holder| holder.client.clone())
     }

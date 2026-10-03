@@ -4,28 +4,6 @@
 // authentication, control channel, TCP listener and data forwarding.
 
 use anyhow::{anyhow, Result};
-use portredirect::app_data::{ClientAppData, ServerAppData};
-use portredirect::bi_stream::BiStream;
-use portredirect::client::reconnect::Backoff;
-use portredirect::client::run_client::{run_client, ClientSettings};
-use portredirect::client::server_handler::handle_quic_server_connection;
-use portredirect::forward::forward_tcp_and_quic;
-use portredirect::limits::{BlockingPolicy, QuicAdmission};
-use portredirect::metrics::DummyCounter;
-use portredirect::protocol::auth::{client_authenticate, session_binding, ClientName};
-use portredirect::protocol::close::CloseCode;
-use portredirect::protocol::control::{receive_hello, send_welcome, SERVER_SOFTWARE};
-use portredirect::protocol::control::{request_listen_port, Greeting, CLIENT_SOFTWARE};
-use portredirect::protocol::message::{read_message, write_message, Message, MessageType};
-use portredirect::quic::client::{run_quic_client, ClientConfig, QuicClient};
-use portredirect::quic::server::{load_or_generate_quic_cert, run_quic_server, ServerConfig};
-use portredirect::server::auth::authenticate_quic_client;
-use portredirect::server::client_handler::handle_quic_client_connection;
-use portredirect::server::clients::{ClientEntry, ClientList};
-use portredirect::server::metrics::{ClientMetrics, METRICS};
-use portredirect::server::{ForwardingLimits, PortSpec};
-use portredirect::shutdown::Shutdown;
-use portredirect::PortRedirectProtocol;
 use secrecy::SecretString;
 use std::future::Future;
 use std::io::ErrorKind;
@@ -38,6 +16,31 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout, timeout_at, Duration, Instant};
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+use tracing::subscriber::DefaultGuard;
+
+use crate::app_data::{ClientAppData, ServerAppData};
+use crate::bi_stream::BiStream;
+use crate::client::reconnect::Backoff;
+use crate::client::run_client::{run_client, ClientSettings};
+use crate::client::server_handler::handle_quic_server_connection;
+use crate::forward::forward_tcp_and_quic;
+use crate::limits::{BlockingPolicy, QuicAdmission};
+use crate::metrics::DummyCounter;
+use crate::protocol::auth::{client_authenticate, session_binding, ClientName};
+use crate::protocol::close::CloseCode;
+use crate::protocol::control::{receive_hello, send_welcome, SERVER_SOFTWARE};
+use crate::protocol::control::{request_listen_port, Greeting, CLIENT_SOFTWARE};
+use crate::protocol::message::{read_message, write_message, Message, MessageType};
+use crate::quic::client::{run_quic_client, ClientConfig, QuicClient};
+use crate::quic::server::{load_or_generate_quic_cert, run_quic_server, ServerConfig};
+use crate::server::auth::authenticate_quic_client;
+use crate::server::client_handler::handle_quic_client_connection;
+use crate::server::clients::{ClientEntry, ClientList};
+use crate::server::metrics::{ClientMetrics, METRICS};
+use crate::server::{ForwardingLimits, PortSpec};
+use crate::shutdown::Shutdown;
+use crate::tests::capture_logs;
+use crate::PortRedirectProtocol;
 
 const TEST_PSK: &str = "integration-test-psk";
 const CERT_HOSTNAME: &str = "localhost";
@@ -77,16 +80,18 @@ async fn with_timeout<F: Future<Output = Result<()>>>(test: F) -> Result<()> {
         .map_err(|_| anyhow!("test timed out after {:?}", TEST_TIMEOUT))?
 }
 
-fn setup() -> tempfile::TempDir {
-    let _ = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
-        .with_test_writer()
-        .try_init();
-
+/// Prepares a test: its log messages go to its output, shown if it fails, and its configuration
+/// directory holds the server's certificate. Keep both until the test ends.
+fn setup() -> (tempfile::TempDir, DefaultGuard) {
+    let logs = capture_logs();
     // Several tests run in this process, only the first installation succeeds.
     let _ = rustls::crypto::ring::default_provider().install_default();
+    (certificate_dir(), logs)
+}
 
-    // Generate the server certificate up front, so the client finds it when it starts.
+/// Returns a configuration directory with a new server certificate. It is generated up front, so
+/// the client finds it when it starts.
+fn certificate_dir() -> tempfile::TempDir {
     let config_dir = tempfile::tempdir().expect("failed to create temp dir");
     load_or_generate_quic_cert(
         CERT_HOSTNAME.into(),
@@ -520,7 +525,7 @@ async fn echo_roundtrip(stream: TcpStream, payload: Vec<u8>) -> Result<Vec<u8>> 
 
 #[tokio::test]
 async fn tunnel_forwards_data_in_both_directions() -> Result<()> {
-    let config_dir = setup();
+    let (config_dir, _logs) = setup();
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
     let echo_addr = start_echo_server().await;
 
@@ -552,7 +557,7 @@ async fn tunnel_forwards_data_in_both_directions() -> Result<()> {
 
 #[tokio::test]
 async fn tunnel_handles_concurrent_connections() -> Result<()> {
-    let config_dir = setup();
+    let (config_dir, _logs) = setup();
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
     let echo_addr = start_echo_server().await;
 
@@ -598,7 +603,7 @@ async fn tunnel_handles_concurrent_connections() -> Result<()> {
 
 #[tokio::test]
 async fn server_rejects_wrong_psk() -> Result<()> {
-    let config_dir = setup();
+    let (config_dir, _logs) = setup();
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
     let echo_addr = start_echo_server().await;
 
@@ -632,8 +637,46 @@ async fn server_rejects_wrong_psk() -> Result<()> {
 }
 
 #[tokio::test]
+async fn rejected_client_learns_why_before_its_control_stream_ends() -> Result<()> {
+    let (config_dir, _logs) = setup();
+    let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
+    let config = server_config(
+        config_dir.path(),
+        quic_port,
+        vec![PortSpec::Single(listen_port)],
+        ForwardingLimits::default(),
+    );
+    // A server that takes a while after a failed authentication, e.g. as it is busy. Meanwhile,
+    // the control stream ends, so the reason must have been sent before.
+    let _server = spawn_server_with_handler(config, |config, connection| async move {
+        let authenticated = authenticate_quic_client(config, connection).await;
+        sleep(Duration::from_millis(200)).await;
+        authenticated.map(|_| ())
+    });
+    let client = start_client(
+        config_dir.path(),
+        quic_port,
+        "wrong-psk",
+        localhost(1),
+        listen_port,
+    );
+
+    with_timeout(async {
+        // Without the reason, the client would take the end for a temporary failure.
+        let error = format!("{:#}", client.result().await.unwrap_err());
+        assert!(
+            error.contains("authentication failed (code 1)"),
+            "unexpected error: {}",
+            error
+        );
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
 async fn server_rejects_disallowed_port() -> Result<()> {
-    let config_dir = setup();
+    let (config_dir, _logs) = setup();
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
     let allowed_port = listen_port.wrapping_add(1); // any port other than the requested one
     let echo_addr = start_echo_server().await;
@@ -667,7 +710,7 @@ async fn server_rejects_disallowed_port() -> Result<()> {
 
 #[tokio::test]
 async fn idle_connections_are_closed() -> Result<()> {
-    let config_dir = setup();
+    let (config_dir, _logs) = setup();
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
     let echo_addr = start_echo_server().await;
 
@@ -711,7 +754,7 @@ async fn idle_connections_are_closed() -> Result<()> {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn connections_per_address_are_limited() -> Result<()> {
-    let config_dir = setup();
+    let (config_dir, _logs) = setup();
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
     let echo_addr = start_echo_server().await;
     let (busy_host, other_host) = (Ipv4Addr::new(127, 0, 0, 2), Ipv4Addr::new(127, 0, 0, 3));
@@ -770,7 +813,7 @@ async fn connections_per_address_are_limited() -> Result<()> {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn idle_connections_from_one_address_do_not_block_others() -> Result<()> {
-    let config_dir = setup();
+    let (config_dir, _logs) = setup();
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
     let echo_addr = start_echo_server().await;
     let (attacker, user) = (Ipv4Addr::new(127, 0, 0, 2), Ipv4Addr::new(127, 0, 0, 3));
@@ -825,7 +868,7 @@ async fn idle_connections_from_one_address_do_not_block_others() -> Result<()> {
 
 #[tokio::test]
 async fn repeated_authentication_failures_block_address() -> Result<()> {
-    let config_dir = setup();
+    let (config_dir, _logs) = setup();
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
     let _server = start_server(
         config_dir.path(),
@@ -865,7 +908,7 @@ async fn repeated_authentication_failures_block_address() -> Result<()> {
 
 #[tokio::test]
 async fn client_reconnects_after_server_restart() -> Result<()> {
-    let config_dir = setup();
+    let (config_dir, _logs) = setup();
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
     let echo_addr = start_echo_server().await;
     let allowed_ports = vec![PortSpec::Single(listen_port)];
@@ -921,7 +964,7 @@ async fn client_reconnects_after_server_restart() -> Result<()> {
 
 #[tokio::test]
 async fn client_shuts_down_cleanly() -> Result<()> {
-    let config_dir = setup();
+    let (config_dir, _logs) = setup();
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
     let echo_addr = start_echo_server().await;
 
@@ -983,7 +1026,7 @@ async fn ended<T>(task: impl Future<Output = T>, what: &str) -> Result<T> {
 
 #[tokio::test]
 async fn server_shutdown_lets_running_connections_finish() -> Result<()> {
-    let config_dir = setup();
+    let (config_dir, _logs) = setup();
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
     let echo_addr = start_echo_server().await;
     let shutdown = Shutdown::new(Duration::from_secs(60));
@@ -1026,7 +1069,7 @@ async fn server_shutdown_lets_running_connections_finish() -> Result<()> {
 #[tokio::test]
 async fn server_shutdown_closes_running_connections_after_the_timeout_or_on_request() -> Result<()>
 {
-    let config_dir = setup();
+    let (config_dir, _logs) = setup();
     let echo_addr = start_echo_server().await;
 
     // After the timeout, or when asked to stop before.
@@ -1080,7 +1123,7 @@ async fn server_shutdown_closes_running_connections_after_the_timeout_or_on_requ
 
 #[tokio::test]
 async fn client_shutdown_lets_running_connections_finish() -> Result<()> {
-    let config_dir = setup();
+    let (config_dir, _logs) = setup();
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
     let echo_addr = start_echo_server().await;
     let _server = start_server(
@@ -1131,7 +1174,7 @@ async fn client_shutdown_lets_running_connections_finish() -> Result<()> {
 #[tokio::test]
 async fn client_shutdown_closes_running_connections_after_the_timeout_or_on_request() -> Result<()>
 {
-    let config_dir = setup();
+    let (config_dir, _logs) = setup();
     let echo_addr = start_echo_server().await;
 
     // After the timeout, or when asked to stop before.
@@ -1182,7 +1225,7 @@ async fn client_shutdown_closes_running_connections_after_the_timeout_or_on_requ
 
 #[tokio::test]
 async fn client_shuts_down_while_connecting() -> Result<()> {
-    let config_dir = setup();
+    let (config_dir, _logs) = setup();
     // Nothing answers the client's handshake.
     let silent = std::net::UdpSocket::bind(localhost(0))?;
     let client = start_client(
@@ -1204,7 +1247,7 @@ async fn client_shuts_down_while_connecting() -> Result<()> {
 
 #[tokio::test]
 async fn client_shuts_down_while_setting_up_the_tunnel() -> Result<()> {
-    let config_dir = setup();
+    let (config_dir, _logs) = setup();
     let quic_port = free_udp_port();
     // The server authenticates the client, but never confirms the port.
     let (authenticated, authenticated_rx) = oneshot::channel::<()>();
@@ -1268,7 +1311,7 @@ async fn wait_for_metric(value: impl Fn() -> i64, expected: i64, what: &str) -> 
 
 #[tokio::test]
 async fn server_metrics_count_per_client() -> Result<()> {
-    let config_dir = setup();
+    let (config_dir, _logs) = setup();
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
     let echo_addr = start_echo_server().await;
     // The metrics are shared by all tests, but these clients only appear here.
@@ -1347,7 +1390,7 @@ async fn server_metrics_count_per_client() -> Result<()> {
 
 #[tokio::test]
 async fn server_resets_connections_for_which_the_client_accepts_no_stream() -> Result<()> {
-    let config_dir = setup();
+    let (config_dir, _logs) = setup();
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
     let config = server_config_with_clients(
         config_dir.path(),
@@ -1389,7 +1432,7 @@ async fn server_resets_connections_for_which_the_client_accepts_no_stream() -> R
 
 #[tokio::test]
 async fn client_reconnects_when_the_server_ends_the_control_stream() -> Result<()> {
-    let config_dir = setup();
+    let (config_dir, _logs) = setup();
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
     let (closed_tx, mut closed_rx) = mpsc::unbounded_channel();
     let config = server_config(
@@ -1412,9 +1455,7 @@ async fn client_reconnects_when_the_server_ends_the_control_stream() -> Result<(
             Ok(())
         }
     });
-    let failures = portredirect::client::metrics::METRICS
-        .keepalive_failures
-        .get();
+    let failures = crate::client::metrics::METRICS.keepalive_failures.get();
     let _client = start_client(
         config_dir.path(),
         quic_port,
@@ -1437,9 +1478,7 @@ async fn client_reconnects_when_the_server_ends_the_control_stream() -> Result<(
                 reason
             );
         }
-        let keepalive_failures = portredirect::client::metrics::METRICS
-            .keepalive_failures
-            .get();
+        let keepalive_failures = crate::client::metrics::METRICS.keepalive_failures.get();
         assert!(keepalive_failures >= failures + 2, "{}", keepalive_failures);
         Ok(())
     })
@@ -1448,7 +1487,7 @@ async fn client_reconnects_when_the_server_ends_the_control_stream() -> Result<(
 
 #[tokio::test]
 async fn responses_after_the_end_of_the_request_are_forwarded() -> Result<()> {
-    let config_dir = setup();
+    let (config_dir, _logs) = setup();
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
     let reversing_addr = start_reversing_server().await;
 
@@ -1484,7 +1523,7 @@ async fn responses_after_the_end_of_the_request_are_forwarded() -> Result<()> {
 
 #[tokio::test]
 async fn requests_after_the_end_of_the_response_are_forwarded() -> Result<()> {
-    let config_dir = setup();
+    let (config_dir, _logs) = setup();
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
 
     // The backend sends a greeting and closes its sending side, then reads the request.
@@ -1535,7 +1574,7 @@ async fn requests_after_the_end_of_the_response_are_forwarded() -> Result<()> {
 
 #[tokio::test]
 async fn destination_can_speak_first() -> Result<()> {
-    let config_dir = setup();
+    let (config_dir, _logs) = setup();
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
 
     // Like an SMTP, POP3 or FTP server: the backend greets first, and the external client sends
@@ -1588,7 +1627,7 @@ async fn destination_can_speak_first() -> Result<()> {
 
 #[tokio::test]
 async fn unreachable_destination_resets_the_external_connection() -> Result<()> {
-    let config_dir = setup();
+    let (config_dir, _logs) = setup();
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
     // Nothing listens on the destination port yet. The socket is bound, so no other test can
     // listen on the port meanwhile.
@@ -1629,7 +1668,7 @@ async fn unreachable_destination_resets_the_external_connection() -> Result<()> 
 
 #[tokio::test]
 async fn connections_beyond_the_clients_limit_wait_for_a_free_slot() -> Result<()> {
-    let config_dir = setup();
+    let (config_dir, _logs) = setup();
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
     let echo_addr = start_echo_server().await;
 
@@ -1676,7 +1715,7 @@ async fn connections_beyond_the_clients_limit_wait_for_a_free_slot() -> Result<(
 
 #[tokio::test]
 async fn connections_beyond_the_servers_limit_wait_in_the_backlog() -> Result<()> {
-    let config_dir = setup();
+    let (config_dir, _logs) = setup();
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
     let echo_addr = start_echo_server().await;
 
@@ -1726,7 +1765,7 @@ async fn connections_beyond_the_servers_limit_wait_in_the_backlog() -> Result<()
 
 #[tokio::test]
 async fn client_waits_while_another_program_uses_its_port() -> Result<()> {
-    let config_dir = setup();
+    let (config_dir, _logs) = setup();
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
     let echo_addr = start_echo_server().await;
     let other_program = std::net::TcpListener::bind(localhost(listen_port))?;
@@ -1789,7 +1828,7 @@ async fn client_waits_while_another_program_uses_its_port() -> Result<()> {
 
 #[tokio::test]
 async fn new_connection_of_a_client_replaces_its_old_one() -> Result<()> {
-    let config_dir = setup();
+    let (config_dir, _logs) = setup();
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
     let echo_addr = start_echo_server().await;
 
@@ -1843,7 +1882,7 @@ async fn new_connection_of_a_client_replaces_its_old_one() -> Result<()> {
 
 #[tokio::test]
 async fn standby_client_takes_over_when_the_active_one_stops() -> Result<()> {
-    let config_dir = setup();
+    let (config_dir, _logs) = setup();
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
     let echo_addr = start_echo_server().await;
 
@@ -1913,7 +1952,7 @@ async fn standby_client_takes_over_when_the_active_one_stops() -> Result<()> {
 
 #[tokio::test]
 async fn clients_need_their_own_psk_and_port() -> Result<()> {
-    let config_dir = setup();
+    let (config_dir, _logs) = setup();
     let quic_port = free_udp_port();
     let (home_port, office_port) = (free_tcp_port(), free_tcp_port());
     let config = server_config_with_clients(
@@ -1987,7 +2026,7 @@ async fn clients_need_their_own_psk_and_port() -> Result<()> {
 
 #[tokio::test]
 async fn drain_stops_new_connections_but_keeps_running_ones() -> Result<()> {
-    let config_dir = setup();
+    let (config_dir, _logs) = setup();
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
     let _server = start_server(
         config_dir.path(),
@@ -2030,7 +2069,7 @@ async fn drain_stops_new_connections_but_keeps_running_ones() -> Result<()> {
 
 #[tokio::test]
 async fn external_reset_resets_the_destination_connection() -> Result<()> {
-    let config_dir = setup();
+    let (config_dir, _logs) = setup();
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
     let (destination, mut accepted) = start_accepting_server().await;
 
@@ -2069,7 +2108,7 @@ async fn external_reset_resets_the_destination_connection() -> Result<()> {
 
 #[tokio::test]
 async fn destination_reset_resets_the_external_connection() -> Result<()> {
-    let config_dir = setup();
+    let (config_dir, _logs) = setup();
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
     let (destination, mut accepted) = start_accepting_server().await;
 
@@ -2109,7 +2148,7 @@ async fn destination_reset_resets_the_external_connection() -> Result<()> {
 
 #[tokio::test]
 async fn lost_tunnel_resets_forwarded_connections() -> Result<()> {
-    let config_dir = setup();
+    let (config_dir, _logs) = setup();
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
     let (destination, mut accepted) = start_accepting_server().await;
 
@@ -2151,7 +2190,7 @@ async fn lost_tunnel_resets_forwarded_connections() -> Result<()> {
 
 #[tokio::test]
 async fn client_aborts_streams_with_invalid_headers() -> Result<()> {
-    let config_dir = setup();
+    let (config_dir, _logs) = setup();
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
     let echo_addr = start_echo_server().await;
 
@@ -2204,7 +2243,7 @@ async fn client_aborts_streams_with_invalid_headers() -> Result<()> {
 
 #[tokio::test]
 async fn client_closes_connections_with_protocol_violations() -> Result<()> {
-    let config_dir = setup();
+    let (config_dir, _logs) = setup();
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
     let echo_addr = start_echo_server().await;
 
@@ -2266,7 +2305,7 @@ async fn client_closes_connections_with_protocol_violations() -> Result<()> {
 
 #[tokio::test]
 async fn clients_of_other_protocol_versions_are_rejected() -> Result<()> {
-    let config_dir = setup();
+    let (config_dir, _logs) = setup();
     let quic_port = free_udp_port();
     let _server = start_server(config_dir.path(), quic_port, vec![]);
 
@@ -2302,7 +2341,7 @@ async fn clients_of_other_protocol_versions_are_rejected() -> Result<()> {
 }
 #[tokio::test]
 async fn server_closes_stalled_connections() -> Result<()> {
-    let config_dir = setup();
+    let (config_dir, _logs) = setup();
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
     let _server = start_server(
         config_dir.path(),
@@ -2337,7 +2376,7 @@ async fn server_closes_stalled_connections() -> Result<()> {
 
 #[tokio::test]
 async fn server_closes_connections_with_protocol_violations() -> Result<()> {
-    let config_dir = setup();
+    let (config_dir, _logs) = setup();
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
     let _server = start_server(
         config_dir.path(),
@@ -2386,7 +2425,7 @@ async fn server_closes_connections_with_protocol_violations() -> Result<()> {
 
 #[tokio::test]
 async fn client_rejects_server_without_psk() -> Result<()> {
-    let config_dir = setup();
+    let (config_dir, _logs) = setup();
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
     let echo_addr = start_echo_server().await;
 
@@ -2448,8 +2487,8 @@ async fn client_rejects_server_without_psk() -> Result<()> {
 
 #[tokio::test]
 async fn client_gives_up_on_an_untrusted_certificate() -> Result<()> {
-    let config_dir = setup();
-    let other_certificate = setup();
+    let (config_dir, _logs) = setup();
+    let other_certificate = certificate_dir();
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
     let echo_addr = start_echo_server().await;
 
@@ -2481,7 +2520,7 @@ async fn client_gives_up_on_an_untrusted_certificate() -> Result<()> {
 
 #[tokio::test]
 async fn client_gives_up_on_a_certificate_for_another_name() -> Result<()> {
-    let config_dir = setup();
+    let (config_dir, _logs) = setup();
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
     let echo_addr = start_echo_server().await;
 
@@ -2515,8 +2554,8 @@ async fn client_gives_up_on_a_certificate_for_another_name() -> Result<()> {
 
 #[tokio::test]
 async fn failed_handshakes_block_address() -> Result<()> {
-    let config_dir = setup();
-    let other_certificate = setup();
+    let (config_dir, _logs) = setup();
+    let other_certificate = certificate_dir();
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
     let _server = start_server(
         config_dir.path(),
@@ -2667,7 +2706,7 @@ impl rustls::client::danger::ServerCertVerifier for StallingVerifier {
 
 #[tokio::test]
 async fn stalled_handshake_does_not_hold_up_other_clients() -> Result<()> {
-    let config_dir = setup();
+    let (config_dir, _logs) = setup();
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
     let echo_addr = start_echo_server().await;
     let _server = start_server(
@@ -2699,7 +2738,7 @@ async fn stalled_handshake_does_not_hold_up_other_clients() -> Result<()> {
 
 #[tokio::test]
 async fn stalled_handshakes_time_out_and_count_as_failed_attempts() -> Result<()> {
-    let config_dir = setup();
+    let (config_dir, _logs) = setup();
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
     let mut config = server_config(
         config_dir.path(),
@@ -2742,7 +2781,7 @@ async fn hold_connection(
 
 #[tokio::test]
 async fn quic_connections_are_limited_in_total() -> Result<()> {
-    let config_dir = setup();
+    let (config_dir, _logs) = setup();
     let quic_port = free_udp_port();
     let mut config = server_config(
         config_dir.path(),
@@ -2783,7 +2822,7 @@ async fn quic_connections_are_limited_in_total() -> Result<()> {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn quic_connections_are_limited_per_address() -> Result<()> {
-    let config_dir = setup();
+    let (config_dir, _logs) = setup();
     let quic_port = free_udp_port();
     let (busy_host, other_host) = (Ipv4Addr::new(127, 0, 0, 2), Ipv4Addr::new(127, 0, 0, 3));
     let mut config = server_config(
@@ -2810,7 +2849,7 @@ async fn quic_connections_are_limited_per_address() -> Result<()> {
 
 #[tokio::test]
 async fn session_binding_is_shared_by_both_ends_and_unique_per_connection() -> Result<()> {
-    let config_dir = setup();
+    let (config_dir, _logs) = setup();
     let quic_port = free_udp_port();
     let (connections, mut server_connections) = mpsc::unbounded_channel();
     let config = server_config(
@@ -2847,7 +2886,7 @@ async fn session_binding_is_shared_by_both_ends_and_unique_per_connection() -> R
 
 #[tokio::test]
 async fn peer_dropping_a_stream_ends_forwarding_normally() -> Result<()> {
-    let config_dir = setup();
+    let (config_dir, _logs) = setup();
     let quic_port = free_udp_port();
     let (connections, mut server_connections) = mpsc::unbounded_channel();
     let config = server_config(

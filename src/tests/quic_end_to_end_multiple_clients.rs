@@ -1,8 +1,5 @@
 // Multiple Clients End-to-End Test for the PortRedirect/QUIC Client-Server Setup
 
-use portredirect::app_data::{ClientAppData, ServerAppData};
-use portredirect::quic::{client, server};
-use portredirect::server::PortSpec;
 use secrecy::SecretString;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{
@@ -13,20 +10,19 @@ use tokio::sync::Notify;
 use tokio::time::{timeout, Duration};
 use tracing::info;
 
+use crate::app_data::{ClientAppData, ServerAppData};
+use crate::quic::{client, server};
+use crate::server::PortSpec;
+use crate::tests::capture_logs;
+
 // This is an end-to-end test that sets up a QUIC server and multiple clients, and tests that they can
 // successfully establish and hold multiple connections at the same time.
 #[tokio::test]
 async fn test_quic_end_to_end_multiple_clients() {
-    // Initialize the tracing subscriber for logging
-    let _ = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
-        .with_test_writer() // Ensures logs appear during `cargo test`
-        .try_init();
+    let _logs = capture_logs();
 
-    // Install the default crypto provider for QUIC
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .expect("Failed to install rustls crypto provider");
+    // Install the default crypto provider for QUIC. Other tests in this process may have done so.
+    let _ = rustls::crypto::ring::default_provider().install_default();
 
     // Setup temporary config paths for certificates
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");

@@ -58,6 +58,7 @@ impl AddressConnectionLimit {
     }
 
     /// Returns the number of connections currently registered for the address of `ip`.
+    #[cfg(test)]
     pub fn count(&self, ip: IpAddr) -> usize {
         self.lock().get(&address_key(ip)).copied().unwrap_or(0)
     }

@@ -2,28 +2,47 @@
 //
 // License: GPL-3.0-only
 
+//! PortRedirect forwards TCP connections through a QUIC connection, with two programs:
+//! `portredirect_server` and `portredirect_client`. The
+//! [README](https://github.com/FionaPreroll/vibe-portredirect#readme) explains how to use them.
+//!
+//! This library is not an API. It only holds the code of the two programs, and nothing in it is
+//! meant for other crates: its only public items are the programs' entry points, which may change
+//! in any release.
+
+// Public items would fall under the compatibility promise of the crate's version. They need docs,
+// so a module made public by accident fails the lint check.
+#![warn(missing_docs)]
+
 use anyhow::{Context, Result};
 use std::io::IsTerminal;
 use std::{path::PathBuf, time::Duration};
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::EnvFilter;
 
-pub mod app_data;
-pub mod bi_stream;
-pub mod client;
-pub mod config;
-pub mod forward;
-pub mod limits;
-pub mod metrics;
-pub mod private_files;
-pub mod protocol;
-pub mod psk;
-pub mod quic;
-pub mod server;
-pub mod shutdown;
+mod app_data;
+mod bi_stream;
+mod client;
+mod config;
+mod forward;
+mod limits;
+mod metrics;
+mod private_files;
+mod protocol;
+mod psk;
+mod quic;
+mod server;
+mod shutdown;
+#[cfg(test)]
+mod tests;
+
+#[doc(hidden)]
+pub use client::main::main as client_main;
+#[doc(hidden)]
+pub use server::main::main as server_main;
 
 /// Returns the path to the configuration directory, creating it if necessary.
-pub fn get_config_dir(override_config_dir: Option<PathBuf>) -> Result<PathBuf> {
+pub(crate) fn get_config_dir(override_config_dir: Option<PathBuf>) -> Result<PathBuf> {
     // Use the override if provided, otherwise fall back to the platform's config directory.
     let config_dir = if let Some(override_path) = override_config_dir {
         override_path
@@ -44,7 +63,7 @@ pub fn get_config_dir(override_config_dir: Option<PathBuf>) -> Result<PathBuf> {
 ///
 /// The `RUST_LOG` environment variable, if set, takes precedence and can set levels per module,
 /// e.g. `RUST_LOG=info,portredirect::forward=debug`.
-pub fn init_logging(max_level: LevelFilter) {
+pub(crate) fn init_logging(max_level: LevelFilter) {
     let filter = match std::env::var("RUST_LOG") {
         Ok(directives) if !directives.trim().is_empty() => EnvFilter::try_new(&directives)
             .unwrap_or_else(|e| {
@@ -63,7 +82,7 @@ pub fn init_logging(max_level: LevelFilter) {
         .init();
 }
 
-pub struct PortRedirectProtocol;
+pub(crate) struct PortRedirectProtocol;
 
 impl PortRedirectProtocol {
     pub const CONNECTION_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
@@ -79,5 +98,3 @@ impl PortRedirectProtocol {
     pub const QUIC_STREAM_READ_BUFFER_SIZE: usize = 64 * 1024; // 64 KiB
     pub const QUIC_CRYPTO_BUFFER_SIZE: usize = 64 * 1024;
 }
-
-pub type ByteCount = u64;

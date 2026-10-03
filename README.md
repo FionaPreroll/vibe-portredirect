@@ -289,7 +289,7 @@ Run the Cargo tests and the Python unit tests of the benchmark utilities:
 make test
 ```
 
-The Cargo tests include end-to-end tests of a complete tunnel in `tests/tunnel_end_to_end.rs`.
+The Cargo tests include end-to-end tests of a complete tunnel in `src/tests/tunnel_end_to_end.rs` and tests of the two programs in `tests/cli.rs`.
 
 To see which code the Cargo tests cover, install [cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov) and run `make coverage`.
 It prints a summary per file and writes an HTML report with the covered lines to `target/llvm-cov/html`.

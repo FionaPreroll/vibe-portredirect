@@ -93,10 +93,6 @@ impl ClientList {
         self.0.len()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
     /// Returns the ports each pair of clients may both use, for all pairs that share ports.
     pub fn shared_ports(&self) -> Vec<SharedPorts> {
         let clients: Vec<(&ClientName, Vec<(u16, u16)>)> = self
@@ -214,7 +210,6 @@ mod tests {
     fn test_single_client() {
         let list = ClientList::single("secret".into(), vec![PortSpec::Single(443)]);
         assert_eq!(list.len(), 1);
-        assert!(!list.is_empty());
         let client = list.get(&ClientName::default()).unwrap();
         assert!(client.ports.allows(443));
         assert_eq!(list.psks(&ClientName::default()).unwrap().len(), 1);

@@ -6,8 +6,8 @@ use quinn::TransportConfig;
 
 use crate::PortRedirectProtocol;
 
-pub mod client;
-pub mod server;
+pub(crate) mod client;
+pub(crate) mod server;
 
 // QUIC ALPN field: the protocol versions this program speaks, see ProtocolVersion.
 pub const ALPN_QUIC_PORTREDIRECT: &[&[u8]] = &[b"pr-5"];

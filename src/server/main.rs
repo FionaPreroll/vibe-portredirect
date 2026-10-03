@@ -1,22 +1,23 @@
-// PortRedirect Server
+// PortRedirect Server - Program
 //
 // License: GPL-3.0-only
 
 use anyhow::{anyhow, Context, Result};
-use portredirect::app_data::ServerAppData;
-use portredirect::metrics::{print_metrics_loop, serve_metrics};
-use portredirect::quic::server::{run_quic_server, ServerConfig};
-use portredirect::server::client_handler::handle_quic_client_connection;
-use portredirect::server::config::Config;
-use portredirect::server::metrics::{METRICS, PREFIX};
-use portredirect::shutdown::Shutdown;
-use portredirect::{get_config_dir, init_logging};
 use std::net::{SocketAddr, ToSocketAddrs};
 use tracing::{error, info, span, Level};
 
-/// Program entry point.
+use crate::app_data::ServerAppData;
+use crate::metrics::{print_metrics_loop, serve_metrics};
+use crate::quic::server::{run_quic_server, ServerConfig};
+use crate::server::client_handler::handle_quic_client_connection;
+use crate::server::config::Config;
+use crate::server::metrics::{METRICS, PREFIX};
+use crate::shutdown::Shutdown;
+use crate::{get_config_dir, init_logging};
+
+/// Runs the server program, `portredirect_server`, until a shutdown signal arrives.
 #[tokio::main]
-async fn main() -> Result<()> {
+pub async fn main() -> Result<()> {
     // Read the command line, the environment and the configuration file.
     let config = Config::from_command_line();
 
