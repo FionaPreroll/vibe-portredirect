@@ -637,6 +637,44 @@ async fn server_rejects_wrong_psk() -> Result<()> {
 }
 
 #[tokio::test]
+async fn rejected_client_learns_why_before_its_control_stream_ends() -> Result<()> {
+    let (config_dir, _logs) = setup();
+    let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
+    let config = server_config(
+        config_dir.path(),
+        quic_port,
+        vec![PortSpec::Single(listen_port)],
+        ForwardingLimits::default(),
+    );
+    // A server that takes a while after a failed authentication, e.g. as it is busy. Meanwhile,
+    // the control stream ends, so the reason must have been sent before.
+    let _server = spawn_server_with_handler(config, |config, connection| async move {
+        let authenticated = authenticate_quic_client(config, connection).await;
+        sleep(Duration::from_millis(200)).await;
+        authenticated.map(|_| ())
+    });
+    let client = start_client(
+        config_dir.path(),
+        quic_port,
+        "wrong-psk",
+        localhost(1),
+        listen_port,
+    );
+
+    with_timeout(async {
+        // Without the reason, the client would take the end for a temporary failure.
+        let error = format!("{:#}", client.result().await.unwrap_err());
+        assert!(
+            error.contains("authentication failed (code 1)"),
+            "unexpected error: {}",
+            error
+        );
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
 async fn server_rejects_disallowed_port() -> Result<()> {
     let (config_dir, _logs) = setup();
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());

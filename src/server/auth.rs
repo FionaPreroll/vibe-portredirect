@@ -3,11 +3,14 @@
 // License: GPL-3.0-only
 
 use crate::protocol::auth::{server_authenticate, session_binding, AuthenticatedClient};
+use crate::protocol::close::CloseCode;
 use crate::quic::server::ServerConfig;
+use crate::PortRedirectProtocol;
 use crate::{app_data::ServerAppData, bi_stream::BiStream};
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use std::sync::Arc;
+use tokio::time::timeout;
 use tokio_util::compat::{Compat, FuturesAsyncReadCompatExt, FuturesAsyncWriteCompatExt};
 use tracing::{debug, info};
 
@@ -18,7 +21,8 @@ pub type ControlStream = BiStream<Compat<quinn::RecvStream>, Compat<quinn::SendS
 /// authenticates the client over it: verifies that the client knows the PSK of the client it
 /// names and proves that we know it, too.
 ///
-/// Called by handle_quic_client_connection, which closes the connection on failure.
+/// If that fails or takes too long, closes the connection with the reason and fails. The caller
+/// logs the error.
 #[cfg_attr(not(coverage), tracing::instrument(skip(config, conn)))]
 pub async fn authenticate_quic_client(
     config: Arc<ServerConfig<ServerAppData>>,
@@ -26,21 +30,27 @@ pub async fn authenticate_quic_client(
 ) -> Result<(ControlStream, AuthenticatedClient)> {
     debug!("Authenticating PR QUIC client");
 
-    let (send, recv) = conn
-        .open_bi()
-        .await
-        .context("failed to open the control stream")?;
-    let stream_id = recv.id();
-    debug!("opened control channel with stream id {}", stream_id);
-
-    // Convert the futures-based Quinn streams into Tokio-compatible streams.
-    let mut control_channel =
-        BiStream::new(recv.compat(), send.compat_write(), stream_id.to_string());
-
-    // The caller logs failures.
-    let binding = session_binding(&conn)?;
-    let client =
-        server_authenticate(&mut control_channel, &config.app_data.clients, &binding).await?;
+    // The control stream must outlive the closing of the connection: dropping a stream ends it,
+    // and the client could read that end before the reason, e.g. a rejected PSK, and take it for
+    // a temporary failure. So it is kept here, outside the timed authentication.
+    let mut control_stream = None;
+    let authenticated = timeout(
+        PortRedirectProtocol::AUTHENTICATION_TIMEOUT,
+        authenticate(&config, &conn, &mut control_stream),
+    )
+    .await;
+    let client = match authenticated {
+        Ok(Ok(client)) => client,
+        Ok(Err(e)) => {
+            CloseCode::AuthenticationFailed.close(&conn, "authentication failed");
+            return Err(e);
+        }
+        Err(_) => {
+            CloseCode::AuthenticationTimeout.close(&conn, "authentication timed out");
+            return Err(anyhow!("authentication timed out"));
+        }
+    };
+    let control_stream = control_stream.context("authenticated without a control stream")?;
     let psk_count = config
         .app_data
         .clients
@@ -57,5 +67,28 @@ pub async fn authenticate_quic_client(
         info!("Authenticated client {:?}", client.name.as_str());
     }
 
-    Ok((control_channel, client))
+    Ok((control_stream, client))
+}
+
+/// Opens the control stream into `control_stream` and authenticates the client over it.
+async fn authenticate(
+    config: &ServerConfig<ServerAppData>,
+    conn: &quinn::Connection,
+    control_stream: &mut Option<ControlStream>,
+) -> Result<AuthenticatedClient> {
+    let (send, recv) = conn
+        .open_bi()
+        .await
+        .context("failed to open the control stream")?;
+    let stream_id = recv.id();
+    debug!("opened control channel with stream id {}", stream_id);
+
+    // Convert the futures-based Quinn streams into Tokio-compatible streams.
+    let control_stream = control_stream.insert(BiStream::new(
+        recv.compat(),
+        send.compat_write(),
+        stream_id.to_string(),
+    ));
+    let binding = session_binding(conn)?;
+    server_authenticate(control_stream, &config.app_data.clients, &binding).await
 }

@@ -41,37 +41,23 @@ pub async fn handle_quic_client_connection(
         ProtocolVersion::V5 => {}
     }
 
-    // 1. Authenticate client.
-    let (control_stream, client) = match timeout(
-        PortRedirectProtocol::AUTHENTICATION_TIMEOUT,
-        authenticate_quic_client(Arc::clone(&config), quic_conn.clone()),
-    )
-    .await
-    {
-        Ok(Ok(authenticated)) => {
-            // Auth succeeded. Continue with the control stream.
-            config.admission.record_success(remote.ip());
-            authenticated
-        }
-        Ok(Err(err)) => {
-            config.admission.record_failure(remote.ip());
-            METRICS.authentication_failures.inc();
-            CloseCode::AuthenticationFailed.close(&quic_conn, "authentication failed");
-            return Err(err).context(format!(
-                "failed to authenticate PR QUIC client from {}",
-                remote
-            ));
-        }
-        Err(_) => {
-            config.admission.record_failure(remote.ip());
-            METRICS.authentication_failures.inc();
-            CloseCode::AuthenticationTimeout.close(&quic_conn, "authentication timed out");
-            return Err(anyhow!("authentication timed out")).context(format!(
-                "authentication timeout for PR QUIC client from {}",
-                remote
-            ));
-        }
-    };
+    // 1. Authenticate client. On failure, the connection is closed already.
+    let (control_stream, client) =
+        match authenticate_quic_client(Arc::clone(&config), quic_conn.clone()).await {
+            Ok(authenticated) => {
+                // Auth succeeded. Continue with the control stream.
+                config.admission.record_success(remote.ip());
+                authenticated
+            }
+            Err(err) => {
+                config.admission.record_failure(remote.ip());
+                METRICS.authentication_failures.inc();
+                return Err(err).context(format!(
+                    "failed to authenticate PR QUIC client from {}",
+                    remote
+                ));
+            }
+        };
 
     // From now on, all log messages of this connection name the client.
     let span = info_span!("client", name = client.name.as_str());
