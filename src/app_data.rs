@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use crate::protocol::auth::ClientName;
 use crate::server::clients::ClientList;
 use crate::server::port_registry::PortRegistry;
-use crate::server::{ForwardingLimits, PortSpec};
+use crate::server::ForwardingLimits;
 
 // Storage for application data for handler functions.
 #[derive(Clone, Debug)]
@@ -31,10 +31,11 @@ pub struct ServerAppData {
 impl ServerAppData {
     /// Returns the data of a server with a single client, named [`ClientName::DEFAULT`], which
     /// authenticates with `connection_auth_psk` and may use `local_bind_ports`.
+    #[cfg(test)]
     pub fn new(
         connection_auth_psk: SecretString,
         local_bind_ip: String,
-        local_bind_ports: Vec<PortSpec>,
+        local_bind_ports: Vec<crate::server::PortSpec>,
     ) -> Self {
         Self::with_clients(
             ClientList::single(connection_auth_psk, local_bind_ports),

@@ -2,9 +2,9 @@
 //
 // License: GPL-3.0-only
 
-pub mod auth;
-pub mod close;
-pub mod control;
-pub mod data_stream;
-pub mod keepalive;
-pub mod message;
+pub(crate) mod auth;
+pub(crate) mod close;
+pub(crate) mod control;
+pub(crate) mod data_stream;
+pub(crate) mod keepalive;
+pub(crate) mod message;

@@ -1,20 +1,22 @@
-// PortRedirect Client - Main binary
+// PortRedirect Client - Program
 //
 // License: GPL-3.0-only
 
 use anyhow::{anyhow, Context, Result};
-use portredirect::app_data::ClientAppData;
-use portredirect::client::config::Config;
-use portredirect::client::reconnect::Backoff;
-use portredirect::client::run_client::{run_client, ClientSettings};
-use portredirect::shutdown::Shutdown;
-use portredirect::{get_config_dir, init_logging};
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::process::ExitCode;
 use tracing::{error, info, span, Level};
 
+use crate::app_data::ClientAppData;
+use crate::client::config::Config;
+use crate::client::reconnect::Backoff;
+use crate::client::run_client::{run_client, ClientSettings};
+use crate::shutdown::Shutdown;
+use crate::{get_config_dir, init_logging};
+
+/// Runs the client program, `portredirect_client`, until a shutdown signal arrives.
 #[tokio::main]
-async fn main() -> ExitCode {
+pub async fn main() -> ExitCode {
     // Read the command line, the environment and the configuration file.
     let config = Config::from_command_line();
 

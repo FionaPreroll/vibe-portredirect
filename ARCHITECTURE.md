@@ -3,6 +3,13 @@
 This document gives an overview of the codebase.
 How client and server talk to each other is described in [docs/PROTOCOL.md](docs/PROTOCOL.md), the security model in [SECURITY.md](SECURITY.md).
 
+## Library
+
+The crate's library holds the code of both programs, and it is not an API.
+Its modules are private, and its only public items are the programs' entry points, `server_main` and `client_main`, which the binaries in `src/bin/` call.
+So the internals can change in any release, while the compatibility promise from 1.0 on covers what users see of the programs: their options and configuration files, the protocol, the metrics and the exit codes.
+The `missing_docs` lint fails the lint check if a module becomes public by accident.
+
 ## Modules
 
 | Path                   | Purpose                                                                                                      |
@@ -18,8 +25,10 @@ How client and server talk to each other is described in [docs/PROTOCOL.md](docs
 | `src/psk.rs`           | Command-line options for the pre-shared key and loading it, shared by both binaries.                         |
 | `src/private_files.rs` | Creates and checks files and directories holding secrets.                                                    |
 | `src/shutdown.rs`      | Graceful shutdown on signals: draining, waiting for running forwarded connections, shared by both binaries. |
-| `src/lib.rs`           | Protocol constants and logging setup, shared by both binaries.                                               |
-| `tests/*.rs`           | Integration tests, `tunnel_end_to_end.rs` runs complete tunnels in-process, including the limits and reconnecting. |
+| `src/lib.rs`           | Protocol constants and logging setup, shared by both binaries, and the programs' entry points.               |
+| `src/bin/`             | The binaries, `portredirect_server` and `portredirect_client`. Each only calls its program's `main` in the library. |
+| `src/tests/`           | In-process end-to-end tests, which use the crate's internals. `tunnel_end_to_end.rs` runs complete tunnels, including the limits and reconnecting. |
+| `tests/cli.rs`         | Tests of the programs: command line, configuration files, exit codes, signals and error messages.            |
 | `tests/*.bats`         | End-to-end tests and benchmarks of the release binaries with external tools.                                 |
 | `utils/`               | Benchmark, plotting and documentation tools.                                                                 |
 

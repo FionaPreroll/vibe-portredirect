@@ -24,7 +24,6 @@ use tokio_util::compat::Compat;
 use tracing::{debug, info, warn};
 
 /// Handles the connection to the QUIC server, authenticates and keeps it alive.
-/// Called directly by run_quic_client.
 ///
 /// When `config.shutdown` drains, the keepalive sends DRAIN, so the server stops listening for
 /// new connections, the running forwarded connections may finish within the shutdown timeout,

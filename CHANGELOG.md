@@ -26,6 +26,11 @@ Versions 0.4.0 to 0.7.0 were not published on crates.io; the latest published ve
 
 - Metric names are consistent before 1.0: they start with `portredirect_client_` or `portredirect_server_` and say what they count, e.g. `portredirect_client_bytes_to_destination_total` instead of `bytes_transmitted_b_total`. All metrics are listed from the start, with 0, and each program only serves its own. Update dashboards and alerts, see the README for the new names.
 - `--print-metrics` prints the server's metrics under their new names, each summed over all clients.
+- Log messages of the programs' main functions, e.g. the client's fatal errors, have the target `portredirect::client::main` or `portredirect::server::main` instead of `portredirect_client` or `portredirect_server`. Update `RUST_LOG` filters that name the programs.
+
+### Removed
+
+- The library's public API. The crate's library only holds the code of the two programs, so their internals can change in any release, also from 1.0 on. Version 0.3.0 on crates.io still exported them.
 
 ### Fixed
 

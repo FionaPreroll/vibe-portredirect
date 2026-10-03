@@ -22,6 +22,7 @@ use prometheus::{
 use std::convert::Infallible;
 use std::future::Future;
 use std::net::SocketAddr;
+#[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::net::TcpListener;
@@ -117,10 +118,12 @@ impl<T: MetricsCounter> MetricsCounter for &T {
     }
 }
 
-/// A counter for tests, or where the result is read directly.
+/// A counter for tests.
+#[cfg(test)]
 #[derive(Default)]
 pub struct DummyCounter(AtomicU64);
 
+#[cfg(test)]
 impl DummyCounter {
     pub fn new() -> Self {
         DummyCounter(AtomicU64::new(0))
@@ -131,6 +134,7 @@ impl DummyCounter {
     }
 }
 
+#[cfg(test)]
 impl MetricsCounter for DummyCounter {
     fn inc_by(&self, amount: u64) {
         self.0.fetch_add(amount, Ordering::Relaxed);

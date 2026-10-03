@@ -42,29 +42,6 @@ pub enum ForwardEnd {
 /// other direction goes on. As data is transferred, `counter_a` is incremented by the number of
 /// bytes read from A, `counter_b` by those read from B. With `idle_timeout`, forwarding ends when
 /// no data was transferred in either direction for that long.
-///
-/// # Examples
-///
-/// ```no_run
-/// # use portredirect::forward::{forward_bidirectional, ForwardEnd};
-/// # use portredirect::metrics::DummyCounter;
-/// # use tokio::io::{duplex, split};
-/// # #[tokio::main]
-/// # async fn main() {
-/// let (a, _peer_a) = duplex(64);
-/// let (b, _peer_b) = duplex(64);
-/// let end = forward_bidirectional(
-///     split(a),
-///     split(b),
-///     "stream1",
-///     DummyCounter::new(),
-///     DummyCounter::new(),
-///     None,
-/// )
-/// .await;
-/// assert!(matches!(end, ForwardEnd::Completed));
-/// # }
-/// ```
 pub async fn forward_bidirectional<AR, AW, BR, BW, StreamName, CounterA, CounterB>(
     (a_read, mut a_write): (AR, AW),
     (b_read, mut b_write): (BR, BW),

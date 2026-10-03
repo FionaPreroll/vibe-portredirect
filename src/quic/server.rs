@@ -126,44 +126,6 @@ impl<AppDataType> ServerConfig<AppDataType> {
 /// On success, the tuple contains the certificate chain and private key. On failure,
 /// it returns an `anyhow::Error` describing the issue encountered during file
 /// reading, parsing or generation.
-///
-/// # Examples
-///
-/// ```rust
-/// use std::path::PathBuf;
-/// use anyhow::{Result, ensure};
-/// use tempfile::TempDir;
-/// use portredirect::quic::server::load_or_generate_quic_cert;
-///
-/// fn main() -> Result<()> {
-///     // Set up a temporary directory for testing.
-///     let temp_dir = TempDir::new()?;
-///     let cert_path = temp_dir.path().join("test_cert.der");
-///     let key_path = temp_dir.path().join("test_key.der");
-///
-///     println!("Trying to load non-existent test files: cert {:?}, key {:?}", cert_path, key_path);
-///
-///     let result = load_or_generate_quic_cert("localhost".into(), key_path.clone(), cert_path.clone());
-///
-///     // Assert that no error is returned
-///     assert!(result.is_ok(), "Expected no error for nonexistent files");
-///
-///     // Validate that the certificate and key files were written.
-///     ensure!(
-///         cert_path.exists(),
-///         "Certificate file was not created at {:?}",
-///         cert_path
-///     );
-///     ensure!(
-///         key_path.exists(),
-///         "Private key file was not created at {:?}",
-///         key_path
-///     );
-///
-///     Ok(())
-/// }
-/// ```
-///
 #[instrument()]
 pub fn load_or_generate_quic_cert(
     cert_alt_name: String,
@@ -205,31 +167,6 @@ pub fn load_or_generate_quic_cert(
 ///
 /// Returns a `Result` containing a tuple with the certificate chain and private key,
 /// in a format suitable for quinn.
-///
-/// # Examples
-///
-/// ```rust
-/// use std::path::PathBuf;
-/// use anyhow::Result;
-/// use tempfile::TempDir;
-/// use portredirect::quic::server::load_quic_cert;
-///
-/// fn main() -> Result<()> {
-///     // Set up a temporary directory for testing.
-///     let temp_dir = TempDir::new()?;
-///     let cert_path = temp_dir.path().join("test_cert.der");
-///     let key_path = temp_dir.path().join("test_key.der");
-///
-///     println!("Trying to load non-existent test files: cert {:?}, key {:?}", cert_path, key_path);
-///
-///     let result = load_quic_cert(key_path, cert_path);
-///
-///     // Assert that an error is returned
-///     assert!(result.is_err(), "Expected an error for nonexistent files");
-///
-///     Ok(())
-/// }
-/// ```
 #[instrument()]
 pub fn load_quic_cert(
     key_path: PathBuf,
@@ -280,59 +217,6 @@ pub fn load_quic_cert(
 /// On success, the tuple contains the certificate chain and private key. On failure,
 /// it returns an `anyhow::Error` describing the issue encountered during file reading,
 /// writing, or parsing.
-///
-/// # Examples
-///
-/// ```rust
-/// use std::fs;
-/// use std::path::PathBuf;
-/// use tempfile::TempDir;
-/// use anyhow::{ensure, Context, Result};
-/// use rcgen::{generate_simple_self_signed, KeyPair, CertifiedKey};
-/// use portredirect::quic::server::generate_quic_cert;
-///
-/// fn main() -> Result<()> {
-///     // Set up a temporary directory for testing.
-///     let temp_dir = TempDir::new()?;
-///     let cert_path = temp_dir.path().join("test_cert.der");
-///     let key_path = temp_dir.path().join("test_key.der");
-///
-///     println!("Test files: cert {:?}, key {:?}", cert_path, key_path);
-///
-///     // Generate the self-signed certificate and private key.
-///     let (cert_chain, private_key) = generate_quic_cert("localhost".into(), key_path.clone(), cert_path.clone())?;
-///
-///     // Validate that the certificate and key files were written.
-///     ensure!(
-///         cert_path.exists(),
-///         "Certificate file was not created at {:?}",
-///         cert_path
-///     );
-///     ensure!(
-///         key_path.exists(),
-///         "Private key file was not created at {:?}",
-///         key_path
-///     );
-///
-///     // Load and verify the written certificate and key.
-///     let loaded_cert = fs::read(&cert_path).context("failed to read certificate")?;
-///     let loaded_key = fs::read(&key_path).context("failed to read private key")?;
-///
-///     // Ensure the loaded values match the returned outputs.
-///     ensure!(
-///         loaded_cert == cert_chain[0].as_ref(),
-///         "Loaded certificate does not match generated certificate"
-///     );
-///     ensure!(
-///         loaded_key == private_key.secret_der(),
-///         "Loaded private key does not match generated key"
-///     );
-///
-///     println!("Certificate and key successfully generated and verified!");
-///
-///     Ok(())
-/// }
-/// ```
 #[instrument()]
 pub fn generate_quic_cert(
     cert_alt_name: String,
@@ -681,6 +565,17 @@ mod tests {
         assert!(generate_quic_cert("localhost".into(), key_path, cert_path.clone()).is_err());
 
         assert_eq!(fs::read(&cert_path)?, b"existing certificate");
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_missing_files_fails() -> Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let (key_path, cert_path) = cert_paths(&temp_dir);
+
+        let err = load_quic_cert(key_path, cert_path).unwrap_err();
+
+        assert!(err.to_string().contains("private key"), "{}", err);
         Ok(())
     }
 

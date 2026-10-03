@@ -4,7 +4,7 @@
 // Based on: Quinn example code (originally licensed under Apache-2.0/MIT)
 // Original: https://github.com/quinn-rs/quinn/blob/204b14792b5e92eb2c43cdb1ff05426412ff4466/quinn/examples/client.rs
 
-use anyhow::{Context, Error, Result};
+use anyhow::{Context, Result};
 use quinn::crypto::rustls::QuicClientConfig;
 use rustls::pki_types::CertificateDer;
 use std::time::Duration;
@@ -20,7 +20,6 @@ use crate::PortRedirectProtocol;
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug)]
-#[allow(unused)]
 pub struct ClientConfig<AppDataType> {
     pub remote_hostname_match: Option<String>,
     pub ca_path: Option<PathBuf>,
@@ -39,7 +38,6 @@ pub struct ClientConfig<AppDataType> {
 }
 
 impl<AppDataType> ClientConfig<AppDataType> {
-    #[allow(unused)]
     pub fn create_default_config(
         config_dir: PathBuf,
         local_socket: SocketAddr,
@@ -150,20 +148,21 @@ impl<AppDataType> QuicClient<AppDataType> {
     }
 }
 
-/// Connects to the server once and runs `handle_incoming` for the connection.
+/// Connects to the server once and runs `handle_incoming` for the connection, for tests.
 ///
 /// Returns the handler's result.
 ///
 /// Prerequisite: A rustls CryptoProvider must be available before calling this function,
 /// call CryptoProvider::install_default() before this point.
+#[cfg(test)]
 #[cfg_attr(not(coverage), tracing::instrument(skip(config, handle_incoming)))]
 pub async fn run_quic_client<F, Fut, AppDataType>(
     config: ClientConfig<AppDataType>,
     handle_incoming: F,
-) -> Result<(), Error>
+) -> Result<()>
 where
     F: Fn(Arc<ClientConfig<AppDataType>>, quinn::Connection) -> Fut + Send + Sync + 'static,
-    Fut: std::future::Future<Output = Result<(), Error>> + Send + 'static,
+    Fut: std::future::Future<Output = Result<()>> + Send + 'static,
 {
     let client = QuicClient::new(config)?;
     let connection = client.connect().await?;

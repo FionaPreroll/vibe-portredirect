@@ -209,7 +209,7 @@ where
 }
 
 /// IDs of the parameters, see docs/PROTOCOL.md.
-pub mod param {
+pub(crate) mod param {
     /// The sender's software and version, e.g. `portredirect_client 1.0.0`. Only for logs.
     pub const SOFTWARE: u16 = 1;
     /// The port the server should listen on, or listens on.

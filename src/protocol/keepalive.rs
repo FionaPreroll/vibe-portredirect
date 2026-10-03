@@ -92,8 +92,8 @@ where
 #[derive(Debug)]
 pub enum ControlChannelEnd {
     /// The client ended the control stream, or the stream failed, e.g. because the connection
-    /// was lost.
-    StreamClosed(Option<anyhow::Error>),
+    /// was lost. The error is only logged, with `Debug`, which dead code analysis ignores.
+    StreamClosed(#[allow(dead_code)] Option<anyhow::Error>),
     /// No message arrived in time.
     Timeout,
     /// The client sent an unexpected or invalid message.

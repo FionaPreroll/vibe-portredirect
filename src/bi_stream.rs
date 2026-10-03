@@ -11,29 +11,6 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 /// This struct provides a unified interface to both read from and write to a stream while
 /// preserving separate components. It implements both [`AsyncRead`] and [`AsyncWrite`]
 /// from the Tokio library.
-///
-/// # Examples
-///
-/// ```rust
-/// # use tokio::io::{AsyncReadExt, AsyncWriteExt};
-/// # use tokio::net::TcpStream;
-/// # use portredirect::bi_stream::BiStream;
-/// # async fn run() -> std::io::Result<()> {
-/// // For example, split a TCP stream:
-/// let tcp_stream = TcpStream::connect("127.0.0.1:8080").await?;
-/// let (read_half, write_half) = tcp_stream.into_split();
-///
-/// let mut stream = BiStream::new(read_half, write_half, "MyTcpStream".to_string());
-///
-/// // Use the stream as an AsyncRead
-/// let mut buf = [0; 1024];
-/// let _ = stream.read.read(&mut buf).await?;
-///
-/// // And as an AsyncWrite
-/// let _ = stream.write.write(b"hello").await?;
-/// # Ok(())
-/// # }
-/// ```
 pub struct BiStream<R, W> {
     /// The asynchronous reader component.
     pub read: R,
