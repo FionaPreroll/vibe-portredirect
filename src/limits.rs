@@ -88,6 +88,126 @@ impl Drop for AddressConnectionGuard {
     }
 }
 
+/// Limits how fast new connections may come from each network address (see [`address_key`]).
+///
+/// Each address has a bucket of up to `burst` tokens, which refills at `rate` tokens per second,
+/// and each connection takes a token. So an address may open `burst` connections at once, and
+/// then `rate` per second.
+#[derive(Debug)]
+pub struct AddressRateLimit {
+    /// Tokens per second, 0 for no limit.
+    rate: u32,
+    /// Size of each bucket.
+    burst: u32,
+    buckets: Mutex<Buckets>,
+}
+
+/// The buckets of an [`AddressRateLimit`].
+#[derive(Debug)]
+struct Buckets {
+    by_address: HashMap<IpAddr, TokenBucket>,
+    /// Number of addresses from which on full buckets are forgotten.
+    next_cleanup: usize,
+    last_cleanup: Instant,
+}
+
+#[derive(Debug)]
+struct TokenBucket {
+    tokens: f64,
+    updated: Instant,
+}
+
+impl TokenBucket {
+    /// Adds the tokens gained since the last update, up to `burst`.
+    fn refill(&mut self, now: Instant, rate: u32, burst: u32) {
+        let gained = now.duration_since(self.updated).as_secs_f64() * f64::from(rate);
+        self.tokens = (self.tokens + gained).min(f64::from(burst));
+        self.updated = now;
+    }
+}
+
+impl AddressRateLimit {
+    /// Upper bound for the number of addresses tracked at a time, to bound memory use.
+    const MAX_TRACKED_ADDRESSES: usize = 65536;
+
+    /// Number of addresses up to which full buckets are kept.
+    const MIN_CLEANUP: usize = 1024;
+
+    /// Time between attempts to forget full buckets while tracking the maximum number of
+    /// addresses, which costs time.
+    const CLEANUP_INTERVAL: Duration = Duration::from_secs(1);
+
+    /// Creates a limit of `rate` new connections per second and address, after `burst` at once.
+    /// A rate of 0 means no limit.
+    pub fn new(rate: u32, burst: u32) -> Self {
+        Self {
+            rate,
+            burst,
+            buckets: Mutex::new(Buckets {
+                by_address: HashMap::new(),
+                next_cleanup: Self::MIN_CLEANUP,
+                last_cleanup: Instant::now(),
+            }),
+        }
+    }
+
+    /// Takes a token for a new connection from `ip`. Returns false if its address has none left.
+    pub fn try_take(&self, ip: IpAddr) -> bool {
+        if self.rate == 0 {
+            return true;
+        }
+        let now = Instant::now();
+        let key = address_key(ip);
+        let mut buckets = self.lock();
+        if !buckets.by_address.contains_key(&key) && !self.make_room(&mut buckets, now) {
+            // Too many addresses to track: let this one pass rather than use more memory.
+            return true;
+        }
+        let bucket = buckets.by_address.entry(key).or_insert(TokenBucket {
+            tokens: f64::from(self.burst),
+            updated: now,
+        });
+        bucket.refill(now, self.rate, self.burst);
+        if bucket.tokens >= 1.0 {
+            bucket.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Makes room for another address by forgetting full buckets, which are like new ones, once
+    /// enough addresses are tracked. Returns false if there is no room.
+    fn make_room(&self, buckets: &mut Buckets, now: Instant) -> bool {
+        let tracked = buckets.by_address.len();
+        let at_maximum = tracked >= Self::MAX_TRACKED_ADDRESSES;
+        let due = !at_maximum || now >= buckets.last_cleanup + Self::CLEANUP_INTERVAL;
+        if tracked >= buckets.next_cleanup && due {
+            let (rate, burst) = (self.rate, self.burst);
+            buckets.by_address.retain(|_, bucket| {
+                bucket.refill(now, rate, burst);
+                bucket.tokens < f64::from(burst)
+            });
+            let remaining = buckets.by_address.len();
+            buckets.next_cleanup =
+                (2 * remaining).clamp(Self::MIN_CLEANUP, Self::MAX_TRACKED_ADDRESSES);
+            buckets.last_cleanup = now;
+        }
+        buckets.by_address.len() < Self::MAX_TRACKED_ADDRESSES
+    }
+
+    /// Returns the number of addresses with a bucket.
+    #[cfg(test)]
+    fn tracked(&self) -> usize {
+        self.lock().by_address.len()
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Buckets> {
+        // The buckets stay consistent even if a thread panicked while holding the lock.
+        self.buckets.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
 /// When an address gets blocked after failed authentication attempts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BlockingPolicy {
@@ -411,5 +531,82 @@ mod tests {
         tokio::time::advance(Duration::from_secs(61)).await;
         admission.record_failure(ip("198.51.100.1"));
         assert_eq!(admission.lock_failures().len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_rate_limit_allows_a_burst_then_the_rate() {
+        let limit = AddressRateLimit::new(2, 3);
+        let host = ip("192.0.2.1");
+
+        // A burst of 3 at once, then nothing until a token comes back.
+        assert!((0..3).all(|_| limit.try_take(host)));
+        assert!(!limit.try_take(host));
+        tokio::time::advance(Duration::from_millis(400)).await;
+        assert!(!limit.try_take(host));
+        tokio::time::advance(Duration::from_millis(100)).await;
+        assert!(limit.try_take(host));
+        assert!(!limit.try_take(host));
+
+        // After a pause, the bucket is full again, but not fuller.
+        tokio::time::advance(Duration::from_secs(60)).await;
+        assert!((0..3).all(|_| limit.try_take(host)));
+        assert!(!limit.try_take(host));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_rate_limit_counts_per_address() {
+        let limit = AddressRateLimit::new(1, 1);
+        assert!(limit.try_take(ip("192.0.2.1")));
+        assert!(!limit.try_take(ip("192.0.2.1")));
+        // Another address has its own bucket, a host's /64 network shares one.
+        assert!(limit.try_take(ip("192.0.2.2")));
+        assert!(limit.try_take(ip("2001:db8:1:2::1")));
+        assert!(!limit.try_take(ip("2001:db8:1:2::2")));
+        assert!(limit.try_take(ip("2001:db8:1:3::1")));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_rate_limit_zero_is_no_limit() {
+        let limit = AddressRateLimit::new(0, 1);
+        assert!((0..1000).all(|_| limit.try_take(ip("192.0.2.1"))));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_rate_limit_forgets_full_buckets() {
+        let limit = AddressRateLimit::new(10, 2);
+        let address = |i: u32| IpAddr::V4(Ipv4Addr::from(0x0a00_0000 + i));
+        let kept = AddressRateLimit::MIN_CLEANUP as u32;
+        for i in 0..kept {
+            assert!(limit.try_take(address(i)));
+        }
+        assert_eq!(limit.tracked(), AddressRateLimit::MIN_CLEANUP);
+
+        // Their buckets are full again, so the next new address makes the limit forget them.
+        tokio::time::advance(Duration::from_millis(100)).await;
+        assert!(limit.try_take(address(kept)));
+        assert_eq!(limit.tracked(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_rate_limit_tracks_a_bounded_number_of_addresses() {
+        let limit = AddressRateLimit::new(1, 1);
+        let address = |i: u32| IpAddr::V4(Ipv4Addr::from(0x0a00_0000 + i));
+        let max = AddressRateLimit::MAX_TRACKED_ADDRESSES as u32;
+        for i in 0..max {
+            assert!(limit.try_take(address(i)));
+        }
+
+        // None of the buckets is full again, so further addresses aren't tracked, and pass.
+        assert!(limit.try_take(address(max)));
+        assert!(limit.try_take(address(max)));
+        assert_eq!(limit.tracked(), AddressRateLimit::MAX_TRACKED_ADDRESSES);
+        // A tracked address is still limited.
+        assert!(!limit.try_take(address(0)));
+
+        // Once the buckets are full again, the limit forgets them, at most once a second.
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(limit.try_take(address(max)));
+        assert!(!limit.try_take(address(max)));
+        assert_eq!(limit.tracked(), 1);
     }
 }

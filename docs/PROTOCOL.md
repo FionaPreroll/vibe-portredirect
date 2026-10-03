@@ -267,6 +267,7 @@ Addresses are counted per IPv4 address and per IPv6 /64 network, because a singl
 | Failed handshakes or authentication attempts per address  | 5 within 10 minutes |                            | The address is blocked for 10 minutes: its connections are refused.  |
 | Forwarded connections per client                          | 512                 | `--max-connections`        | New external connections wait in the listen backlog.                 |
 | Forwarded connections per external address                | 64                  | `--max-connections-per-ip` | New external connections are closed right away.                      |
+| New forwarded connections per external address            | 64 at once, then 20 per second | `--max-connection-burst-per-ip`, `--max-connection-rate-per-ip` | New external connections are closed right away. |
 | Time without data transfer on a forwarded connection      | 600 s               | `--idle-timeout`           | The connection is closed.                                            |
 
 Handshake and authentication timeouts count as failed attempts, and so do unknown client names.

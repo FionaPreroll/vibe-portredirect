@@ -18,7 +18,7 @@ The `missing_docs` lint fails the lint check if a module becomes public by accid
 | `src/client/`          | `portredirect_client`: program (`main.rs`), its configuration from command line and file (`config.rs`), connecting and reconnecting (`run_client.rs`, `reconnect.rs`), handling of the server connection (`server_handler.rs`) including the authentication (`auth.rs`), forwarding to the destination, metrics (`metrics.rs`). |
 | `src/protocol/`        | Messages on the control stream: authentication (`auth.rs`), message and parameter format (`message.rs`), `HELLO`/`WELCOME` (`control.rs`), keepalive and `DRAIN` (`keepalive.rs`). Header and error codes of data streams (`data_stream.rs`), codes for closing connections (`close.rs`). |
 | `src/quic/`            | QUIC endpoints of both sides, certificate loading and generation, trusting the server's certificate by fingerprint (`fingerprint.rs`), protocol versions (ALPN) and transport settings, admission of new connections on the server. |
-| `src/limits.rs`        | Connection limits per address, blocking of addresses after failed authentication attempts.                   |
+| `src/limits.rs`        | Connection limits per address, how fast an address may open connections, blocking of addresses after failed authentication attempts. |
 | `src/forward.rs`       | Copies data in both directions between a TCP connection and a QUIC stream, passes on aborts, closes idle connections. |
 | `src/metrics.rs`       | Prometheus endpoint and helpers for the metrics, shared by both binaries.                                    |
 | `src/config.rs`        | Configuration files: reading them, their precedence and values, shared by both binaries.                     |

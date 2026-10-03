@@ -3,7 +3,7 @@
 // License: GPL-3.0-only
 
 use crate::forward::reset_tcp;
-use crate::limits::AddressConnectionLimit;
+use crate::limits::{AddressConnectionLimit, AddressRateLimit};
 use crate::metrics::Active;
 use crate::protocol::data_stream::send_connection_header;
 use crate::server::metrics::ClientMetrics;
@@ -59,14 +59,20 @@ async fn accept_connections(
 ) -> Result<()> {
     let limits = config.app_data.forwarding_limits;
     info!(
-        "TCP listening on {} (at most {} connections, {} per address)",
+        "TCP listening on {} (at most {} connections, {} per address, {} new ones per second and address after {} at once)",
         listener.local_addr()?,
         limits.max_connections,
-        limits.max_connections_per_ip
+        limits.max_connections_per_ip,
+        limits.max_connection_rate_per_ip,
+        limits.max_connection_burst_per_ip
     );
 
     let connection_slots = Arc::new(Semaphore::new(limits.max_connections));
     let address_limit = AddressConnectionLimit::new(limits.max_connections_per_ip);
+    let rate_limit = AddressRateLimit::new(
+        limits.max_connection_rate_per_ip,
+        limits.max_connection_burst_per_ip,
+    );
 
     loop {
         // Wait for a free slot first: while all slots are in use, new connections wait in the
@@ -93,13 +99,23 @@ async fn accept_connections(
         };
         // Limit the connections per address, so a single host can't use up all slots.
         let Some(address_slot) = address_limit.try_acquire(peer_addr.ip()) else {
-            metrics.forwarded_connections_refused.inc();
+            metrics.forwarded_connections_refused.address_limit.inc();
             debug!(
                 "Closing TCP connection from {}: too many connections from this address",
                 peer_addr
             );
             continue;
         };
+        // Limit how fast a single host can open forwarded connections, as each makes the client
+        // connect to the destination.
+        if !rate_limit.try_take(peer_addr.ip()) {
+            metrics.forwarded_connections_refused.rate_limit.inc();
+            debug!(
+                "Closing TCP connection from {}: too many new connections from this address",
+                peer_addr
+            );
+            continue;
+        }
         debug!("Accepted TCP connection from {}", peer_addr);
         metrics.forwarded_connections.inc();
 

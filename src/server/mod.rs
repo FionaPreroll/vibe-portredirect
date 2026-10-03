@@ -26,12 +26,23 @@ pub struct ForwardingLimits {
     /// Maximum number of concurrently forwarded connections per external address (IPv6: per /64
     /// network), 0 for no limit. Further connections are closed right away.
     pub max_connections_per_ip: usize,
+    /// Maximum number of new forwarded connections per second and external address, 0 for no
+    /// limit, after `max_connection_burst_per_ip` at once. Further connections are closed right
+    /// away.
+    pub max_connection_rate_per_ip: u32,
+    /// Number of new connections an external address may open at once, see
+    /// `max_connection_rate_per_ip`.
+    pub max_connection_burst_per_ip: u32,
     /// Forwarded connections are closed after this long without data transfer, if set.
     pub idle_timeout: Option<Duration>,
 }
 
 impl ForwardingLimits {
     pub const DEFAULT_MAX_CONNECTIONS_PER_IP: usize = 64;
+    pub const DEFAULT_MAX_CONNECTION_RATE_PER_IP: u32 = 20;
+    /// As many as the default allows at the same time.
+    pub const DEFAULT_MAX_CONNECTION_BURST_PER_IP: u32 =
+        Self::DEFAULT_MAX_CONNECTIONS_PER_IP as u32;
     pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 }
 
@@ -40,6 +51,8 @@ impl Default for ForwardingLimits {
         Self {
             max_connections: PortRedirectProtocol::DEFAULT_MAX_FORWARDED_CONNECTIONS,
             max_connections_per_ip: Self::DEFAULT_MAX_CONNECTIONS_PER_IP,
+            max_connection_rate_per_ip: Self::DEFAULT_MAX_CONNECTION_RATE_PER_IP,
+            max_connection_burst_per_ip: Self::DEFAULT_MAX_CONNECTION_BURST_PER_IP,
             idle_timeout: Some(Self::DEFAULT_IDLE_TIMEOUT),
         }
     }

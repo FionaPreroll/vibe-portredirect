@@ -819,6 +819,65 @@ async fn connections_per_address_are_limited() -> Result<()> {
     .await
 }
 
+#[tokio::test]
+async fn new_connections_per_address_are_rate_limited() -> Result<()> {
+    let (config_dir, _logs) = setup();
+    let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
+    let echo_addr = start_echo_server().await;
+    let (busy_host, other_host) = (Ipv4Addr::new(127, 0, 0, 4), Ipv4Addr::new(127, 0, 0, 5));
+
+    // Two connections at once, then one every half second. The client's name keeps its metrics
+    // apart from other tests.
+    let name = "rate-limited";
+    let mut config = server_config_with_clients(
+        config_dir.path(),
+        quic_port,
+        &[(name, &[TEST_PSK], listen_port)],
+    );
+    config.app_data.forwarding_limits = ForwardingLimits {
+        max_connection_rate_per_ip: 2,
+        max_connection_burst_per_ip: 2,
+        ..ForwardingLimits::default()
+    };
+    let _server = spawn_server_with_handler(config, handle_quic_client_connection);
+    let metrics = METRICS.client(&name.parse().unwrap());
+    let _client = start_named_client(
+        config_dir.path(),
+        quic_port,
+        name,
+        TEST_PSK,
+        echo_addr,
+        listen_port,
+    );
+
+    with_timeout(async {
+        let ready = connect_through_tunnel(listen_port).await?;
+        assert_eq!(echo_roundtrip(ready, b"ready".to_vec()).await?, b"ready");
+
+        // Two connections from one address are forwarded, a third one right after is closed,
+        // even though the first ones have ended.
+        for message in [&b"first"[..], b"second"] {
+            let mut stream = connect_from(busy_host, listen_port).await?;
+            echo_once(&mut stream, message).await?;
+        }
+        let mut third = connect_from(busy_host, listen_port).await?;
+        assert!(closed_by_peer(&mut third, Duration::from_secs(5)).await);
+        assert_eq!(metrics.forwarded_connections_refused.rate_limit.get(), 1);
+        assert_eq!(metrics.forwarded_connections_refused.address_limit.get(), 0);
+
+        // Other addresses are not affected.
+        let mut other = connect_from(other_host, listen_port).await?;
+        echo_once(&mut other, b"other").await?;
+
+        // Half a second later, the address may open another one.
+        sleep(Duration::from_millis(600)).await;
+        let mut later = connect_from(busy_host, listen_port).await?;
+        echo_once(&mut later, b"later").await?;
+        Ok(())
+    })
+    .await
+}
+
 /// Many idle connections from one host must not block the tunnel for others.
 #[cfg(target_os = "linux")]
 #[tokio::test]
@@ -1453,7 +1512,7 @@ async fn server_metrics_count_per_client() -> Result<()> {
         // A second connection from the same address is refused.
         let mut second = TcpStream::connect(localhost(listen_port)).await?;
         assert!(closed_by_peer(&mut second, Duration::from_secs(5)).await);
-        assert_eq!(a.forwarded_connections_refused.get(), 1);
+        assert_eq!(a.forwarded_connections_refused.address_limit.get(), 1);
 
         drop(first);
         wait_for_metric(
