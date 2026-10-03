@@ -15,7 +15,7 @@ Both use a pre-shared key (PSK) for authentication. The server auto-generates a 
 
 ### **Bling:**
 
-[![codecov](https://codecov.io/gh/unspezifisch/portredirect/graph/badge.svg?token=TJSQNU6NMR)](https://codecov.io/gh/unspezifisch/portredirect)
+[![codecov](https://codecov.io/gh/FionaPreroll/vibe-portredirect/graph/badge.svg)](https://codecov.io/gh/FionaPreroll/vibe-portredirect)
 
 ### Concept
 
@@ -52,7 +52,7 @@ cargo install --locked --path .
 
 `--locked` uses the dependency versions from `Cargo.lock`, which are the ones tested and audited in CI.
 
-> **Note:** The `portredirect` 0.3.0 package on crates.io predates protocol version 2 (see [docs/PROTOCOL.md](docs/PROTOCOL.md)) and can't talk to this version. Server and client must speak the same protocol version.
+> **Note:** The latest `portredirect` package on crates.io, version 0.3.0, predates protocol version 2 (see [docs/PROTOCOL.md](docs/PROTOCOL.md)) and can't talk to this version. It will be updated once this version has proven stable in practice. Server and client must speak the same protocol version.
 
 ## Usage
 

@@ -1,25 +1,25 @@
 [package]
 name = "portredirect"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.88.0"
 description = "PortRedirect is a tool that bridges your frontend and backend by redirecting TCP connections through a persistent QUIC connection. It provides both a server (accepting TCP connections and forwarding them via QUIC) and a client (relaying QUIC streams to a TCP destination)."
 license = "GPL-3.0-only"
 readme = "README.md"
-repository = "https://github.com/unspezifisch/portredirect"
-homepage = "https://github.com/unspezifisch/portredirect"
+repository = "https://github.com/FionaPreroll/vibe-portredirect"
+homepage = "https://github.com/FionaPreroll/vibe-portredirect"
 documentation = "https://docs.rs/portredirect"
 keywords = ["tcp", "quic", "networking", "port-forwarding"]
 categories = ["network-programming", "command-line-utilities"]
 
-authors = ["unspezifisch <unspezifisch@futurewidgets.eu>"]
+authors = ["Fiona <fipreroll+app@gmail.com>"]
 
 [dependencies]
 anyhow = "1.0.97"
 chrono = "0.4.40"
 clap = { version = "4.5.31", features = ["derive", "env"] }
 dirs = "6.0.0"
-getrandom = "0.3.1"
+getrandom = "0.4.3"
 hex = "0.4.3"
 http-body-util = "0.1.5"
 hyper = { version = "1.9.0", features = ["server", "http1"] }
