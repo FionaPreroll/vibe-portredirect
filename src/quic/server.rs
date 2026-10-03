@@ -317,7 +317,7 @@ pub fn generate_quic_cert(
 ) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
     info!("generating self-signed certificate");
     let cert = rcgen::generate_simple_self_signed(vec![cert_alt_name]).unwrap();
-    let key = PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
+    let key = PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der());
 
     // Write certificate and private key to files.
     let cert = CertificateDer::from(cert.cert);
@@ -503,13 +503,13 @@ mod tests {
 
         let generated = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
         fs::write(&cert_path, generated.cert.pem())?;
-        fs::write(&key_path, generated.key_pair.serialize_pem())?;
+        fs::write(&key_path, generated.signing_key.serialize_pem())?;
 
         let (cert_chain, key) = load_quic_cert(key_path, cert_path)?;
 
         assert_eq!(cert_chain.len(), 1);
         assert_eq!(cert_chain[0].as_ref(), generated.cert.der().as_ref());
-        assert_eq!(key.secret_der(), generated.key_pair.serialize_der());
+        assert_eq!(key.secret_der(), generated.signing_key.serialize_der());
         Ok(())
     }
 
