@@ -52,7 +52,7 @@ cargo install --locked --path .
 
 `--locked` uses the dependency versions from `Cargo.lock`, which are the ones tested and audited in CI.
 
-> **Note:** The latest `portredirect` package on crates.io, version 0.3.0, predates the current protocol version 4 (see [docs/PROTOCOL.md](docs/PROTOCOL.md)) and can't talk to this version. It will be updated once this version has proven stable in practice. Server and client must speak the same protocol version.
+> **Note:** The latest `portredirect` package on crates.io, version 0.3.0, predates the current protocol version 5 (see [docs/PROTOCOL.md](docs/PROTOCOL.md)) and can't talk to this version. It will be updated once this version has proven stable in practice. Server and client must speak the same protocol version.
 > [CHANGELOG.md](CHANGELOG.md) lists the changes between versions and which ones changed the protocol.
 
 ## Usage
@@ -108,6 +108,7 @@ portredirect_client \
 - **`--quic-remote-host` & `--quic-remote-port`:** The QUIC server’s address.
 - **`--quic-remote-hostname-match`** (optional): Name the server's certificate must be issued for, if it differs from `--quic-remote-host`. Must match the server's `--quic-cert-hostname`.
 - **`--quic-psk-file`:** File containing the pre-shared key, must match the server’s PSK.
+- **`--client-name`** (optional): Name the client authenticates with, 1 to 64 letters, digits, dots, underscores or hyphens (default `default`). A server configured on the command line knows a single client named `default`.
 - **`--config-dir`:** Where the server's certificate `cert.der` is read from (default `~/.config/portredirect`).
 - **`--max-connections`:** Maximum number of concurrently forwarded connections (default 512).
 - **`--provide-metrics`:** Serve Prometheus metrics at `http://127.0.0.1:9898/metrics`, or at the address given with `--metrics-listen`. The endpoint has no authentication, only make it reachable from trusted networks.
@@ -123,6 +124,7 @@ It only exits:
 
 - with code 0 on `SIGINT` or `SIGTERM`, after closing the connection, so the server releases the port right away;
 - with code 1 if connecting again would fail the same way until the configuration changes, e.g. because the server rejects the PSK or the port, or the server's certificate doesn't match `cert.der`;
+- with code 1 if another client with the same name took over the port, e.g. a second instance by mistake: otherwise, the two would take the port from each other in turns;
 - with code 2 on invalid command-line arguments.
 
 Under a service manager, restart the client on failures only, and not right away, e.g. with systemd:
@@ -135,6 +137,8 @@ RestartSec=60
 ```
 
 On `SIGINT` or `SIGTERM`, the server closes all connections, so its clients notice right away and connect again once it is back.
+
+If the client connects again while the server still holds the port for its previous connection, e.g. after the client crashed, the new connection replaces the previous one right away.
 
 ### PSK Best Practices
 
@@ -152,7 +156,7 @@ Both programs accept the PSK from one of these sources:
 
 ## Authentication & Certificate Verification
 
-PortRedirect secures QUIC tunnels using auto-generated certificates and a pre-shared key (PSK). The client verifies the server’s certificate, then client and server prove to each other that they know the PSK, with HMAC proofs bound to the TLS session.
+PortRedirect secures QUIC tunnels using auto-generated certificates and a pre-shared key (PSK). The client verifies the server’s certificate, then the client names itself, and client and server prove to each other that they know the client's PSK, with HMAC proofs bound to the TLS session.
 Only after that, the server opens the TCP port the client asked for. Addresses that fail to authenticate repeatedly are blocked for a while.
 
 - [docs/PROTOCOL.md](docs/PROTOCOL.md) describes the protocol in detail.
@@ -222,7 +226,7 @@ PortRedirect is ideal for simple TCP-to-QUIC tunneling setups:
 - **Protocol Support:** Currently supports IPv4 and TCP.
 - **Connection Model:** Each client gets its own TCP port on the server. Several clients can share a server if it allows several ports.
 - **Scalability:** Not yet optimized for extremely high concurrency, a client forwards at most 512 connections at the same time by default.
-- **Reliability:** The client reconnects on its own, see [Reconnects and Exit Codes](#reconnects-and-exit-codes).
+- **Reliability:** The client reconnects on its own, see [Reconnects and Exit Codes](#reconnects-and-exit-codes). Aborted connections are passed on: if one side resets its TCP connection, or the tunnel breaks down, the other side's connection is reset, too, so truncated transfers don't look complete.
 - **Security:** We try our best but no guarantees, see the known limitations in [SECURITY](SECURITY.md#known-limitations).
 
 ## License
