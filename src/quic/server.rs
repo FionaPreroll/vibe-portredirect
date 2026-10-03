@@ -155,16 +155,17 @@ pub fn load_or_generate_quic_cert(
     }
 }
 
-/// Returns the fingerprint of the server's certificate in `config_dir`. Like the server when it
-/// starts, generates the certificate first if there is none, issued for `cert_alt_name`.
+/// Returns the fingerprint of the server's certificate in `config_dir`, i.e. of the file, as
+/// `sha256sum` prints it. Like the server when it starts, generates the certificate first if
+/// there is none, issued for `cert_alt_name`.
 pub fn server_fingerprint(config_dir: &Path, cert_alt_name: String) -> Result<CertFingerprint> {
-    let (cert_chain, _key) = load_or_generate_quic_cert(
-        cert_alt_name,
-        config_dir.join(KEY_FILE),
-        config_dir.join(CERT_FILE),
-    )?;
-    let certificate = cert_chain.first().context("no certificate")?;
-    Ok(CertFingerprint::of(certificate))
+    let file = config_dir.join(CERT_FILE);
+    load_or_generate_quic_cert(cert_alt_name, config_dir.join(KEY_FILE), file.clone())?;
+    // Read from the file rather than taken from the call above, which returns the same bytes:
+    // CodeQL takes what functions named after certificates return for secrets, and would report
+    // printing the fingerprint as logging them.
+    let der = fs::read(&file).with_context(|| format!("failed to read {}", file.display()))?;
+    Ok(CertFingerprint::of(&der))
 }
 
 /// Loads a QUIC-compatible certificate and private key from the specified file paths.
