@@ -157,7 +157,7 @@ pub fn load_or_generate_quic_cert(
 
 /// Returns the fingerprint of the server's certificate in `config_dir`. Like the server when it
 /// starts, generates the certificate first if there is none, issued for `cert_alt_name`.
-pub fn cert_fingerprint(config_dir: &Path, cert_alt_name: String) -> Result<CertFingerprint> {
+pub fn server_fingerprint(config_dir: &Path, cert_alt_name: String) -> Result<CertFingerprint> {
     let (cert_chain, _key) = load_or_generate_quic_cert(
         cert_alt_name,
         config_dir.join(KEY_FILE),
@@ -597,17 +597,17 @@ mod tests {
         let temp_dir = tempfile::tempdir()?;
 
         // Generated first, if there is no certificate yet, then loaded.
-        let generated = cert_fingerprint(temp_dir.path(), "localhost".into())?;
+        let generated = server_fingerprint(temp_dir.path(), "localhost".into())?;
         let certificate = fs::read(temp_dir.path().join(CERT_FILE))?;
         assert_eq!(generated, CertFingerprint::of(&certificate));
         assert_eq!(
-            cert_fingerprint(temp_dir.path(), "other".into())?,
+            server_fingerprint(temp_dir.path(), "other".into())?,
             generated
         );
 
         // Like the server, it doesn't replace a certificate whose key is missing.
         fs::remove_file(temp_dir.path().join(KEY_FILE))?;
-        assert!(cert_fingerprint(temp_dir.path(), "localhost".into()).is_err());
+        assert!(server_fingerprint(temp_dir.path(), "localhost".into()).is_err());
         assert_eq!(fs::read(temp_dir.path().join(CERT_FILE))?, certificate);
         Ok(())
     }

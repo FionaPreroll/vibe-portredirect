@@ -9,6 +9,12 @@ mod quic_end_to_end_minimal;
 mod quic_end_to_end_multiple_clients;
 mod tunnel_end_to_end;
 
+use std::collections::hash_map::RandomState;
+use std::hash::BuildHasher;
+use std::net::{Ipv4Addr, SocketAddr};
+use std::ops::Range;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::LazyLock;
 use tracing::subscriber::DefaultGuard;
 
 /// Sends the log messages of the current thread to the test's output, which is shown if the test
@@ -23,4 +29,36 @@ fn capture_logs() -> DefaultGuard {
             .with_test_writer()
             .finish(),
     )
+}
+
+/// Ports for the tests' servers and listeners, handed out one at a time.
+///
+/// The operating system picks the ports of sockets bound to port 0, which includes outgoing
+/// connections, from a range above these: from 32768 on Linux, from 49152 on macOS and Windows.
+/// So neither another test nor such a socket can take a port between a test finding it free and
+/// binding it. `tests/cli.rs` uses the ports below these.
+const TEST_PORTS: Range<u16> = 20000..32000;
+
+/// Returns a port from [`TEST_PORTS`] that no other test got, and that `is_free` finds free.
+fn unused_port(is_free: impl Fn(SocketAddr) -> bool) -> u16 {
+    // A random start makes collisions with test programs running at the same time unlikely.
+    static START: LazyLock<usize> =
+        LazyLock::new(|| RandomState::new().hash_one(0) as usize % TEST_PORTS.len());
+    static HANDED_OUT: AtomicUsize = AtomicUsize::new(0);
+    let len = TEST_PORTS.len();
+    (0..len)
+        .map(|_| HANDED_OUT.fetch_add(1, Ordering::Relaxed))
+        .map(|n| TEST_PORTS.start + ((*START + n) % len) as u16)
+        .find(|&port| is_free(SocketAddr::from((Ipv4Addr::LOCALHOST, port))))
+        .expect("no free port for tests")
+}
+
+/// Returns a TCP port on localhost for a test alone, see [`TEST_PORTS`].
+fn free_tcp_port() -> u16 {
+    unused_port(|addr| std::net::TcpListener::bind(addr).is_ok())
+}
+
+/// Returns a UDP port on localhost for a test alone, see [`TEST_PORTS`].
+fn free_udp_port() -> u16 {
+    unused_port(|addr| std::net::UdpSocket::bind(addr).is_ok())
 }

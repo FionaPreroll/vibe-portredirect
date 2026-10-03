@@ -273,7 +273,7 @@ pub enum Command {
     /// Runs the server.
     Run(Box<Config>),
     /// Prints the fingerprint of the server's certificate, see --print-quic-cert-fingerprint.
-    PrintCertFingerprint(CertificateConfig),
+    PrintFingerprint(CertificateConfig),
 }
 
 /// The settings for --print-quic-cert-fingerprint.
@@ -313,7 +313,7 @@ impl Command {
         };
         if args.print_quic_cert_fingerprint {
             // The server doesn't run, so it needs no clients.
-            return Ok(Self::PrintCertFingerprint(CertificateConfig {
+            return Ok(Self::PrintFingerprint(CertificateConfig {
                 config_dir: merge_option(matches, "config_dir", args.config_dir, file.config_dir),
                 quic_cert_hostname: merge(
                     matches,
@@ -504,7 +504,7 @@ mod tests {
     fn config(args: &[&str]) -> Result<Config> {
         match command(args)? {
             Command::Run(config) => Ok(*config),
-            Command::PrintCertFingerprint(_) => bail!("prints the fingerprint instead of running"),
+            Command::PrintFingerprint(_) => bail!("prints the fingerprint instead of running"),
         }
     }
 
@@ -917,7 +917,7 @@ mod tests {
             args.extend(["--config-file", path.to_str().unwrap()]);
         }
         match command(&args)? {
-            Command::PrintCertFingerprint(config) => Ok(config),
+            Command::PrintFingerprint(config) => Ok(config),
             Command::Run(_) => bail!("runs instead of printing the fingerprint"),
         }
     }

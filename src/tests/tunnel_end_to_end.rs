@@ -40,7 +40,7 @@ use crate::server::clients::{ClientEntry, ClientList};
 use crate::server::metrics::{ClientMetrics, METRICS};
 use crate::server::{ForwardingLimits, PortSpec};
 use crate::shutdown::Shutdown;
-use crate::tests::capture_logs;
+use crate::tests::{capture_logs, free_tcp_port, free_udp_port};
 use crate::PortRedirectProtocol;
 
 const TEST_PSK: &str = "integration-test-psk";
@@ -49,22 +49,6 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn localhost(port: u16) -> SocketAddr {
     SocketAddr::from((Ipv4Addr::LOCALHOST, port))
-}
-
-/// Returns a TCP port that was free a moment ago.
-fn free_tcp_port() -> u16 {
-    std::net::TcpListener::bind(localhost(0))
-        .and_then(|l| l.local_addr())
-        .expect("failed to find free TCP port")
-        .port()
-}
-
-/// Returns a UDP port that was free a moment ago.
-fn free_udp_port() -> u16 {
-    std::net::UdpSocket::bind(localhost(0))
-        .and_then(|s| s.local_addr())
-        .expect("failed to find free UDP port")
-        .port()
 }
 
 /// Deterministic test data, different for each seed.
@@ -458,7 +442,7 @@ async fn echo_once_the_tunnel_is_back(port: u16, message: &[u8]) -> Result<()> {
 }
 
 /// Returns the fingerprint of the server certificate in `config_dir`.
-fn cert_fingerprint(config_dir: &tempfile::TempDir) -> Result<CertFingerprint> {
+fn fingerprint_of(config_dir: &tempfile::TempDir) -> Result<CertFingerprint> {
     let certificate = std::fs::read(config_dir.path().join("cert.der"))?;
     Ok(CertFingerprint::of(&certificate))
 }
@@ -993,7 +977,7 @@ async fn client_trusts_the_server_by_the_fingerprint_of_its_certificate() -> Res
         echo_addr,
         listen_port,
     );
-    settings.cert_fingerprints = vec![cert_fingerprint(&config_dir)?];
+    settings.cert_fingerprints = vec![fingerprint_of(&config_dir)?];
     let _client = spawn_client(settings);
 
     with_timeout(async {
@@ -1024,12 +1008,12 @@ async fn client_gives_up_on_a_certificate_with_another_fingerprint() -> Result<(
         echo_addr,
         listen_port,
     );
-    settings.cert_fingerprints = vec![cert_fingerprint(&other_certificate)?];
+    settings.cert_fingerprints = vec![fingerprint_of(&other_certificate)?];
     let client = spawn_client(settings);
 
     with_timeout(async {
         let error = format!("{:#}", client.result().await.unwrap_err());
-        let fingerprint = cert_fingerprint(&config_dir)?.to_string();
+        let fingerprint = fingerprint_of(&config_dir)?.to_string();
         assert!(error.contains(&fingerprint), "unexpected error: {}", error);
         assert!(error.contains("giving up"), "unexpected error: {}", error);
         Ok(())
@@ -1062,8 +1046,8 @@ async fn server_certificate_changes_while_clients_trust_both_fingerprints() -> R
         listen_port,
     );
     settings.cert_fingerprints = vec![
-        cert_fingerprint(&old_certificate)?,
-        cert_fingerprint(&new_certificate)?,
+        fingerprint_of(&old_certificate)?,
+        fingerprint_of(&new_certificate)?,
     ];
     let _client = spawn_client(settings);
 
