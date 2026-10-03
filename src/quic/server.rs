@@ -500,7 +500,8 @@ where
             let config = Arc::clone(&config);
             let handle_incoming_client = Arc::clone(&handle_incoming_client);
             tokio::spawn(async move {
-                let connection = match timeout(config.handshake_timeout, incoming).await {
+                let handshake_timeout = config.handshake_timeout;
+                let connection = match timeout(handshake_timeout, incoming).await {
                     Ok(Ok(connection)) => connection,
                     Ok(Err(e)) => {
                         config.admission.record_failure(remote.ip());
@@ -515,7 +516,7 @@ where
                         config.admission.record_failure(remote.ip());
                         warn!(
                             "TLS handshake with {} not completed within {:?}, closing the connection",
-                            remote, config.handshake_timeout
+                            remote, handshake_timeout
                         );
                         return;
                     }
