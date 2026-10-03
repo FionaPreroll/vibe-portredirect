@@ -2,20 +2,30 @@
 //
 // License: GPL-3.0-only
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use clap::{CommandFactory, FromArgMatches, Parser};
 use portredirect::app_data::ClientAppData;
-use portredirect::client::run_client::run_client;
+use portredirect::client::reconnect::Backoff;
+use portredirect::client::run_client::{run_client, ClientSettings};
 use portredirect::psk::{warn_if_psk_on_command_line, PskArgs};
 use portredirect::PortRedirectProtocol;
-use portredirect::{get_config_dir, init_logging};
+use portredirect::{get_config_dir, init_logging, shutdown_signal};
 use std::net::{SocketAddr, ToSocketAddrs};
+use std::process::ExitCode;
 use tracing::level_filters::LevelFilter;
-use tracing::{info, span, Level};
+use tracing::{error, info, span, Level};
 
 /// Command-line arguments for the port redirector tool.
+///
+/// The client reconnects whenever the connection to the server ends. It exits with code 0 on
+/// SIGINT or SIGTERM, and with code 1 if it can't work as configured, e.g. because the server
+/// rejects its PSK or port.
 #[derive(Parser)]
 struct Args {
+    /// Full path to configuration directory, with the server's certificate cert.der.
+    #[clap(long)]
+    config_dir: Option<String>,
+
     /// Destination host for data coming from QUIC connections.
     #[clap(long)]
     destination_host: String,
@@ -76,7 +86,7 @@ struct Args {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> ExitCode {
     // Parse command-line arguments.
     let matches = Args::command().get_matches();
     let args = Args::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
@@ -85,61 +95,67 @@ async fn main() -> Result<()> {
     let _enter = span!(Level::INFO, "prclient_main").entered();
 
     warn_if_psk_on_command_line(&matches);
+
+    // Exit code 0 after a shutdown signal, 1 if the client can't work as configured.
+    match run(args).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            error!("{:#}", e);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run(args: Args) -> Result<()> {
     let psk = args.psk.load()?;
 
     // Get or create configuration directory.
-    let config_dir = get_config_dir(None)?; // HACK None for now.
+    let config_dir =
+        get_config_dir(args.config_dir).context("Failed to get configuration directory")?;
     info!("Configuration directory: {:?}", config_dir);
 
-    // Construct the destination address for tunneled TCP connections.
-    let destination_addr = format!("{}:{}", args.destination_host, args.destination_port);
-
     // Resolve local UDP bind address.
-    let quic_local_addr = format!("{}:{}", args.quic_local_host, args.quic_local_port)
-        .to_socket_addrs()
-        .context("constructing QUIC local address")?
-        .next()
-        .expect("Unable to resolve local address");
+    let quic_local_addr = resolve_socket_addr(&args.quic_local_host, args.quic_local_port)
+        .context("resolving QUIC local address")?;
 
     // Resolve remote UDP server address.
-    let quic_remote_addr = format!("{}:{}", args.quic_remote_host, args.quic_remote_port)
-        .to_socket_addrs()
-        .context("constructing QUIC remote address")?
-        .next()
-        .expect("Unable to resolve remote address");
+    let quic_remote_addr = resolve_socket_addr(&args.quic_remote_host, args.quic_remote_port)
+        .context("resolving QUIC remote address")?;
+
+    // Resolve the forward destination for the tunneled TCP connections.
+    let forward_destination = resolve_socket_addr(&args.destination_host, args.destination_port)
+        .context("resolving destination address")?;
 
     info!(
-        destination = %destination_addr,
+        destination = %forward_destination,
         local = %quic_local_addr,
         remote = %quic_remote_addr,
         "Initializing QUIC Client"
     );
-
-    // Resolve the forward destination for the tunneled TCP connections.
-    let forward_destination = destination_addr
-        .to_socket_addrs()
-        .context("resolving destination address")?
-        .next()
-        .context("resolving destination address")?;
-
-    // Build the application configuration.
-    let app_config = ClientAppData::new(psk, forward_destination, args.remote_listen_port);
 
     // Ensure the rustls crypto provider is installed.
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("Failed to install rustls crypto provider");
 
-    // Run the client.
-    run_client(
-        app_config,
+    // Run the client until a shutdown signal arrives.
+    let settings = ClientSettings {
+        app_data: ClientAppData::new(psk, forward_destination, args.remote_listen_port),
+        config_dir,
         quic_local_addr,
         quic_remote_addr,
-        args.quic_remote_hostname_match,
-        args.max_connections as usize,
-        args.provide_metrics.then_some(args.metrics_listen),
-    )
-    .await?;
+        quic_remote_hostname_match: args.quic_remote_hostname_match,
+        max_connections: args.max_connections as usize,
+        metrics_addr: args.provide_metrics.then_some(args.metrics_listen),
+        reconnect_backoff: Backoff::default(),
+    };
+    run_client(settings, shutdown_signal()).await
+}
 
-    Ok(())
+/// Resolves `host` and `port` to a socket address.
+fn resolve_socket_addr(host: &str, port: u16) -> Result<SocketAddr> {
+    (host, port)
+        .to_socket_addrs()?
+        .next()
+        .ok_or_else(|| anyhow!("{} has no address", host))
 }

@@ -8,7 +8,7 @@ use crate::{app_data::ClientAppData, bi_stream::BiStream};
 use anyhow::{anyhow, Result};
 use std::sync::Arc;
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, info, instrument};
 
 // Handles our custom authentication stream.
 #[instrument[skip(config, conn)]]
@@ -26,16 +26,9 @@ pub async fn handle_quic_auth_client_side(
             BiStream::new(recv.compat(), send.compat_write(), stream_id.to_string());
         debug!("opened bidi channel for AUTH with stream {}", stream_id);
 
-        match client_authenticate(&mut bi_stream, config.app_data.connection_auth_psk.clone()).await
-        {
-            Ok(()) => {
-                info!("Authentication successful");
-            }
-            Err(e) => {
-                warn!("Authentication failed: {}", e);
-                return Err(anyhow!("failed to authenticate against PR QUIC server"));
-            }
-        }
+        // On failure, the caller adds the context and logs the error.
+        client_authenticate(&mut bi_stream, config.app_data.connection_auth_psk.clone()).await?;
+        info!("Authentication successful");
 
         Ok(bi_stream)
     } else {

@@ -5,27 +5,29 @@
 
 use anyhow::{anyhow, Result};
 use portredirect::app_data::{ClientAppData, ServerAppData};
+use portredirect::client::reconnect::Backoff;
+use portredirect::client::run_client::{run_client, ClientSettings};
 use portredirect::client::server_handler::handle_quic_server_connection;
 use portredirect::limits::BlockingPolicy;
 use portredirect::quic::client::{run_quic_client, ClientConfig};
-use portredirect::quic::server::{load_or_generate_quic_cert, run_quic_server, ServerConfig};
+use portredirect::quic::server::{
+    load_or_generate_quic_cert, run_quic_server, run_quic_server_until, ServerConfig,
+};
 use portredirect::server::client_handler::handle_quic_client_connection;
 use portredirect::server::{ForwardingLimits, PortSpec};
+use portredirect::PortRedirectProtocol;
 use std::future::Future;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
-use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout, Duration, Instant};
 
 const TEST_PSK: &str = "integration-test-psk";
 const CERT_HOSTNAME: &str = "localhost";
 const TEST_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Result of the client's connection handler, with the full error chain as string.
-type HandlerResult = std::result::Result<(), String>;
 
 fn localhost(port: u16) -> SocketAddr {
     SocketAddr::from((Ipv4Addr::LOCALHOST, port))
@@ -107,21 +109,30 @@ fn start_server(config_dir: &Path, quic_port: u16, allowed_ports: Vec<PortSpec>)
     )
 }
 
+fn server_config(
+    config_dir: &Path,
+    quic_port: u16,
+    allowed_ports: Vec<PortSpec>,
+    limits: ForwardingLimits,
+) -> ServerConfig<ServerAppData> {
+    let app_data = ServerAppData::new(TEST_PSK.into(), "127.0.0.1".into(), allowed_ports)
+        .with_forwarding_limits(limits);
+    ServerConfig::create_default_config(
+        config_dir.to_path_buf(),
+        CERT_HOSTNAME.into(),
+        localhost(quic_port),
+        None,
+        app_data,
+    )
+}
+
 fn start_server_with_limits(
     config_dir: &Path,
     quic_port: u16,
     allowed_ports: Vec<PortSpec>,
     limits: ForwardingLimits,
 ) -> JoinHandle<()> {
-    let app_data = ServerAppData::new(TEST_PSK.into(), "127.0.0.1".into(), allowed_ports)
-        .with_forwarding_limits(limits);
-    let config = ServerConfig::create_default_config(
-        config_dir.to_path_buf(),
-        CERT_HOSTNAME.into(),
-        localhost(quic_port),
-        None,
-        app_data,
-    );
+    let config = server_config(config_dir, quic_port, allowed_ports, limits);
     tokio::spawn(async move {
         run_quic_server(config, handle_quic_client_connection)
             .await
@@ -129,37 +140,80 @@ fn start_server_with_limits(
     })
 }
 
-/// Starts a client and returns a channel receiving the result of its connection handler.
+/// Starts a server that shuts down when `shutdown` receives a value or is dropped.
+/// Retries for a while if the port is still in use, e.g. by a previous server.
+fn start_server_until(
+    config_dir: &Path,
+    quic_port: u16,
+    allowed_ports: Vec<PortSpec>,
+    shutdown: oneshot::Receiver<()>,
+) -> JoinHandle<Result<()>> {
+    let config_dir = config_dir.to_path_buf();
+    tokio::spawn(async move {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        // Bind a socket first, so a busy port doesn't consume the shutdown signal.
+        while std::net::UdpSocket::bind(localhost(quic_port)).is_err() {
+            anyhow::ensure!(Instant::now() < deadline, "QUIC port stays in use");
+            sleep(Duration::from_millis(50)).await;
+        }
+        let config = server_config(
+            &config_dir,
+            quic_port,
+            allowed_ports,
+            ForwardingLimits::default(),
+        );
+        run_quic_server_until(config, handle_quic_client_connection, async move {
+            let _ = shutdown.await;
+        })
+        .await
+    })
+}
+
+/// A client running `run_client` in the background, like `portredirect_client`.
+struct TestClient {
+    task: JoinHandle<Result<()>>,
+    shutdown: oneshot::Sender<()>,
+}
+
+impl TestClient {
+    /// Waits until the client stops by itself, i.e. after a permanent error.
+    async fn result(self) -> Result<()> {
+        let TestClient { task, shutdown } = self;
+        let result = task.await?;
+        drop(shutdown);
+        result
+    }
+
+    /// Shuts the client down, like a SIGTERM does.
+    async fn stop(self) -> Result<()> {
+        let _ = self.shutdown.send(());
+        self.task.await?
+    }
+}
+
+/// Starts a client with short reconnection delays.
 fn start_client(
     config_dir: &Path,
     quic_port: u16,
     psk: &str,
     destination: SocketAddr,
     remote_listen_port: u16,
-) -> mpsc::UnboundedReceiver<HandlerResult> {
-    let app_data = ClientAppData::new(psk.into(), destination, remote_listen_port);
-    let config = ClientConfig::create_default_config(
-        config_dir.to_path_buf(),
-        localhost(0),
-        localhost(quic_port),
-        Some(CERT_HOSTNAME.into()),
-        None,
-        app_data,
-    );
-
-    let (result_tx, result_rx) = mpsc::unbounded_channel();
-    tokio::spawn(async move {
-        let _ = run_quic_client(config, move |config, conn| {
-            let result_tx = result_tx.clone();
-            async move {
-                let result = handle_quic_server_connection(config, conn).await;
-                let _ = result_tx.send(result.as_ref().map(|_| ()).map_err(|e| format!("{:#}", e)));
-                result
-            }
-        })
-        .await;
-    });
-    result_rx
+) -> TestClient {
+    let settings = ClientSettings {
+        app_data: ClientAppData::new(psk.into(), destination, remote_listen_port),
+        config_dir: config_dir.to_path_buf(),
+        quic_local_addr: localhost(0),
+        quic_remote_addr: localhost(quic_port),
+        quic_remote_hostname_match: Some(CERT_HOSTNAME.into()),
+        max_connections: PortRedirectProtocol::DEFAULT_MAX_FORWARDED_CONNECTIONS,
+        metrics_addr: None,
+        reconnect_backoff: Backoff::new(Duration::from_millis(100), Duration::from_secs(1)),
+    };
+    let (shutdown, shutdown_rx) = oneshot::channel();
+    let task = tokio::spawn(run_client(settings, async move {
+        let _ = shutdown_rx.await;
+    }));
+    TestClient { task, shutdown }
 }
 
 /// Makes one connection attempt with the real client handler and returns the error if the
@@ -241,15 +295,6 @@ async fn echo_roundtrip(stream: TcpStream, payload: Vec<u8>) -> Result<Vec<u8>> 
     read.read_to_end(&mut received).await?;
     writer.await??;
     Ok(received)
-}
-
-/// Waits for the client's connection handler to finish and returns its error message.
-async fn expect_client_error(results: &mut mpsc::UnboundedReceiver<HandlerResult>) -> String {
-    match results.recv().await {
-        Some(Err(message)) => message,
-        Some(Ok(())) => panic!("client handler succeeded unexpectedly"),
-        None => panic!("client terminated without reporting a handler result"),
-    }
 }
 
 #[tokio::test]
@@ -341,7 +386,7 @@ async fn server_rejects_wrong_psk() -> Result<()> {
         quic_port,
         vec![PortSpec::Single(listen_port)],
     );
-    let mut client_results = start_client(
+    let client = start_client(
         config_dir.path(),
         quic_port,
         "wrong-psk",
@@ -350,7 +395,8 @@ async fn server_rejects_wrong_psk() -> Result<()> {
     );
 
     with_timeout(async {
-        let error = expect_client_error(&mut client_results).await;
+        // The client gives up, as connecting again would fail the same way.
+        let error = format!("{:#}", client.result().await.unwrap_err());
         assert!(
             error.contains("authenticate"),
             "unexpected error: {}",
@@ -376,7 +422,7 @@ async fn server_rejects_disallowed_port() -> Result<()> {
         quic_port,
         vec![PortSpec::Single(allowed_port)],
     );
-    let mut client_results = start_client(
+    let client = start_client(
         config_dir.path(),
         quic_port,
         TEST_PSK,
@@ -385,7 +431,7 @@ async fn server_rejects_disallowed_port() -> Result<()> {
     );
 
     with_timeout(async {
-        let error = expect_client_error(&mut client_results).await;
+        let error = format!("{:#}", client.result().await.unwrap_err());
         assert!(
             error.contains("port not allowed"),
             "unexpected error: {}",
@@ -588,6 +634,114 @@ async fn repeated_authentication_failures_block_address() -> Result<()> {
         // While blocked, even the right PSK doesn't get in.
         let result = connect_once(config_dir.path(), quic_port, TEST_PSK, listen_port).await;
         assert!(refused(&result), "unexpected result: {:?}", result);
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn client_reconnects_after_server_restart() -> Result<()> {
+    let config_dir = setup();
+    let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
+    let echo_addr = start_echo_server().await;
+    let allowed_ports = vec![PortSpec::Single(listen_port)];
+
+    let (stop_server, server_shutdown) = oneshot::channel();
+    let server = start_server_until(
+        config_dir.path(),
+        quic_port,
+        allowed_ports.clone(),
+        server_shutdown,
+    );
+    let _client = start_client(
+        config_dir.path(),
+        quic_port,
+        TEST_PSK,
+        echo_addr,
+        listen_port,
+    );
+
+    with_timeout(async {
+        let stream = connect_through_tunnel(listen_port).await?;
+        assert_eq!(echo_roundtrip(stream, b"before".to_vec()).await?, b"before");
+
+        // Stop the server, which closes the client's connection, and start it again.
+        let _ = stop_server.send(());
+        server.await??;
+        let (_keep_running, server_shutdown) = oneshot::channel();
+        let _server =
+            start_server_until(config_dir.path(), quic_port, allowed_ports, server_shutdown);
+
+        // The client reconnects and the tunnel works again.
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let attempt = async {
+                let stream = connect_through_tunnel(listen_port).await?;
+                echo_roundtrip(stream, b"after".to_vec()).await
+            };
+            if let Ok(Ok(echoed)) = timeout(Duration::from_secs(2), attempt).await {
+                if echoed == b"after" {
+                    break;
+                }
+            }
+            anyhow::ensure!(Instant::now() < deadline, "tunnel did not come back");
+            sleep(Duration::from_millis(100)).await;
+        }
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn client_shuts_down_cleanly() -> Result<()> {
+    let config_dir = setup();
+    let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
+    let echo_addr = start_echo_server().await;
+
+    let _server = start_server(
+        config_dir.path(),
+        quic_port,
+        vec![PortSpec::Single(listen_port)],
+    );
+    let client = start_client(
+        config_dir.path(),
+        quic_port,
+        TEST_PSK,
+        echo_addr,
+        listen_port,
+    );
+
+    with_timeout(async {
+        let stream = connect_through_tunnel(listen_port).await?;
+        assert_eq!(echo_roundtrip(stream, b"hello".to_vec()).await?, b"hello");
+
+        timeout(Duration::from_secs(5), client.stop())
+            .await
+            .map_err(|_| anyhow!("client did not stop"))??;
+
+        // The server noticed right away and released the port, so a new client can use it.
+        // Otherwise, the old connection would hold it until QUIC's idle timeout of 30 seconds.
+        let _client = start_client(
+            config_dir.path(),
+            quic_port,
+            TEST_PSK,
+            echo_addr,
+            listen_port,
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let attempt = async {
+                let stream = connect_through_tunnel(listen_port).await?;
+                echo_roundtrip(stream, b"again".to_vec()).await
+            };
+            if let Ok(Ok(echoed)) = timeout(Duration::from_secs(1), attempt).await {
+                if echoed == b"again" {
+                    break;
+                }
+            }
+            anyhow::ensure!(Instant::now() < deadline, "port was not released");
+            sleep(Duration::from_millis(100)).await;
+        }
         Ok(())
     })
     .await

@@ -4,14 +4,19 @@
 // Based on: Quinn example code (originally licensed under Apache-2.0/MIT)
 // Original: https://github.com/quinn-rs/quinn/blob/204b14792b5e92eb2c43cdb1ff05426412ff4466/quinn/examples/client.rs
 
-use anyhow::{anyhow, Error, Result};
+use anyhow::{Context, Error, Result};
 use quinn::crypto::rustls::QuicClientConfig;
 use rustls::pki_types::CertificateDer;
-use std::{fs, io, net::SocketAddr, path::PathBuf, sync::Arc, time::Instant};
-use tracing::{debug, error, info, instrument};
+use std::time::Duration;
+use std::{fs, net::SocketAddr, path::PathBuf, sync::Arc, time::Instant};
+use tracing::{info, instrument};
 
 use super::{client_transport_config, ALPN_QUIC_PORTREDIRECT};
+use crate::protocol::close::CloseCode;
 use crate::PortRedirectProtocol;
+
+/// Time to wait for the server to be notified when the client shuts down.
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug)]
 #[allow(unused)]
@@ -51,6 +56,99 @@ impl<AppDataType> ClientConfig<AppDataType> {
     }
 }
 
+/// A QUIC client endpoint, which can connect to the server repeatedly.
+pub struct QuicClient<AppDataType> {
+    config: Arc<ClientConfig<AppDataType>>,
+    endpoint: quinn::Endpoint,
+    server_name: String,
+}
+
+impl<AppDataType> QuicClient<AppDataType> {
+    /// Loads the server certificate to trust and binds the local endpoint.
+    ///
+    /// Prerequisite: A rustls CryptoProvider must be available before calling this function,
+    /// call CryptoProvider::install_default() before this point.
+    pub fn new(config: ClientConfig<AppDataType>) -> Result<Self> {
+        info!("Starting PR QUIC client setup");
+
+        // Trust the CA chain, or if none is given, the server's certificate.
+        let certificate_path = config.ca_path.as_ref().unwrap_or(&config.cert_file);
+        let certificate = fs::read(certificate_path).with_context(|| {
+            format!(
+                "failed to read the server certificate {}, copy cert.der from the server's configuration directory",
+                certificate_path.display()
+            )
+        })?;
+        let mut roots = rustls::RootCertStore::empty();
+        roots
+            .add(CertificateDer::from(certificate))
+            .with_context(|| format!("invalid certificate {}", certificate_path.display()))?;
+
+        // Crypto setup.
+        let mut client_crypto = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        client_crypto.alpn_protocols = ALPN_QUIC_PORTREDIRECT.iter().map(|&x| x.into()).collect();
+
+        // QUIC client setup.
+        let mut client_config =
+            quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(client_crypto)?));
+        client_config.transport_config(Arc::new(client_transport_config(
+            config
+                .connection_limit
+                .unwrap_or(PortRedirectProtocol::DEFAULT_MAX_FORWARDED_CONNECTIONS),
+        )));
+
+        let mut endpoint = quinn::Endpoint::client(config.local_socket)
+            .with_context(|| format!("failed to bind {}", config.local_socket))?;
+        endpoint.set_default_client_config(client_config);
+
+        let server_name = config
+            .remote_hostname_match
+            .clone()
+            .unwrap_or_else(|| config.remote_socket.ip().to_string());
+
+        Ok(Self {
+            config: Arc::new(config),
+            endpoint,
+            server_name,
+        })
+    }
+
+    pub fn config(&self) -> &Arc<ClientConfig<AppDataType>> {
+        &self.config
+    }
+
+    /// Connects to the server, or rather: establishes the tunnel's QUIC connection.
+    pub async fn connect(&self) -> Result<quinn::Connection> {
+        let start = Instant::now();
+        info!(
+            server_name_match = self.server_name,
+            local = self.config.local_socket.to_string(),
+            remote = self.config.remote_socket.to_string(),
+            "Connecting to PR QUIC Server"
+        );
+        let connection = self
+            .endpoint
+            .connect(self.config.remote_socket, &self.server_name)?
+            .await
+            .context("failed to connect")?;
+        info!("PR QUIC connection established in {:?}.", start.elapsed());
+        Ok(connection)
+    }
+
+    /// Closes all connections and waits until the server has been notified, but not longer
+    /// than `SHUTDOWN_TIMEOUT`.
+    pub async fn shutdown(&self, reason: &str) {
+        self.endpoint.close(CloseCode::Ok.code(), reason.as_bytes());
+        let _ = tokio::time::timeout(SHUTDOWN_TIMEOUT, self.endpoint.wait_idle()).await;
+    }
+}
+
+/// Connects to the server once and runs `handle_incoming` for the connection.
+///
+/// Returns the handler's result.
+///
 /// Prerequisite: A rustls CryptoProvider must be available before calling this function,
 /// call CryptoProvider::install_default() before this point.
 #[instrument(skip(config, handle_incoming))]
@@ -62,78 +160,11 @@ where
     F: Fn(Arc<ClientConfig<AppDataType>>, quinn::Connection) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = Result<(), Error>> + Send + 'static,
 {
-    info!("Starting PR QUIC client setup");
+    let client = QuicClient::new(config)?;
+    let connection = client.connect().await?;
 
-    // Load CA chain, or if none is given, load cert file.
-    let mut roots = rustls::RootCertStore::empty();
-    if let Some(ca_path) = &config.ca_path {
-        roots.add(CertificateDer::from(fs::read(ca_path)?))?;
-    } else {
-        let cert_file_result = fs::read(&config.cert_file);
-
-        match cert_file_result {
-            Ok(cert) => {
-                roots.add(CertificateDer::from(cert))?;
-            }
-            Err(ref e) if e.kind() == io::ErrorKind::NotFound => {
-                info!("local server certificate not found");
-            }
-            Err(e) => {
-                error!("failed to open local server certificate: {}", e);
-            }
-        }
-    }
-
-    // Crypto setup.
-    let mut client_crypto = rustls::ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    client_crypto.alpn_protocols = ALPN_QUIC_PORTREDIRECT.iter().map(|&x| x.into()).collect();
-
-    let server_name_match = config
-        .remote_hostname_match
-        .clone()
-        .unwrap_or_else(|| config.remote_socket.ip().to_string());
-
-    // QUIC client setup.
-    let mut client_config =
-        quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(client_crypto)?));
-    client_config.transport_config(Arc::new(client_transport_config(
-        config
-            .connection_limit
-            .unwrap_or(PortRedirectProtocol::DEFAULT_MAX_FORWARDED_CONNECTIONS),
-    )));
-
-    let mut endpoint = quinn::Endpoint::client(config.local_socket)?;
-    endpoint.set_default_client_config(client_config);
-
-    // Connect, or rather: establish tunnel.
     let start = Instant::now();
-    info!(
-        server_name_match,
-        local = config.local_socket.to_string(),
-        remote = config.remote_socket.to_string(),
-        "Connecting to PR QUIC Server"
-    );
-    let connection = endpoint
-        .connect(config.remote_socket, server_name_match.as_str())?
-        .await
-        .map_err(|e| anyhow!("failed to connect: {}", e))?;
-    debug!("QUIC connected at {:?}", start.elapsed());
-
-    // PR QUIC client side loop:
-    // Handle incoming streams forever.
-    let config = Arc::from(config);
-    info!("PR QUIC connection established in {:?}.", start.elapsed());
-    let fut = handle_incoming(Arc::clone(&config), connection);
-    let task = tokio::spawn(async move {
-        if let Err(e) = fut.await {
-            error!("connection failed: {:#}", e)
-        }
-    });
-
-    task.await?;
+    let result = handle_incoming(Arc::clone(client.config()), connection).await;
     info!("PR QUIC connection terminated after {:?}.", start.elapsed());
-
-    Ok(())
+    result
 }

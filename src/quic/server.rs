@@ -19,10 +19,14 @@ use tracing::{debug, info, instrument, warn};
 
 use crate::limits::QuicAdmission;
 use crate::private_files::{warn_if_accessible_by_others, write_private_file};
+use crate::protocol::close::CloseCode;
 use crate::quic::{configure_transport_config, ALPN_QUIC_PORTREDIRECT};
 
 /// Minimum time between two warnings about the connection limit.
 const LIMIT_WARNING_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Time to wait for clients to be notified when the server shuts down.
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Configuration for the QUIC server.
 ///
@@ -340,10 +344,25 @@ pub fn generate_quic_cert(
 /// # Returns
 ///
 /// TODO Returns a `Result` indicating the success or failure of the server operation.
-#[instrument(skip(config, handle_incoming_client))]
 pub async fn run_quic_server<F, Fut, AppDataType>(
     config: ServerConfig<AppDataType>,
     handle_incoming_client: F,
+) -> Result<()>
+where
+    F: Fn(Arc<ServerConfig<AppDataType>>, quinn::Connection) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = Result<(), Error>> + Send + 'static,
+{
+    run_quic_server_until(config, handle_incoming_client, std::future::pending()).await
+}
+
+/// Runs the QUIC server like [`run_quic_server`] until `shutdown` completes.
+///
+/// On shutdown, all connections are closed, so clients notice right away.
+#[instrument(skip(config, handle_incoming_client, shutdown))]
+pub async fn run_quic_server_until<F, Fut, AppDataType>(
+    config: ServerConfig<AppDataType>,
+    handle_incoming_client: F,
+    shutdown: impl std::future::Future<Output = ()>,
 ) -> Result<()>
 where
     F: Fn(Arc<ServerConfig<AppDataType>>, quinn::Connection) -> Fut + Send + Sync + 'static,
@@ -388,7 +407,20 @@ where
     let config = Arc::from(config);
     let mut last_limit_warning: Option<Instant> = None;
     info!("QUIC server is ready and accepting connections");
-    while let Some(incoming) = endpoint.accept().await {
+    tokio::pin!(shutdown);
+    loop {
+        let incoming = tokio::select! {
+            incoming = endpoint.accept() => match incoming {
+                Some(incoming) => incoming,
+                None => break,
+            },
+            () = &mut shutdown => {
+                info!("Shutting down, closing all connections");
+                endpoint.close(CloseCode::Ok.code(), b"server shutting down");
+                let _ = tokio::time::timeout(SHUTDOWN_TIMEOUT, endpoint.wait_idle()).await;
+                break;
+            }
+        };
         let remote = incoming.remote_address();
 
         if config.admission.is_blocked(remote.ip()) {

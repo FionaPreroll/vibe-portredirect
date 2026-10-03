@@ -6,12 +6,12 @@ use anyhow::{anyhow, Context, Result};
 use clap::{CommandFactory, FromArgMatches, Parser};
 use portredirect::app_data::ServerAppData;
 use portredirect::psk::{warn_if_psk_on_command_line, PskArgs};
-use portredirect::quic::server::{run_quic_server, ServerConfig};
+use portredirect::quic::server::{run_quic_server_until, ServerConfig};
 use portredirect::server::client_handler::handle_quic_client_connection;
 use portredirect::server::metrics_printer::print_metrics_loop;
 use portredirect::server::{ForwardingLimits, PortSpec};
 use portredirect::PortRedirectProtocol;
-use portredirect::{get_config_dir, init_logging};
+use portredirect::{get_config_dir, init_logging, shutdown_signal};
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::time::Duration;
 use tracing::level_filters::LevelFilter;
@@ -163,10 +163,14 @@ async fn main() -> Result<()> {
         });
     }
 
-    // Start QUIC server.
-    run_quic_server(quic_config, handle_quic_client_connection)
-        .await
-        .with_context(|| "PortRedirect Server Error")?;
+    // Start QUIC server, until a shutdown signal arrives.
+    run_quic_server_until(
+        quic_config,
+        handle_quic_client_connection,
+        shutdown_signal(),
+    )
+    .await
+    .with_context(|| "PortRedirect Server Error")?;
 
     info!("PortRedirect Server exited cleanly");
     Ok(())

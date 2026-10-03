@@ -25,6 +25,18 @@ use secrecy::SecretString;
 use sha2::{Digest, Sha512};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+/// The peer rejected the authentication: the PSKs of client and server differ.
+#[derive(Debug)]
+pub struct AuthenticationRejected(pub String);
+
+impl std::fmt::Display for AuthenticationRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "authentication rejected: {}", self.0)
+    }
+}
+
+impl std::error::Error for AuthenticationRejected {}
+
 /// Server-side authentication: send challenge, receive and verify the client’s response.
 pub async fn server_authenticate<S>(
     stream: &mut S,
@@ -112,7 +124,7 @@ where
     if reply.starts_with("HAPPY") {
         Ok(())
     } else {
-        Err(anyhow!("Server rejected authentication: {}", reply.trim()))
+        Err(AuthenticationRejected(format!("server replied {:?}", reply.trim())).into())
     }
 }
 
@@ -177,10 +189,8 @@ mod tests {
         );
         let client_err = client_res.expect_err("client_authenticate should have failed");
         assert!(
-            client_err
-                .to_string()
-                .contains("Server rejected authentication: BAD"),
-            "Unexpected client error message: {}",
+            client_err.is::<AuthenticationRejected>(),
+            "Unexpected client error: {}",
             client_err
         );
         Ok(())

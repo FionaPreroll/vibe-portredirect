@@ -5,6 +5,7 @@
 use anyhow::{Context, Result};
 use std::{path::PathBuf, time::Duration};
 use tracing::level_filters::LevelFilter;
+use tracing::{info, warn};
 
 pub mod app_data;
 pub mod bi_stream;
@@ -43,6 +44,37 @@ pub fn init_logging(max_level: LevelFilter) {
         .with_target(true)
         .with_line_number(true)
         .init();
+}
+
+/// Completes when the process receives SIGINT (Ctrl-C) or SIGTERM.
+pub async fn shutdown_signal() {
+    let interrupt = async {
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            warn!("Failed to listen for SIGINT: {}", e);
+            std::future::pending::<()>().await;
+        }
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut terminate) => {
+                terminate.recv().await;
+            }
+            Err(e) => {
+                warn!("Failed to listen for SIGTERM: {}", e);
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        () = interrupt => info!("Received SIGINT"),
+        () = terminate => info!("Received SIGTERM"),
+    }
 }
 
 pub struct PortRedirectProtocol;
