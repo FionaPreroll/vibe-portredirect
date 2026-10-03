@@ -8,10 +8,11 @@ license = "GPL-3.0-only"
 readme = "README.md"
 repository = "https://github.com/FionaPreroll/vibe-portredirect"
 homepage = "https://github.com/FionaPreroll/vibe-portredirect"
+documentation = "https://docs.rs/portredirect"
 keywords = ["tcp", "quic", "networking", "port-forwarding"]
 categories = ["network-programming", "command-line-utilities"]
 
-authors = ["unspezifisch <unspezifisch@futurewidgets.eu>"]
+authors = ["Fiona <unspezifisch@futurewidgets.eu>"]
 
 [dependencies]
 anyhow = "1.0.97"
