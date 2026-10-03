@@ -1098,6 +1098,56 @@ async fn connections_beyond_the_clients_limit_wait_for_a_free_slot() -> Result<(
 }
 
 #[tokio::test]
+async fn connections_beyond_the_servers_limit_wait_in_the_backlog() -> Result<()> {
+    let config_dir = setup();
+    let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
+    let echo_addr = start_echo_server().await;
+
+    let limits = ForwardingLimits {
+        max_connections: 1,
+        ..ForwardingLimits::default()
+    };
+    let _server = start_server_with_limits(
+        config_dir.path(),
+        quic_port,
+        vec![PortSpec::Single(listen_port)],
+        limits,
+    );
+    let _client = start_client(
+        config_dir.path(),
+        quic_port,
+        TEST_PSK,
+        echo_addr,
+        listen_port,
+    );
+
+    with_timeout(async {
+        let mut first = connect_through_tunnel(listen_port).await?;
+        echo_once(&mut first, b"first").await?;
+
+        // The second connection is established by the system, but the server doesn't accept it.
+        let mut second = TcpStream::connect(localhost(listen_port)).await?;
+        second.write_all(b"second").await?;
+        let mut echoed = [0u8; 6];
+        anyhow::ensure!(
+            timeout(Duration::from_millis(500), second.read_exact(&mut echoed))
+                .await
+                .is_err(),
+            "the server forwarded more connections than its limit"
+        );
+
+        // Once the first connection ends, the server accepts the waiting one.
+        drop(first);
+        timeout(Duration::from_secs(5), second.read_exact(&mut echoed))
+            .await
+            .map_err(|_| anyhow!("the waiting connection was not forwarded"))??;
+        assert_eq!(&echoed, b"second");
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
 async fn client_waits_while_its_port_is_in_use() -> Result<()> {
     let config_dir = setup();
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
@@ -1333,6 +1383,40 @@ async fn client_gives_up_on_an_untrusted_certificate() -> Result<()> {
         echo_addr,
         listen_port,
     );
+
+    with_timeout(async {
+        let error = format!("{:#}", client.result().await.unwrap_err());
+        assert!(
+            error.to_lowercase().contains("certificate"),
+            "unexpected error: {}",
+            error
+        );
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn client_gives_up_on_a_certificate_for_another_name() -> Result<()> {
+    let config_dir = setup();
+    let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
+    let echo_addr = start_echo_server().await;
+
+    let _server = start_server(
+        config_dir.path(),
+        quic_port,
+        vec![PortSpec::Single(listen_port)],
+    );
+    // The client trusts the server's certificate, but expects it to be issued for another name.
+    let mut settings = client_settings(
+        config_dir.path(),
+        quic_port,
+        TEST_PSK,
+        echo_addr,
+        listen_port,
+    );
+    settings.quic_remote_hostname_match = Some("other.example".into());
+    let client = spawn_client(settings);
 
     with_timeout(async {
         let error = format!("{:#}", client.result().await.unwrap_err());
