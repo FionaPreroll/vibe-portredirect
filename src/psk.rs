@@ -15,6 +15,9 @@ use crate::private_files::warn_if_accessible_by_others;
 /// Environment variable that can hold the pre-shared key.
 pub const PSK_ENV_VAR: &str = "PORTREDIRECT_QUIC_PSK";
 
+/// PSKs shorter than this are accepted, but a warning recommends a longer one.
+pub const RECOMMENDED_MIN_PSK_LENGTH: usize = 16;
+
 /// Command-line options providing the pre-shared key for authentication over QUIC.
 ///
 /// Exactly one source is required: the PSK file, the environment variable or the
@@ -48,6 +51,12 @@ impl PskArgs {
 
         if psk.expose_secret().is_empty() {
             bail!("the pre-shared key must not be empty");
+        }
+        if psk.expose_secret().len() < RECOMMENDED_MIN_PSK_LENGTH {
+            warn!(
+                "The pre-shared key is shorter than {} bytes and might be guessed, use a long random key, e.g. from: openssl rand -hex 32",
+                RECOMMENDED_MIN_PSK_LENGTH
+            );
         }
         Ok(psk)
     }

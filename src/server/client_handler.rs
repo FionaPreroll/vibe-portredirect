@@ -31,6 +31,7 @@ pub async fn handle_quic_client_connection(
     );
 
     // 1. Authenticate client.
+    let client_ip = quic_conn.remote_address().ip();
     let control_stream = match timeout(
         PortRedirectProtocol::AUTHENTICATION_TIMEOUT,
         authenticate_quic_client(Arc::clone(&config), quic_conn.clone()),
@@ -38,9 +39,14 @@ pub async fn handle_quic_client_connection(
     .await
     {
         Ok(auth_result) => match auth_result {
-            Ok(stream) => stream, // Auth succeeded. Return the control stream.
+            Ok(stream) => {
+                // Auth succeeded. Return the control stream.
+                config.admission.record_success(client_ip);
+                stream
+            }
             Err(err) => {
                 // Auth failed, close the connection.
+                config.admission.record_failure(client_ip);
                 quic_conn.close(0u32.into(), b"ERR failed authentication");
                 return Err(err).context(format!(
                     "failed to authenticate PR QUIC client from {}",
@@ -50,6 +56,7 @@ pub async fn handle_quic_client_connection(
         },
         Err(_) => {
             // Auth timed out, close the connection.
+            config.admission.record_failure(client_ip);
             quic_conn.close(0u32.into(), b"ERR authentication timed out");
             return Err(anyhow::anyhow!("authentication timed out")).context(format!(
                 "authentication timeout for PR QUIC client from {}",

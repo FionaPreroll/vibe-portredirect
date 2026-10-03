@@ -10,7 +10,7 @@ use crate::{app_data::ServerAppData, bi_stream::BiStream};
 use anyhow::{anyhow, Result};
 use std::sync::Arc;
 use tokio_util::compat::{Compat, FuturesAsyncReadCompatExt, FuturesAsyncWriteCompatExt};
-use tracing::{debug, error, info, instrument};
+use tracing::{debug, info, instrument};
 
 // Authenticates the PR QUIC client to us, the server.
 // Called by handle_quic_client_connection.
@@ -44,7 +44,8 @@ pub async fn authenticate_quic_client(
             info!("Authenticated PR QUIC client OK");
         }
         Err(e) => {
-            error!("Failed to authenticate PR QUIC client: {:?}", e);
+            // The caller logs the failure.
+            debug!("Failed to authenticate PR QUIC client: {:?}", e);
             return Err(e);
         }
     }

@@ -6,6 +6,7 @@
 use anyhow::{anyhow, Result};
 use portredirect::app_data::{ClientAppData, ServerAppData};
 use portredirect::client::server_handler::handle_quic_server_connection;
+use portredirect::limits::BlockingPolicy;
 use portredirect::quic::client::{run_quic_client, ClientConfig};
 use portredirect::quic::server::{load_or_generate_quic_cert, run_quic_server, ServerConfig};
 use portredirect::server::client_handler::handle_quic_client_connection;
@@ -159,6 +160,28 @@ fn start_client(
         .await;
     });
     result_rx
+}
+
+/// Makes one connection attempt with the real client handler and returns the error if the
+/// connection could not be established.
+async fn connect_once(
+    config_dir: &Path,
+    quic_port: u16,
+    psk: &str,
+    remote_listen_port: u16,
+) -> std::result::Result<(), String> {
+    let app_data = ClientAppData::new(psk.into(), localhost(1), remote_listen_port);
+    let config = ClientConfig::create_default_config(
+        config_dir.to_path_buf(),
+        localhost(0),
+        localhost(quic_port),
+        Some(CERT_HOSTNAME.into()),
+        None,
+        app_data,
+    );
+    run_quic_client(config, handle_quic_server_connection)
+        .await
+        .map_err(|e| format!("{:#}", e))
 }
 
 /// Connects to the server's external TCP port, retrying until the tunnel is up.
@@ -525,6 +548,46 @@ async fn idle_connections_from_one_address_do_not_block_others() -> Result<()> {
         // Another host still gets through.
         let stream = connect_from(user, listen_port).await?;
         assert_eq!(echo_roundtrip(stream, b"hello".to_vec()).await?, b"hello");
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn repeated_authentication_failures_block_address() -> Result<()> {
+    let config_dir = setup();
+    let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
+    let _server = start_server(
+        config_dir.path(),
+        quic_port,
+        vec![PortSpec::Single(listen_port)],
+    );
+    let max_failures = BlockingPolicy::default().max_failures;
+    let refused = |result: &std::result::Result<(), String>| {
+        result.as_ref().is_err_and(|e| e.contains("refused"))
+    };
+
+    with_timeout(async {
+        // Guess the PSK until the server refuses connections from this address.
+        let mut failed_attempts = 0;
+        while !refused(&connect_once(config_dir.path(), quic_port, "wrong-psk", listen_port).await)
+        {
+            failed_attempts += 1;
+            anyhow::ensure!(
+                failed_attempts <= max_failures + 2,
+                "address not blocked after {} failed attempts",
+                failed_attempts
+            );
+        }
+        anyhow::ensure!(
+            failed_attempts >= max_failures,
+            "address blocked after only {} failed attempts",
+            failed_attempts
+        );
+
+        // While blocked, even the right PSK doesn't get in.
+        let result = connect_once(config_dir.path(), quic_port, TEST_PSK, listen_port).await;
+        assert!(refused(&result), "unexpected result: {:?}", result);
         Ok(())
     })
     .await

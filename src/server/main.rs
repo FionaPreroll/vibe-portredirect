@@ -50,6 +50,15 @@ struct Args {
     #[command(flatten)]
     psk: PskArgs,
 
+    /// Maximum number of concurrent QUIC connections, including connections that are not
+    /// authenticated yet. Each client uses one.
+    #[clap(
+        long,
+        default_value_t = DEFAULT_MAX_QUIC_CONNECTIONS,
+        value_parser = clap::value_parser!(u32).range(1..)
+    )]
+    max_quic_connections: u32,
+
     /// Maximum number of concurrently forwarded TCP connections per client.
     /// Further connections wait until one ends.
     #[clap(
@@ -73,6 +82,9 @@ struct Args {
     #[clap(long)]
     print_metrics: bool,
 }
+
+/// Default for --max-quic-connections.
+const DEFAULT_MAX_QUIC_CONNECTIONS: u32 = 64;
 
 /// Program entry point.
 #[tokio::main]
@@ -133,7 +145,7 @@ async fn main() -> Result<()> {
         config_dir,
         args.quic_cert_hostname,
         quic_addr,
-        None,
+        Some(args.max_quic_connections as usize),
         app_data.clone(),
     );
 

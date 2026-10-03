@@ -5,6 +5,9 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv6Addr};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
+use tokio::time::Instant;
+use tracing::warn;
 
 /// Returns the key under which connections from `ip` are counted.
 ///
@@ -84,6 +87,151 @@ impl Drop for AddressConnectionGuard {
     }
 }
 
+/// When an address gets blocked after failed authentication attempts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BlockingPolicy {
+    /// Number of failed attempts within `window` after which an address is blocked.
+    pub max_failures: u32,
+    /// Time in which failed attempts are counted.
+    pub window: Duration,
+    /// How long an address stays blocked.
+    pub block_duration: Duration,
+}
+
+impl Default for BlockingPolicy {
+    fn default() -> Self {
+        Self {
+            max_failures: 5,
+            window: Duration::from_secs(600),
+            block_duration: Duration::from_secs(600),
+        }
+    }
+}
+
+/// Admission control for the QUIC connections of a server.
+///
+/// It limits the concurrent connections per address and blocks addresses for a while after
+/// repeated failed handshakes or authentication attempts, which limits online guessing of the PSK
+/// and the load from a single host.
+#[derive(Debug)]
+pub struct QuicAdmission {
+    connections: AddressConnectionLimit,
+    policy: BlockingPolicy,
+    failures: Mutex<HashMap<IpAddr, FailureRecord>>,
+}
+
+#[derive(Debug)]
+struct FailureRecord {
+    count: u32,
+    window_start: Instant,
+    blocked_until: Option<Instant>,
+}
+
+impl FailureRecord {
+    fn is_blocked(&self, now: Instant) -> bool {
+        self.blocked_until.is_some_and(|until| now < until)
+    }
+
+    fn is_relevant(&self, now: Instant, policy: &BlockingPolicy) -> bool {
+        self.is_blocked(now) || now < self.window_start + policy.window
+    }
+}
+
+impl QuicAdmission {
+    /// Default maximum number of concurrent QUIC connections per address.
+    pub const DEFAULT_MAX_CONNECTIONS_PER_IP: usize = 8;
+
+    /// Upper bound for the number of addresses with recorded failures, to bound memory use.
+    const MAX_TRACKED_ADDRESSES: usize = 65536;
+
+    /// Creates the admission control with at most `max_connections_per_ip` concurrent
+    /// connections per address (0 for no limit) and the given blocking policy.
+    pub fn new(max_connections_per_ip: usize, policy: BlockingPolicy) -> Self {
+        Self {
+            connections: AddressConnectionLimit::new(max_connections_per_ip),
+            policy,
+            failures: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Returns whether connections from `ip` are refused because of failed attempts.
+    pub fn is_blocked(&self, ip: IpAddr) -> bool {
+        let now = Instant::now();
+        self.lock_failures()
+            .get(&address_key(ip))
+            .is_some_and(|record| record.is_blocked(now))
+    }
+
+    /// Registers a connection from `ip`, unless its address already has the maximum number of
+    /// connections. The connection counts until the returned guard is dropped.
+    pub fn try_acquire(&self, ip: IpAddr) -> Option<AddressConnectionGuard> {
+        self.connections.try_acquire(ip)
+    }
+
+    /// Records a failed handshake or authentication attempt from `ip`, which blocks the address
+    /// once it reaches the policy's maximum.
+    pub fn record_failure(&self, ip: IpAddr) {
+        let now = Instant::now();
+        let key = address_key(ip);
+        let mut failures = self.lock_failures();
+
+        if !failures.contains_key(&key) && failures.len() >= Self::MAX_TRACKED_ADDRESSES {
+            failures.retain(|_, record| record.is_relevant(now, &self.policy));
+            if failures.len() >= Self::MAX_TRACKED_ADDRESSES {
+                // Too many addresses to track, give up on this one rather than using more memory.
+                return;
+            }
+        }
+
+        let record = failures.entry(key).or_insert(FailureRecord {
+            count: 0,
+            window_start: now,
+            blocked_until: None,
+        });
+        if now >= record.window_start + self.policy.window {
+            // Start a new window.
+            record.count = 0;
+            record.window_start = now;
+        }
+        record.count += 1;
+
+        if record.count >= self.policy.max_failures && !record.is_blocked(now) {
+            record.blocked_until = Some(now + self.policy.block_duration);
+            record.count = 0;
+            record.window_start = now;
+            warn!(
+                "Blocking {} for {:?} after {} failed handshakes or authentication attempts",
+                key, self.policy.block_duration, self.policy.max_failures
+            );
+        }
+    }
+
+    /// Records a successful authentication from `ip`, which clears earlier failed attempts.
+    pub fn record_success(&self, ip: IpAddr) {
+        let key = address_key(ip);
+        let mut failures = self.lock_failures();
+        if failures
+            .get(&key)
+            .is_some_and(|record| !record.is_blocked(Instant::now()))
+        {
+            failures.remove(&key);
+        }
+    }
+
+    fn lock_failures(&self) -> MutexGuard<'_, HashMap<IpAddr, FailureRecord>> {
+        self.failures.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+impl Default for QuicAdmission {
+    fn default() -> Self {
+        Self::new(
+            Self::DEFAULT_MAX_CONNECTIONS_PER_IP,
+            BlockingPolicy::default(),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,5 +301,114 @@ mod tests {
         let limit = AddressConnectionLimit::new(4);
         drop(limit.try_acquire(ip("192.0.2.1")).unwrap());
         assert!(limit.lock().is_empty());
+    }
+
+    fn test_policy() -> BlockingPolicy {
+        BlockingPolicy {
+            max_failures: 3,
+            window: Duration::from_secs(60),
+            block_duration: Duration::from_secs(300),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_blocking_after_failures() {
+        let admission = QuicAdmission::new(8, test_policy());
+        let host = ip("192.0.2.1");
+
+        admission.record_failure(host);
+        admission.record_failure(host);
+        assert!(!admission.is_blocked(host));
+
+        admission.record_failure(host);
+        assert!(admission.is_blocked(host));
+        // Other addresses are not affected.
+        assert!(!admission.is_blocked(ip("192.0.2.2")));
+
+        // The block ends after its duration.
+        tokio::time::advance(Duration::from_secs(299)).await;
+        assert!(admission.is_blocked(host));
+        tokio::time::advance(Duration::from_secs(2)).await;
+        assert!(!admission.is_blocked(host));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_ipv6_network_is_blocked() {
+        let admission = QuicAdmission::new(8, test_policy());
+        for host in ["2001:db8::1", "2001:db8::2", "2001:db8::3"] {
+            admission.record_failure(ip(host));
+        }
+        assert!(admission.is_blocked(ip("2001:db8::4")));
+        assert!(!admission.is_blocked(ip("2001:db8:0:1::1")));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_failures_expire_after_window() {
+        let admission = QuicAdmission::new(8, test_policy());
+        let host = ip("192.0.2.1");
+
+        admission.record_failure(host);
+        admission.record_failure(host);
+        tokio::time::advance(Duration::from_secs(61)).await;
+        admission.record_failure(host);
+
+        assert!(!admission.is_blocked(host));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_success_clears_failures() {
+        let admission = QuicAdmission::new(8, test_policy());
+        let host = ip("192.0.2.1");
+
+        admission.record_failure(host);
+        admission.record_failure(host);
+        admission.record_success(host);
+        admission.record_failure(host);
+        admission.record_failure(host);
+
+        assert!(!admission.is_blocked(host));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_success_does_not_end_block() {
+        let admission = QuicAdmission::new(8, test_policy());
+        let host = ip("192.0.2.1");
+        for _ in 0..3 {
+            admission.record_failure(host);
+        }
+
+        admission.record_success(host);
+
+        assert!(admission.is_blocked(host));
+    }
+
+    #[test]
+    fn test_connections_per_address() {
+        let admission = QuicAdmission::new(2, test_policy());
+        let _first = admission.try_acquire(ip("192.0.2.1")).unwrap();
+        let _second = admission.try_acquire(ip("192.0.2.1")).unwrap();
+        assert!(admission.try_acquire(ip("192.0.2.1")).is_none());
+        assert!(admission.try_acquire(ip("192.0.2.2")).is_some());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_outdated_failures_are_pruned() {
+        let admission = QuicAdmission::new(8, test_policy());
+        for i in 0..QuicAdmission::MAX_TRACKED_ADDRESSES as u32 {
+            admission.record_failure(IpAddr::V4(Ipv4Addr::from(i)));
+        }
+        assert_eq!(
+            admission.lock_failures().len(),
+            QuicAdmission::MAX_TRACKED_ADDRESSES
+        );
+
+        // While the failures are recent, new addresses are not tracked.
+        admission.record_failure(ip("198.51.100.1"));
+        assert!(!admission.lock_failures().contains_key(&ip("198.51.100.1")));
+
+        // Outdated failures make room.
+        tokio::time::advance(Duration::from_secs(61)).await;
+        admission.record_failure(ip("198.51.100.1"));
+        assert_eq!(admission.lock_failures().len(), 1);
     }
 }
