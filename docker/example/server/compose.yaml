@@ -4,6 +4,9 @@
 #   cp example.env .env    # and set the PSK in it
 #   docker compose up -d
 #   docker compose logs | grep fingerprint    # for the client's .env
+#
+# With a configuration file, docker compose kill -s HUP portredirect-server makes the server read
+# it again, e.g. after adding a client.
 services:
   portredirect-server:
     # Debian with glibc; or :alpine, with musl.

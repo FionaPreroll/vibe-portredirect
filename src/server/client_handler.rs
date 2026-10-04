@@ -6,12 +6,12 @@ use crate::app_data::ServerAppData;
 use crate::host_port::HostPort;
 use crate::metrics::Active;
 use crate::net::canonical;
-use crate::protocol::auth::ClientName;
 use crate::protocol::close::CloseCode;
 use crate::protocol::control::{receive_hello, send_welcome, Greeting, SERVER_SOFTWARE};
 use crate::protocol::keepalive::{run_control_channel_loop, ControlChannelEnd};
 use crate::quic::server::ServerConfig;
 use crate::quic::ProtocolVersion;
+use crate::server::clients::Credentials;
 use crate::server::metrics::METRICS;
 use crate::server::port_registry::PortTaken;
 use crate::server::tcp_listener::{bind_tcp_listener, handle_tcp_listener};
@@ -63,21 +63,23 @@ pub async fn handle_quic_client_connection(
 
     // From now on, all log messages of this connection name the client.
     let span = info_span!("tunnel", client = client.name.as_str());
-    serve_client(config, quic_conn, control_stream, client.name)
+    serve_client(config, quic_conn, control_stream, client)
         .instrument(span)
         .await
 }
 
-/// Sets up the tunnel for an authenticated client and keeps it up until the connection ends.
+/// Sets up the tunnel for the client authenticated with `credentials` and keeps it up until the
+/// connection ends, or a reload of the configuration no longer accepts it.
 pub(crate) async fn serve_client<S>(
     config: Arc<ServerConfig<ServerAppData>>,
     quic_conn: quinn::Connection,
     mut control_stream: S,
-    client: ClientName,
+    credentials: Credentials,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    let client = &credentials.name;
     let remote = canonical(quic_conn.remote_address());
 
     // 2. Receive the client's HELLO.
@@ -111,8 +113,9 @@ where
     // Validate that the client may use the requested port.
     let allowed = config
         .app_data
+        .settings()
         .clients
-        .get(&client)
+        .get(client)
         .is_some_and(|entry| entry.ports.allows(port));
     if !allowed {
         CloseCode::PortNotAllowed.close(&quic_conn, "port not allowed");
@@ -123,7 +126,7 @@ where
     let lease = match config
         .app_data
         .ports
-        .acquire(port, &client, &quic_conn)
+        .acquire(port, client, &quic_conn)
         .await
     {
         Ok(lease) => lease,
@@ -167,7 +170,7 @@ where
         CloseCode::InternalError.close(&quic_conn, "failed to confirm configuration");
         return Err(err);
     }
-    let metrics = METRICS.client(&client);
+    let metrics = METRICS.client(client);
     metrics.tunnels.inc();
     let _tunnel_active = Active::new(&metrics.tunnels_active);
 
@@ -186,23 +189,41 @@ where
         .in_current_span(),
     );
 
-    // 5. Run the control channel loop.
-    let end =
-        run_control_channel_loop(&mut control_stream, listener_token, config.shutdown.clone())
-            .await;
+    // 5. Run the control channel loop, until it ends or a reload of the configuration no longer
+    // accepts the tunnel.
+    let control_loop = run_control_channel_loop(
+        &mut control_stream,
+        listener_token.clone(),
+        config.shutdown.clone(),
+    );
+    let end = tokio::select! {
+        end = control_loop => Ok(end),
+        revocation = config.app_data.revocation(&credentials, port) => {
+            info!("Closing the tunnel on port {}: {}", port, revocation);
+            listener_token.cancel();
+            Err(revocation)
+        }
+    };
 
     // Close the QUIC connection after the control channel finishes, and only then end the
     // control stream: the client could read its end before the reason, e.g. an unexpected
     // message, and take it for a failed keepalive.
     debug!("Closing QUIC client connection from {}: {:?}", remote, end);
-    let reason = match &end {
-        ControlChannelEnd::Timeout => "keepalive timed out",
-        ControlChannelEnd::ProtocolViolation(_) => "unexpected control message",
-        ControlChannelEnd::StreamClosed(_) => "tunnel closed",
+    let (close_code, reason) = match &end {
+        Ok(end) => (
+            end.close_code(),
+            match end {
+                ControlChannelEnd::Timeout => "keepalive timed out",
+                ControlChannelEnd::ProtocolViolation(_) => "unexpected control message",
+                ControlChannelEnd::StreamClosed(_) => "tunnel closed",
+            }
+            .to_string(),
+        ),
+        Err(revocation) => (revocation.close_code(), revocation.to_string()),
     };
-    end.close_code().close(&quic_conn, reason);
+    close_code.close(&quic_conn, &reason);
     drop(control_stream);
-    if end.close_code() == CloseCode::KeepaliveFailed {
+    if close_code == CloseCode::KeepaliveFailed {
         metrics.keepalive_failures.inc();
     }
 
@@ -217,8 +238,9 @@ where
     debug!("End of QUIC client connection from {}", remote);
 
     match end {
-        ControlChannelEnd::Timeout => Err(anyhow!("keepalive timed out")),
-        ControlChannelEnd::ProtocolViolation(violation) => Err(anyhow!(violation)),
-        ControlChannelEnd::StreamClosed(_) => Ok(()),
+        Ok(ControlChannelEnd::Timeout) => Err(anyhow!("keepalive timed out")),
+        Ok(ControlChannelEnd::ProtocolViolation(violation)) => Err(anyhow!(violation)),
+        // Logged above.
+        Ok(ControlChannelEnd::StreamClosed(_)) | Err(_) => Ok(()),
     }
 }

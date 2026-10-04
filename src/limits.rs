@@ -286,6 +286,17 @@ impl QuicAdmission {
             .map(|until| until - now)
     }
 
+    /// Forgets all failed attempts and lifts all blocks, e.g. after a change of the configuration
+    /// that may have caused the failures. Returns how many addresses were blocked.
+    pub fn forget_failures(&self) -> usize {
+        let now = Instant::now();
+        let mut failures = self.lock_failures();
+        let blocked = failures.values().filter(|record| record.is_blocked(now));
+        let blocked = blocked.count();
+        failures.clear();
+        blocked
+    }
+
     /// Returns the maximum number of connections per address, 0 for no limit.
     pub fn max_connections_per_ip(&self) -> usize {
         self.connections.max_per_address
@@ -497,6 +508,24 @@ mod tests {
         admission.record_failure(host);
 
         assert!(admission.blocked_for(host).is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_forgetting_failures_lifts_blocks() {
+        let admission = QuicAdmission::new(8, test_policy());
+        let (blocked, failed) = (ip("192.0.2.1"), ip("192.0.2.2"));
+        for _ in 0..3 {
+            admission.record_failure(blocked);
+        }
+        admission.record_failure(failed);
+        admission.record_failure(failed);
+
+        assert_eq!(admission.forget_failures(), 1);
+        assert!(admission.blocked_for(blocked).is_none());
+        // The failed attempts before don't count any more.
+        admission.record_failure(failed);
+        assert!(admission.blocked_for(failed).is_none());
+        assert_eq!(admission.forget_failures(), 0);
     }
 
     #[tokio::test(start_paused = true)]

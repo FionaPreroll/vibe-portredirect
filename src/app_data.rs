@@ -5,24 +5,24 @@
 use secrecy::SecretString;
 use std::fmt;
 use std::sync::{Arc, Mutex};
+use tokio::sync::watch;
 
 use crate::host_port::HostPort;
 use crate::protocol::auth::ClientName;
-use crate::server::clients::ClientList;
+use crate::server::clients::{ClientList, Credentials};
 use crate::server::port_registry::PortRegistry;
+use crate::server::reload::{Revocation, Settings};
 use crate::server::ForwardingLimits;
 
 // Storage for application data for handler functions.
 #[derive(Clone, Debug)]
 pub struct ServerAppData {
-    /// The clients the server accepts, with their PSKs and ports.
-    pub clients: ClientList,
+    /// The clients the server accepts and the limits, which a reload of the configuration can
+    /// change.
+    settings: Arc<watch::Sender<Arc<Settings>>>,
 
     // IP to bind to the TCP listener to
     pub local_bind_ip: String,
-
-    // Limits for the connections forwarded for each client.
-    pub forwarding_limits: ForwardingLimits,
 
     /// Which client holds which listen port.
     pub ports: Arc<PortRegistry>,
@@ -45,18 +45,50 @@ impl ServerAppData {
 
     /// Returns the data of a server that accepts `clients`.
     pub fn with_clients(clients: ClientList, local_bind_ip: String) -> Self {
-        ServerAppData {
+        let settings = Settings {
             clients,
-            local_bind_ip,
             forwarding_limits: ForwardingLimits::default(),
+        };
+        ServerAppData {
+            settings: Arc::new(watch::Sender::new(Arc::new(settings))),
+            local_bind_ip,
             ports: Arc::new(PortRegistry::new()),
         }
     }
 
     /// Replaces the default limits for the connections forwarded for each client.
-    pub fn with_forwarding_limits(mut self, forwarding_limits: ForwardingLimits) -> Self {
-        self.forwarding_limits = forwarding_limits;
+    pub fn with_forwarding_limits(self, forwarding_limits: ForwardingLimits) -> Self {
+        let clients = self.settings().clients.clone();
+        self.update(Settings {
+            clients,
+            forwarding_limits,
+        });
         self
+    }
+
+    /// Returns the current settings: the clients and the limits.
+    pub fn settings(&self) -> Arc<Settings> {
+        Arc::clone(&self.settings.borrow())
+    }
+
+    /// Replaces the settings, e.g. after a reload of the configuration, and returns the old ones.
+    /// Tunnels the new settings don't accept end, see [`ServerAppData::revocation`].
+    pub fn update(&self, settings: Settings) -> Arc<Settings> {
+        self.settings.send_replace(Arc::new(settings))
+    }
+
+    /// Completes when the settings no longer accept the tunnel of the client with `credentials`
+    /// on `port`, with the reason, e.g. right away if they changed since the client
+    /// authenticated.
+    pub async fn revocation(&self, credentials: &Credentials, port: u16) -> Revocation {
+        let mut settings = self.settings.subscribe();
+        loop {
+            if let Some(revocation) = settings.borrow_and_update().revocation(credentials, port) {
+                return revocation;
+            }
+            // The sender lives as long as the receiver, in self.
+            let _ = settings.changed().await;
+        }
     }
 }
 
@@ -66,7 +98,7 @@ impl fmt::Display for ServerAppData {
         write!(
             f,
             "ServerAppData {{ clients: {}, PSKs: [REDACTED], local_bind_ip: {} }}",
-            self.clients.len(),
+            self.settings().clients.len(),
             self.local_bind_ip
         )
     }

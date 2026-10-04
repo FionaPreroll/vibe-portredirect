@@ -44,6 +44,7 @@ use crate::server::auth::authenticate_quic_client;
 use crate::server::client_handler::{handle_quic_client_connection, serve_client};
 use crate::server::clients::{ClientEntry, ClientList};
 use crate::server::metrics::{ClientMetrics, METRICS};
+use crate::server::reload::Settings;
 use crate::server::{ForwardingLimits, PortSpec};
 use crate::shutdown::Shutdown;
 use crate::tests::{capture_logs, collect_logs, ipv6_available, CollectedLogs};
@@ -976,11 +977,11 @@ async fn new_connections_per_address_are_rate_limited() -> Result<()> {
         quic_port,
         &[(name, &[TEST_PSK], listen_port)],
     );
-    config.app_data.forwarding_limits = ForwardingLimits {
+    config.app_data = config.app_data.with_forwarding_limits(ForwardingLimits {
         max_connection_rate_per_ip: 2,
         max_connection_burst_per_ip: 2,
         ..ForwardingLimits::default()
-    };
+    });
     let _server = spawn_server_with_handler(config, handle_quic_client_connection);
     let metrics = METRICS.client(&name.parse().unwrap());
     let _client = start_named_client(
@@ -1631,7 +1632,10 @@ async fn server_metrics_count_per_client() -> Result<()> {
             ("metrics-b", &["metrics-b-psk-0123456789"], free_tcp_port()),
         ],
     );
-    config.app_data.forwarding_limits.max_connections_per_ip = 1;
+    config.app_data = config.app_data.with_forwarding_limits(ForwardingLimits {
+        max_connections_per_ip: 1,
+        ..ForwardingLimits::default()
+    });
     let _server = spawn_server_with_handler(config, handle_quic_client_connection);
     let client = start_named_client(
         config_dir.path(),
@@ -2384,6 +2388,157 @@ async fn new_connection_of_a_client_replaces_its_old_one() -> Result<()> {
     .await
 }
 
+/// Returns the settings of a server that accepts `clients`, each given as name, PSKs and allowed
+/// port, like [`server_config_with_clients`].
+fn settings_with_clients(clients: &[(&str, &[&str], u16)]) -> Result<Settings> {
+    let clients = ClientList::new(clients.iter().map(|&(name, psks, port)| ClientEntry {
+        name: name.parse().unwrap(),
+        psks: psks.iter().map(|&psk| psk.into()).collect(),
+        ports: vec![PortSpec::Single(port)],
+    }))?;
+    Ok(Settings {
+        clients,
+        forwarding_limits: ForwardingLimits::default(),
+    })
+}
+
+/// Returns how many tunnels the server set up for the client `name` so far.
+fn tunnels_of(name: &str) -> u64 {
+    METRICS.client(&name.parse().unwrap()).tunnels.get()
+}
+
+#[tokio::test]
+async fn reload_closes_the_tunnels_it_no_longer_accepts() -> Result<()> {
+    let (config_dir, _logs) = setup();
+    let quic_port = free_udp_port();
+    let ports = [
+        free_tcp_port(),
+        free_tcp_port(),
+        free_tcp_port(),
+        free_tcp_port(),
+    ];
+    let echo_addr = start_echo_server().await;
+    // The names keep the clients' metrics apart from other tests.
+    let clients: [(&str, &str, u16); 4] = [
+        ("reload-stays", "stays-psk-0123456789", ports[0]),
+        ("reload-removed", "removed-psk-0123456789", ports[1]),
+        ("reload-new-psk", "old-psk-0123456789", ports[2]),
+        ("reload-moved", "moved-psk-0123456789", ports[3]),
+    ];
+    let accepted: Vec<(&str, &[&str], u16)> = clients
+        .iter()
+        .map(|(name, psk, port)| (*name, std::slice::from_ref(psk), *port))
+        .collect();
+    let config = server_config_with_clients(config_dir.path(), quic_port, &accepted);
+    let app_data = config.app_data.clone();
+    let _server = spawn_server_with_handler(config, handle_quic_client_connection);
+    let [stays, removed, new_psk, moved] = clients.map(|(name, psk, port)| {
+        start_named_client(config_dir.path(), quic_port, name, psk, echo_addr, port)
+    });
+
+    with_timeout(async {
+        for port in ports {
+            echo_once_the_tunnel_is_back(port, b"up").await?;
+        }
+
+        // The configuration changes: one client gets a second PSK, one is removed, one has a
+        // new PSK, and one another port.
+        app_data.update(settings_with_clients(&[
+            (
+                "reload-stays",
+                &["stays-psk-0123456789", "next-psk-0123456789"],
+                ports[0],
+            ),
+            ("reload-new-psk", &["new-psk-0123456789"], ports[2]),
+            ("reload-moved", &["moved-psk-0123456789"], free_tcp_port()),
+        ])?);
+
+        // The clients whose tunnels the server no longer accepts learn why, and give up.
+        for (client, reason) in [
+            (
+                removed,
+                "the client was removed from the server's configuration (code 1)",
+            ),
+            (
+                new_psk,
+                "the client's PSK was removed from the server's configuration (code 1)",
+            ),
+            (moved, "the client may no longer use the port (code 5)"),
+        ] {
+            let err = format!("{:#}", client.result().await.unwrap_err());
+            assert!(err.contains(reason), "{}", err);
+        }
+        for port in &ports[1..] {
+            wait_until_closed(*port).await?;
+        }
+        // The tunnel of the other client goes on.
+        let stream = connect_through_tunnel(ports[0]).await?;
+        assert_eq!(
+            echo_roundtrip(stream, b"still up".to_vec()).await?,
+            b"still up"
+        );
+        assert_eq!(tunnels_of("reload-stays"), 1);
+        stays.stop().await
+    })
+    .await
+}
+
+#[tokio::test]
+async fn psk_changes_without_a_restart_of_the_server() -> Result<()> {
+    let (config_dir, _logs) = setup();
+    let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
+    let echo_addr = start_echo_server().await;
+    let (name, old_psk, new_psk) = ("psk-change", "old-psk-0123456789", "new-psk-0123456789");
+    let config = server_config_with_clients(
+        config_dir.path(),
+        quic_port,
+        &[(name, &[old_psk], listen_port)],
+    );
+    let app_data = config.app_data.clone();
+    let _server = spawn_server_with_handler(config, handle_quic_client_connection);
+    let client = start_named_client(
+        config_dir.path(),
+        quic_port,
+        name,
+        old_psk,
+        echo_addr,
+        listen_port,
+    );
+
+    with_timeout(async {
+        echo_once_the_tunnel_is_back(listen_port, b"old PSK").await?;
+
+        // 1. The server gets the new PSK, too, and keeps the tunnel.
+        app_data.update(settings_with_clients(&[(
+            name,
+            &[old_psk, new_psk],
+            listen_port,
+        )])?);
+        // 2. The client changes to the new PSK.
+        client.stop().await?;
+        let client = start_named_client(
+            config_dir.path(),
+            quic_port,
+            name,
+            new_psk,
+            echo_addr,
+            listen_port,
+        );
+        echo_once_the_tunnel_is_back(listen_port, b"new PSK").await?;
+        // 3. The server drops the old PSK, which the tunnel doesn't use any more.
+        app_data.update(settings_with_clients(&[(name, &[new_psk], listen_port)])?);
+
+        let stream = connect_through_tunnel(listen_port).await?;
+        assert_eq!(
+            echo_roundtrip(stream, b"still up".to_vec()).await?,
+            b"still up"
+        );
+        assert_eq!(tunnels_of(name), 2);
+        client.stop().await
+    })
+    .await
+}
+
 #[tokio::test]
 async fn standby_client_takes_over_when_the_active_one_stops() -> Result<()> {
     let (config_dir, _logs) = setup();
@@ -2976,7 +3131,7 @@ async fn server_closes_connections_before_their_control_streams_end() -> Result<
                 closed_before,
             };
             let control_stream = BiStream::new(read, stream.write, stream.name);
-            serve_client(config, connection, control_stream, client.name).await
+            serve_client(config, connection, control_stream, client).await
         }
     });
 
@@ -3371,13 +3526,13 @@ async fn hold_connection(
 async fn quic_connections_are_limited_in_total() -> Result<()> {
     let (config_dir, _logs) = setup();
     let quic_port = free_udp_port();
-    let mut config = server_config(
+    let config = server_config(
         config_dir.path(),
         quic_port,
         vec![],
         ForwardingLimits::default(),
     );
-    config.connection_limit = Some(2);
+    config.connection_limit.set(Some(2));
     let _server = spawn_server_with_handler(config, hold_connection);
 
     with_timeout(async {
@@ -3412,13 +3567,13 @@ async fn refusals_are_explained_once_on_both_sides() -> Result<()> {
     let (config_dir, _logs) = setup();
     let (warnings, _warnings) = collect_logs("warn");
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
-    let mut config = server_config(
+    let config = server_config(
         config_dir.path(),
         quic_port,
         vec![PortSpec::Single(listen_port)],
         ForwardingLimits::default(),
     );
-    config.connection_limit = Some(1);
+    config.connection_limit.set(Some(1));
     let _server = spawn_server_with_handler(config, hold_connection);
 
     with_timeout(async {
@@ -3471,7 +3626,7 @@ async fn quic_connections_are_limited_per_address() -> Result<()> {
         vec![],
         ForwardingLimits::default(),
     );
-    config.admission = QuicAdmission::new(2, BlockingPolicy::default());
+    config.admission = Arc::new(QuicAdmission::new(2, BlockingPolicy::default()));
     let _server = spawn_server_with_handler(config, hold_connection);
 
     with_timeout(async {

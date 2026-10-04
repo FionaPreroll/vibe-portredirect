@@ -6,6 +6,7 @@ use clap::ValueEnum;
 use serde::Deserialize;
 use std::fmt::{self, Write as _};
 use std::io::IsTerminal;
+use std::sync::OnceLock;
 use tracing::field::Field;
 use tracing::level_filters::LevelFilter;
 use tracing::Subscriber;
@@ -31,6 +32,12 @@ pub enum LogFormat {
     Json,
 }
 
+/// Replaces the filter of a subscriber, see [`subscriber`].
+type FilterReload = Box<dyn Fn(EnvFilter) -> Result<(), String> + Send + Sync>;
+
+/// Replaces the filter of the subscriber that [`init_logging`] set up.
+static FILTER_RELOAD: OnceLock<FilterReload> = OnceLock::new();
+
 /// Sets up logging to stderr for messages up to `max_level`, in `format`, with colors only on a
 /// terminal. With `log_connections`, the client logs each forwarded connection, see
 /// [`CONNECTION_LOG`].
@@ -41,7 +48,38 @@ pub(crate) fn init_logging(max_level: LevelFilter, format: LogFormat, log_connec
     let rust_log = std::env::var("RUST_LOG").ok();
     let filter = filter(max_level, log_connections, rust_log.as_deref());
     let ansi = std::io::stderr().is_terminal();
-    subscriber(filter, format, std::io::stderr, ansi).init();
+    let (subscriber, reload) = subscriber(filter, format, std::io::stderr, ansi);
+    let _ = FILTER_RELOAD.set(reload);
+    subscriber.init();
+}
+
+/// Logs messages up to `max_level` from now on, and the connection log if `log_connections`,
+/// see [`init_logging`]. Fails if `RUST_LOG` sets the levels, as it takes precedence, or logging
+/// isn't set up.
+pub(crate) fn set_log_level(max_level: LevelFilter, log_connections: bool) -> Result<(), String> {
+    let rust_log = std::env::var("RUST_LOG").ok();
+    set_filter(
+        FILTER_RELOAD.get(),
+        max_level,
+        log_connections,
+        rust_log.as_deref(),
+    )
+}
+
+/// Replaces the filter with `reload` by the one for `max_level` and `log_connections`, unless
+/// the valid directives of `rust_log` take precedence, see [`filter`].
+fn set_filter(
+    reload: Option<&FilterReload>,
+    max_level: LevelFilter,
+    log_connections: bool,
+    rust_log: Option<&str>,
+) -> Result<(), String> {
+    let directives = rust_log.filter(|directives| !directives.trim().is_empty());
+    if directives.is_some_and(|directives| EnvFilter::try_new(directives).is_ok()) {
+        return Err("RUST_LOG sets the levels, it takes precedence".into());
+    }
+    let reload = reload.ok_or("logging isn't set up")?;
+    reload(filter(max_level, log_connections, None))
 }
 
 /// Returns the filter for messages up to `max_level`, and the connection log if
@@ -74,13 +112,13 @@ fn filter(max_level: LevelFilter, log_connections: bool, rust_log: Option<&str>)
 }
 
 /// Returns the subscriber that writes the messages `filter` lets through to `writer`, in
-/// `format`, with colors if `ansi`.
+/// `format`, with colors if `ansi`, and how to replace its filter later.
 fn subscriber<W>(
     filter: EnvFilter,
     format: LogFormat,
     writer: W,
     ansi: bool,
-) -> Box<dyn Subscriber + Send + Sync>
+) -> (Box<dyn Subscriber + Send + Sync>, FilterReload)
 where
     W: for<'writer> MakeWriter<'writer> + Send + Sync + 'static,
 {
@@ -90,14 +128,26 @@ where
         .with_target(true)
         .with_line_number(true);
     match format {
-        LogFormat::Text => Box::new(
-            builder
+        LogFormat::Text => {
+            let builder = builder
                 .fmt_fields(escaping_fields())
                 .with_ansi(ansi)
-                .finish(),
-        ),
+                .with_filter_reloading();
+            let handle = builder.reload_handle();
+            let reload = move |filter| handle.reload(filter).map_err(|e| e.to_string());
+            (Box::new(builder.finish()), Box::new(reload))
+        }
         // JSON escapes control characters in strings itself.
-        LogFormat::Json => Box::new(builder.json().flatten_event(true).with_ansi(false).finish()),
+        LogFormat::Json => {
+            let builder = builder
+                .json()
+                .flatten_event(true)
+                .with_ansi(false)
+                .with_filter_reloading();
+            let handle = builder.reload_handle();
+            let reload = move |filter| handle.reload(filter).map_err(|e| e.to_string());
+            (Box::new(builder.finish()), Box::new(reload))
+        }
     }
 }
 
@@ -195,9 +245,45 @@ mod tests {
     ) -> Vec<String> {
         let output = Output::default();
         let filter = filter(max_level, log_connections, rust_log);
-        let subscriber = subscriber(filter, format, output.clone(), false);
+        let (subscriber, _) = subscriber(filter, format, output.clone(), false);
         tracing::subscriber::with_default(subscriber, log);
         output.lines()
+    }
+
+    #[test]
+    fn test_log_level_can_change() {
+        for format in [LogFormat::Text, LogFormat::Json] {
+            let output = Output::default();
+            let filter = filter(LevelFilter::INFO, false, None);
+            let (subscriber, reload) = subscriber(filter, format, output.clone(), false);
+            tracing::subscriber::with_default(subscriber, || {
+                tracing::debug!("not logged");
+                set_filter(Some(&reload), LevelFilter::DEBUG, false, None).unwrap();
+                tracing::debug!("logged");
+                tracing::info!(target: CONNECTION_LOG, "Connection opened");
+                set_filter(Some(&reload), LevelFilter::WARN, true, Some("")).unwrap();
+                tracing::info!("not logged");
+                tracing::info!(target: CONNECTION_LOG, "Connection closed");
+            });
+            let lines = output.lines();
+            assert_eq!(lines.len(), 2, "{:?}", lines);
+            assert!(lines[0].contains("logged") && !lines[0].contains("not logged"));
+            assert!(lines[1].contains("Connection closed"), "{}", lines[1]);
+        }
+
+        // RUST_LOG takes precedence, unless it is invalid, see filter().
+        let (_subscriber, reload) = subscriber(
+            EnvFilter::default(),
+            LogFormat::Text,
+            Output::default(),
+            false,
+        );
+        let reload = Some(&reload);
+        let err = set_filter(reload, LevelFilter::DEBUG, false, Some("info")).unwrap_err();
+        assert!(err.contains("RUST_LOG"), "{}", err);
+        assert!(set_filter(reload, LevelFilter::DEBUG, false, Some("portredirect=loud")).is_ok());
+        let err = set_filter(None, LevelFilter::DEBUG, false, None).unwrap_err();
+        assert_eq!(err, "logging isn't set up");
     }
 
     /// A reason a peer gave for closing the connection, which is part of errors, with a line
