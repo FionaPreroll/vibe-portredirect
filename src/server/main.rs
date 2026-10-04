@@ -3,6 +3,7 @@
 // License: GPL-3.0-only
 
 use anyhow::{Context, Result};
+use std::sync::Arc;
 use tracing::{error, info, span, Level};
 
 use crate::app_data::ServerAppData;
@@ -16,16 +17,19 @@ use crate::quic::server::{
 use crate::server::client_handler::handle_quic_client_connection;
 use crate::server::config::{CertificateConfig, Command};
 use crate::server::metrics::{METRICS, PREFIX};
+use crate::server::reload::{Reloader, RestartSettings};
 use crate::shutdown::Shutdown;
 
 /// Runs the server program, `portredirect_server`, until a shutdown signal arrives.
 #[tokio::main]
 pub async fn main() -> Result<()> {
     // Read the command line, the environment and the configuration file.
-    let config = match Command::from_command_line() {
+    let (command, matches) = Command::from_command_line();
+    let config = match command {
         Command::Run(config) => *config,
         Command::PrintFingerprint(settings) => return print_fingerprint(settings),
     };
+    let restart_settings = RestartSettings::of(&config);
 
     init_logging(config.log_level, config.log_format, false);
 
@@ -72,6 +76,17 @@ pub async fn main() -> Result<()> {
     );
     quic_config.shutdown = Shutdown::on_signals(config.shutdown_timeout);
     quic_config.congestion_control = config.congestion_control;
+
+    // From now on, SIGHUP reloads the configuration.
+    Reloader::new(
+        matches,
+        restart_settings,
+        config.log_level,
+        app_data,
+        quic_config.connection_limit.clone(),
+        Arc::clone(&quic_config.admission),
+    )
+    .reload_on_sighup();
 
     // Spawn the metrics printer task.
     if config.print_metrics {

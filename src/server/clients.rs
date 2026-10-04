@@ -10,7 +10,7 @@ use crate::protocol::auth::{ClientName, PskLookup, MAX_PSKS_PER_CLIENT};
 use crate::server::PortSpec;
 
 use anyhow::{bail, Result};
-use secrecy::SecretString;
+use secrecy::{ExposeSecret, SecretString};
 use std::collections::BTreeMap;
 use std::fmt;
 use tracing::info;
@@ -23,6 +23,31 @@ pub struct ClientEntry {
     pub psks: Vec<SecretString>,
     /// The ports the client may ask the server to listen on.
     pub ports: Vec<PortSpec>,
+}
+
+impl ClientEntry {
+    /// Returns what differs in `new`: `PSKs`, `ports` or both.
+    pub fn changes(&self, new: &ClientEntry) -> Vec<&'static str> {
+        let same_psks = self.psks.len() == new.psks.len()
+            && self
+                .psks
+                .iter()
+                .zip(&new.psks)
+                .all(|(old, new)| old.expose_secret() == new.expose_secret());
+        let same_ports = port_ranges(&self.ports) == port_ranges(&new.ports);
+        [(same_psks, "PSKs"), (same_ports, "ports")]
+            .into_iter()
+            .filter(|(same, _)| !same)
+            .map(|(_, what)| what)
+            .collect()
+    }
+}
+
+/// What a client authenticated with: its name and one of its PSKs.
+#[derive(Clone, Debug)]
+pub struct Credentials {
+    pub name: ClientName,
+    pub psk: SecretString,
 }
 
 /// The clients the server accepts, by name.
@@ -270,6 +295,24 @@ mod tests {
         );
         assert_eq!(shared[0].to_string(), "443, 8050-8100");
         Ok(())
+    }
+
+    #[test]
+    fn test_changes_of_clients() {
+        let home = client("home", &["a", "b"], "443,80");
+        // The same ports in another order, or the same PSKs.
+        assert!(home
+            .changes(&client("home", &["a", "b"], "80,443"))
+            .is_empty());
+        assert_eq!(home.changes(&client("home", &["b"], "80,443")), ["PSKs"]);
+        assert_eq!(
+            home.changes(&client("home", &["a", "c"], "80")),
+            ["PSKs", "ports"]
+        );
+        assert_eq!(
+            home.changes(&client("home", &["a", "b"], "80-443")),
+            ["ports"]
+        );
     }
 
     #[test]

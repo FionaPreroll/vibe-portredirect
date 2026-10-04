@@ -16,7 +16,8 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::ops::Range;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
-use tracing::subscriber::DefaultGuard;
+use tracing::subscriber::{DefaultGuard, NoSubscriber};
+use tracing::Dispatch;
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::EnvFilter;
 
@@ -38,6 +39,12 @@ fn capture_logs() -> DefaultGuard {
 /// until the returned guard is dropped. Like [`capture_logs`], this includes the tasks of a
 /// `#[tokio::test]`.
 pub(crate) fn collect_logs(filter: &str) -> (CollectedLogs, DefaultGuard) {
+    // tracing caches for each log message whether a subscriber is interested in it. While there
+    // is only one subscriber, e.g. this one, it asks the subscriber of the thread that logs the
+    // message first, which may be another test's without one, and this one never gets the
+    // message. With a second one that stays, it asks all of them.
+    static SECOND: LazyLock<Dispatch> = LazyLock::new(|| Dispatch::new(NoSubscriber::default()));
+    LazyLock::force(&SECOND);
     let logs = CollectedLogs::default();
     let subscriber = tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::new(filter))

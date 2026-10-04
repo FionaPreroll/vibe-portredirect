@@ -2,9 +2,10 @@
 //
 // License: GPL-3.0-only
 
-use crate::protocol::auth::{server_authenticate, session_binding, AuthenticatedClient};
+use crate::protocol::auth::{server_authenticate, session_binding};
 use crate::protocol::close::CloseCode;
 use crate::quic::server::{raise_receive_window, ServerConfig};
+use crate::server::clients::Credentials;
 use crate::PortRedirectProtocol;
 use crate::{app_data::ServerAppData, bi_stream::BiStream};
 
@@ -19,7 +20,7 @@ pub type ControlStream = BiStream<Compat<quinn::RecvStream>, Compat<quinn::SendS
 
 /// Opens the control stream, which stays open for the lifetime of the connection, and
 /// authenticates the client over it: verifies that the client knows the PSK of the client it
-/// names and proves that we know it, too.
+/// names and proves that we know it, too. Returns the client's name and that PSK.
 ///
 /// If that fails or takes too long, closes the connection with the reason and fails. The caller
 /// logs the error.
@@ -27,7 +28,7 @@ pub type ControlStream = BiStream<Compat<quinn::RecvStream>, Compat<quinn::SendS
 pub async fn authenticate_quic_client(
     config: Arc<ServerConfig<ServerAppData>>,
     conn: quinn::Connection,
-) -> Result<(ControlStream, AuthenticatedClient)> {
+) -> Result<(ControlStream, Credentials)> {
     debug!("Authenticating PR QUIC client");
 
     // The control stream must outlive the closing of the connection: dropping a stream ends it,
@@ -39,8 +40,8 @@ pub async fn authenticate_quic_client(
         authenticate(&config, &conn, &mut control_stream),
     )
     .await;
-    let client = match authenticated {
-        Ok(Ok(client)) => client,
+    let (client, psk_index, psk_count) = match authenticated {
+        Ok(Ok(authenticated)) => authenticated,
         Ok(Err(e)) => {
             CloseCode::AuthenticationFailed.close(&conn, "authentication failed");
             return Err(e);
@@ -53,31 +54,28 @@ pub async fn authenticate_quic_client(
     let control_stream = control_stream.context("authenticated without a control stream")?;
     // Until now, the client could only send a little.
     raise_receive_window(&conn);
-    let psk_count = config
-        .app_data
-        .clients
-        .get(&client.name)
-        .map_or(1, |entry| entry.psks.len());
+    let name = client.name.as_str();
     if psk_count > 1 {
+        let psk = psk_index + 1;
         info!(
             "Authenticated client {:?} with PSK {} of {}",
-            client.name.as_str(),
-            client.psk_index + 1,
-            psk_count
+            name, psk, psk_count
         );
     } else {
-        info!("Authenticated client {:?}", client.name.as_str());
+        info!("Authenticated client {:?}", name);
     }
 
     Ok((control_stream, client))
 }
 
-/// Opens the control stream into `control_stream` and authenticates the client over it.
+/// Opens the control stream into `control_stream` and authenticates the client over it, with the
+/// clients of the current settings. Returns the client's credentials, which of its PSKs it used,
+/// starting at 0, and how many it has.
 async fn authenticate(
     config: &ServerConfig<ServerAppData>,
     conn: &quinn::Connection,
     control_stream: &mut Option<ControlStream>,
-) -> Result<AuthenticatedClient> {
+) -> Result<(Credentials, usize, usize)> {
     let (send, recv) = conn
         .open_bi()
         .await
@@ -92,5 +90,17 @@ async fn authenticate(
         stream_id.to_string(),
     ));
     let binding = session_binding(conn)?;
-    server_authenticate(control_stream, &config.app_data.clients, &binding).await
+    // The same clients for the whole authentication, even if a reload changes them meanwhile.
+    let settings = config.app_data.settings();
+    let client = server_authenticate(control_stream, &settings.clients, &binding).await?;
+    let psks = &settings
+        .clients
+        .get(&client.name)
+        .context("authenticated a client that isn't listed")?
+        .psks;
+    let credentials = Credentials {
+        psk: psks[client.psk_index].clone(),
+        name: client.name,
+    };
+    Ok((credentials, client.psk_index, psks.len()))
 }

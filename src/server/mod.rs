@@ -9,6 +9,7 @@ pub(crate) mod config;
 pub(crate) mod main;
 pub(crate) mod metrics;
 pub(crate) mod port_registry;
+pub(crate) mod reload;
 pub(crate) mod tcp_forwarder;
 pub(crate) mod tcp_listener;
 

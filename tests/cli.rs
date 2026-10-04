@@ -143,9 +143,19 @@ impl Program {
 
     /// Sends SIGTERM, like a service manager stopping the program.
     fn terminate(&self) {
+        self.signal("-TERM");
+    }
+
+    /// Sends SIGHUP, like a service manager reloading the program.
+    fn hang_up(&self) {
+        self.signal("-HUP");
+    }
+
+    /// Sends `signal`, e.g. `-TERM`.
+    fn signal(&self, signal: &str) {
         let pid = self.child.id().expect("the program has exited already");
         let status = std::process::Command::new("kill")
-            .args(["-TERM", &pid.to_string()])
+            .args([signal, &pid.to_string()])
             .status()
             .expect("failed to run kill");
         assert!(status.success(), "kill failed");
@@ -774,6 +784,92 @@ async fn server_with_invalid_certificate_name_exits_with_an_error() -> Result<()
         "{}",
         server.output()
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn server_reloads_its_configuration_on_sighup() -> Result<()> {
+    let (server_dir, client_dir) = (tempfile::tempdir()?, tempfile::tempdir()?);
+    let (quic_port, home_port, office_port) = (free_udp_port(), free_tcp_port(), free_tcp_port());
+    let echo_addr = start_echo_server().await?;
+    let office_psk = "office-psk-0123456789";
+    write_psk_file(
+        &server_dir.path().join("home.psk"),
+        "home-psk-0123456789",
+        0o600,
+    )?;
+    write_psk_file(&server_dir.path().join("office.psk"), office_psk, 0o600)?;
+    let server_config = server_dir.path().join("server.toml");
+    let write_config = |clients: &str| {
+        fs::write(
+            &server_config,
+            format!(
+                "config-dir = \"state\"\nlisten-host = \"127.0.0.1\"\nquic-listen-port = {}\nquic-cert-hostname = \"localhost\"\n{}",
+                quic_port, clients
+            ),
+        )
+    };
+    let home = format!(
+        "[[clients]]\nname = \"home\"\npsk-files = [\"home.psk\"]\nports = {}\n",
+        home_port
+    );
+    let office = format!(
+        "[[clients]]\nname = \"office\"\npsk-files = [\"office.psk\"]\nports = {}\n",
+        office_port
+    );
+    write_config(&home)?;
+    let mut server = Program::start(SERVER, &["--config-file", path_str(&server_config)], &[]);
+    server.wait_for_output("QUIC server is ready").await?;
+    fs::copy(
+        server_dir.path().join("state").join("cert.der"),
+        client_dir.path().join("cert.der"),
+    )?;
+
+    // The server accepts a new client without a restart.
+    write_config(&format!("{}{}", home, office))?;
+    server.hang_up();
+    server.wait_for_output("Added client \"office\"").await?;
+    let mut args = client_args(client_dir.path(), quic_port, echo_addr.port(), office_port);
+    args.extend(["--client-name", "office"].map(String::from));
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let mut office_client = Program::start(CLIENT, &args, &[("PORTREDIRECT_PSK", office_psk)]);
+    office_client.wait_for_output("Tunnel established").await?;
+    assert_echo(office_port).await?;
+
+    // An invalid configuration changes nothing.
+    write_config(&format!(
+        "{}{}",
+        home,
+        office.replace("office.psk", "missing.psk")
+    ))?;
+    server.hang_up();
+    server
+        .wait_for_output("Failed to reload the configuration, the current one stays in effect")
+        .await?;
+    assert_echo(office_port).await?;
+
+    // Without the client in the configuration, its tunnel ends, and the client gives up. The
+    // server logs that at the new log level.
+    write_config(&format!("log-level = \"debug\"\n{}", home))?;
+    server.hang_up();
+    server
+        .wait_for_output("Logging messages up to the level debug from now on")
+        .await?;
+    assert_eq!(
+        office_client.exit_code().await?,
+        1,
+        "{}",
+        office_client.output()
+    );
+    let reason = "the client was removed from the server's configuration (code 1)";
+    let output = office_client.output();
+    assert!(output.contains(reason), "{}", output);
+    server
+        .wait_for_output("Closing QUIC client connection from")
+        .await?;
+
+    server.terminate();
+    assert_eq!(server.exit_code().await?, 0, "{}", server.output());
     Ok(())
 }
 
