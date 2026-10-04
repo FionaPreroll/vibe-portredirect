@@ -2,8 +2,8 @@
 
 ## Supported Versions
 
-PortRedirect is not stable yet (versions < 1.0).
-Security fixes are made on the latest code (`main` branch) only, there are no maintained release branches.
+PortRedirect is not stable yet: versions before 1.0.0, including its release candidates, e.g. 1.0.0-rc.1.
+Security fixes are made on the latest code (`main` branch) and come with the next release, there are no maintained release branches.
 There are no guarantees, see the [license](LICENSE).
 
 ## Reporting a Vulnerability

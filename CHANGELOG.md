@@ -6,9 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 Server and client must speak the same protocol version, see [docs/PROTOCOL.md](docs/PROTOCOL.md).
 When a version changes the protocol, update the server and all its clients together.
 
-Versions 0.4.0 to 0.7.0 were not published on crates.io; the latest published version is 0.3.0.
+Versions 0.4.0 to 0.7.0 and the release candidates of 1.0.0 were not published on crates.io; the latest published version is 0.3.0.
 
 ## [Unreleased]
+
+## [1.0.0-rc.1] - 2026-10-04
+
+The first release candidate of 1.0.0, to run in real use before 1.0.0 is published on crates.io. From 1.0.0 on, the protocol, the command line, the environment variables, the configuration file and the metric names stay compatible in all 1.x versions. Protocol version 5 (`pr-5`), as in 0.7.0.
 
 ### Added
 
@@ -26,6 +30,7 @@ Versions 0.4.0 to 0.7.0 were not published on crates.io; the latest published ve
 - `--congestion-control bbr`, for both programs and in their configuration files: BBR instead of CUBIC decides how fast a side sends. On links that lose packets for other reasons than congestion, it is much faster: with 1 % loss, the tunnel kept 176 to 1300 Mbit/s instead of less than 4. Set it on both sides; quinn marks BBR experimental.
 - [docs/PERFORMANCE.md](docs/PERFORMANCE.md): measurements over links with 50 and 150 ms round-trip time and 1 % loss, and the chosen values. `utils/link_emulator.rs` emulates such links without privileges, `utils/link_benchmark.py` runs the measurements, and a BATS test checks that data crosses such a link unchanged.
 - Prebuilt binaries for Linux on x86_64, 64-bit ARM and 32-bit ARM (ARMv7) of the latest commit on `main`, in the pre-release `snapshot`: by default for glibc 2.17 or newer, and linked statically with musl for any distribution. For each commit, CI builds them, runs the tests for their architecture and replaces the previous ones, with checksums and build provenance attestations. See the README.
+- Releases of versions, starting with this one: the binaries with checksums and attestations, and the version's changes as notes, in a GitHub release, e.g. `v1.0.0-rc.1`, and Docker images tagged with the version, e.g. `1.0.0-rc.1` and `1.0.0-rc.1-alpine`. A release candidate is a pre-release. Pushing the tag of a version publishes them, see Releasing in the README.
 - `--log-format json` for both programs, also `log-format` in their configuration files: one JSON object per line, with the fields of each message, e.g. for log collectors.
 - The client logs each forwarded connection with `--log-connections`, off by default: when it opens, and when it closes or fails, with the external client's address, the destination, the duration and the bytes in each direction, independently of `--log-level`.
 - Example configuration files of both programs with every setting, explained and with the defaults: [examples/server.toml](examples/server.toml) and [examples/client.toml](examples/client.toml). Tests check that they are valid and have every option.
@@ -42,7 +47,6 @@ Versions 0.4.0 to 0.7.0 were not published on crates.io; the latest published ve
   - `--quic-psk`, `--quic-psk-file` and `PORTREDIRECT_QUIC_PSK` are now `--psk`, `--psk-file` and `PORTREDIRECT_PSK`: the PSK authenticates the client and isn't specific to QUIC.
   - The client's `--quic-remote-hostname-match` is now `--quic-cert-hostname`, like the server option whose value it must match.
   - The server's `--local-host` is now `--listen-host`, matching the client's `--remote-listen-port`, and `--quic-server-host` and `--quic-server-port` are now `--quic-listen-host` and `--quic-listen-port`.
-
 - Metric names are consistent before 1.0: they start with `portredirect_client_` or `portredirect_server_` and say what they count, e.g. `portredirect_client_bytes_to_destination_total` instead of `bytes_transmitted_b_total`. All metrics are listed from the start, with 0, and each program only serves its own. Update dashboards and alerts, see the README for the new names.
 - `--print-metrics` prints the server's metrics under their new names, each summed over all clients.
 - Log messages of the programs' main functions, e.g. the client's fatal errors, have the target `portredirect::client::main` or `portredirect::server::main` instead of `portredirect_client` or `portredirect_server`. Update `RUST_LOG` filters that name the programs.

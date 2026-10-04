@@ -2,21 +2,26 @@ name: Release binaries and Docker images
 # Binaries of the programs for Linux on amd64, arm64 and armv7, each tested on its architecture,
 # the ARM ones in qemu: by default for glibc, and linked statically with musl for distributions
 # without glibc. For each commit on main, they replace the files of the pre-release "snapshot",
-# whose tag moves to that commit. Docker images of both programs with these binaries, tested
-# with the examples in docker/example, become ghcr.io/<owner>/portredirect-server and
-# portredirect-client: :latest on Debian with glibc, :alpine with musl, and :sha-<commit> and
-# :sha-<commit>-alpine. Pull requests only build and test them, so a change that breaks them
-# shows before it is merged.
+# whose tag moves to that commit. A version tag, e.g. v1.0.0-rc.1, publishes them as the release
+# of that version, with the version's section of CHANGELOG.md as notes, see Releasing in the
+# README. Docker images of both programs with these binaries, tested with the examples in
+# docker/example, become ghcr.io/<owner>/portredirect-server and portredirect-client: for main
+# :latest on Debian with glibc, :alpine with musl, and :sha-<commit> and :sha-<commit>-alpine;
+# for a version tag :<version> and :<version>-alpine, e.g. :1.0.0-rc.1. Pull requests only build
+# and test them, so a change that breaks them shows before it is merged.
 #
-# The release changes, so release immutability must stay off (Settings, General, Releases). An
-# immutable release takes no new files, its tag doesn't move, and GitHub never lets its tag name
-# be used again, not even after the release and the tag are deleted: that happened to "latest".
+# The pre-release "snapshot" changes, so release immutability must stay off (Settings, General,
+# Releases). An immutable release takes no new files, its tag doesn't move, and GitHub never lets
+# its tag name be used again, not even after the release and the tag are deleted: that happened
+# to "latest".
 # As the tag moves, `git fetch --tags` refuses to update a local copy of it ("would clobber
 # existing tag"); `git fetch --tags --force` updates it, and VS Code doesn't fetch tags on pull
 # in this repository (.vscode/settings.json).
 on:
   push:
     branches: ["main"]
+    # Versions, e.g. v1.0.0-rc.1.
+    tags: ["v*"]
   pull_request:
     branches: ["main"]
   workflow_dispatch:
@@ -150,10 +155,10 @@ jobs:
           overwrite: true
 
   publish:
-    name: Publish pre-release "snapshot"
+    name: Publish ${{ github.ref_type == 'tag' && format('release {0}', github.ref_name) || 'pre-release "snapshot"' }}
     needs: build
-    # Commits on main only, not pull requests or other branches started by hand.
-    if: github.ref == 'refs/heads/main'
+    # Commits on main and version tags only, not pull requests or other branches started by hand.
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -163,12 +168,37 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
-      TAG: snapshot
+      # The version's own tag, or snapshot, which moves.
+      TAG: ${{ github.ref_type == 'tag' && github.ref_name || 'snapshot' }}
     steps:
-      # For the version and the date of the commit.
+      # For the version, its changes and the date of the commit.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Check the version tag
+        if: github.ref_type == 'tag'
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error::The tag $TAG doesn't match the version in Cargo.toml, $version. Tag the commit that sets the version with v$version."
+            exit 1
+          fi
+          # Only what was merged into main becomes a release.
+          status=$(gh api "repos/$GH_REPO/compare/main...$GITHUB_SHA" --jq .status)
+          if [ "$status" != identical ] && [ "$status" != behind ]; then
+            echo "::error::The tag $TAG is on a commit that isn't on main."
+            exit 1
+          fi
+          # The version's section of the changelog, for the release notes.
+          awk -v heading="## [$version]" '
+            index($0, heading) == 1 { found = 1; next }
+            found && /^## \[/ { exit }
+            found
+          ' CHANGELOG.md > changes.md
+          if ! grep -q '[^[:space:]]' changes.md; then
+            echo "::error::CHANGELOG.md has no section for $version. Rename the section [Unreleased] to [$version] with the date."
+            exit 1
+          fi
       - name: Download archives
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -182,7 +212,31 @@ jobs:
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: dist/portredirect-linux-*.tar.gz
-      - name: Publish
+      - name: Describe the downloads
+        # For the notes of both kinds of releases.
+        run: |
+          cat > downloads.md <<EOF
+          | Architecture | glibc (default) | musl |
+          |---|---|---|
+          | x86_64: PCs and most servers | \`portredirect-linux-amd64.tar.gz\` | \`portredirect-linux-amd64-musl.tar.gz\` |
+          | 64-bit ARM (AArch64), e.g. Raspberry Pi 3 or newer with a 64-bit system | \`portredirect-linux-arm64.tar.gz\` | \`portredirect-linux-arm64-musl.tar.gz\` |
+          | 32-bit ARM (ARMv7 or newer), e.g. Raspberry Pi 2 or newer with a 32-bit system | \`portredirect-linux-armv7.tar.gz\` | \`portredirect-linux-armv7-musl.tar.gz\` |
+
+          - **glibc:** for distributions with glibc $GLIBC_VERSION or newer, i.e. practically all but those with musl, like Alpine. Faster than musl where the CPU limits the throughput.
+          - **musl:** linked statically, so they run on any distribution.
+
+          Each archive holds \`portredirect_server\` and \`portredirect_client\`, with the README, the changelog and the license.
+          Update server and clients together: they must speak the same protocol version.
+
+          To check a download, compare its checksum, and verify with the [GitHub CLI](https://cli.github.com) that this repository's workflow built it:
+
+          \`\`\`sh
+          sha256sum --check --ignore-missing SHA256SUMS
+          gh attestation verify portredirect-linux-amd64.tar.gz --repo $GH_REPO
+          \`\`\`
+          EOF
+      - name: Publish the pre-release
+        if: github.ref_type == 'branch'
         run: |
           # A re-run of an older run must not replace the binaries of a newer commit.
           head=$(gh api "repos/$GH_REPO/commits/main" --jq .sha)
@@ -210,25 +264,8 @@ jobs:
           Linux binaries of the latest commit on \`main\`, [$short]($url/commit/$GITHUB_SHA) of $date: version $version and the [changes since then]($url/blob/$GITHUB_SHA/CHANGELOG.md#unreleased).
           Each new commit on \`main\` replaces them.
 
-          | Architecture | glibc (default) | musl |
-          |---|---|---|
-          | x86_64: PCs and most servers | \`portredirect-linux-amd64.tar.gz\` | \`portredirect-linux-amd64-musl.tar.gz\` |
-          | 64-bit ARM (AArch64), e.g. Raspberry Pi 3 or newer with a 64-bit system | \`portredirect-linux-arm64.tar.gz\` | \`portredirect-linux-arm64-musl.tar.gz\` |
-          | 32-bit ARM (ARMv7 or newer), e.g. Raspberry Pi 2 or newer with a 32-bit system | \`portredirect-linux-armv7.tar.gz\` | \`portredirect-linux-armv7-musl.tar.gz\` |
-
-          - **glibc:** for distributions with glibc $GLIBC_VERSION or newer, i.e. practically all but those with musl, like Alpine. Faster than musl where the CPU limits the throughput.
-          - **musl:** linked statically, so they run on any distribution.
-
-          Each archive holds \`portredirect_server\` and \`portredirect_client\`, with the README, the changelog and the license.
-          Update server and clients together: they must speak the same protocol version.
-
-          To check a download, compare its checksum, and verify with the [GitHub CLI](https://cli.github.com) that this repository's workflow built it:
-
-          \`\`\`sh
-          sha256sum --check --ignore-missing SHA256SUMS
-          gh attestation verify portredirect-linux-amd64.tar.gz --repo $GH_REPO
-          \`\`\`
           EOF
+          cat downloads.md >> notes.md
 
           # Move the tag to this commit, or create it.
           if gh api "repos/$GH_REPO/git/ref/tags/$TAG" --silent 2>/dev/null; then
@@ -247,6 +284,46 @@ jobs:
           else
             gh release create "$TAG" dist/* --prerelease --verify-tag --title "$title" --notes-file notes.md
           fi
+      - name: Publish the release
+        if: github.ref_type == 'tag'
+        run: |
+          version=${TAG#v}
+          url="https://github.com/$GH_REPO"
+          {
+            if [[ $version == *-rc.* ]]; then
+              echo "A release candidate of PortRedirect ${version%%-*}: please try it in real use, and report problems in the [issues]($url/issues). ${version%%-*} follows once a release candidate ran without problems."
+              echo
+            fi
+            echo "## Changes"
+            echo
+            # Links relative to the changelog lead to the files of this version.
+            perl -pe "s{\]\((?!https?://|#)([^)]+)\)}{]($url/blob/$TAG/\$1)}g" changes.md
+            echo
+            echo "## Downloads"
+            echo
+            cat downloads.md
+          } > notes.md
+
+          # A version with a suffix, e.g. -rc.1, is a pre-release.
+          prerelease=()
+          if [[ $version == *-* ]]; then
+            prerelease=(--prerelease)
+          fi
+          # The files of a published version don't change. A draft is left of an earlier attempt
+          # that failed, which this one completes.
+          if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [ "$draft" != true ]; then
+              echo "::error::The release $TAG is published already. To publish it again, delete the release first, not its tag."
+              exit 1
+            fi
+            gh release upload "$TAG" dist/* --clobber
+            gh release edit "$TAG" "${prerelease[@]}" --title "PortRedirect $version" --notes-file notes.md
+          else
+            gh release create "$TAG" dist/* --draft "${prerelease[@]}" --verify-tag \
+              --title "PortRedirect $version" --notes-file notes.md
+          fi
+          # Published only once it has all files.
+          gh release edit "$TAG" --draft=false
 
   docker:
     name: Build and test Docker images
@@ -289,9 +366,13 @@ jobs:
 
   publish-images:
     name: Publish Docker images
-    needs: docker
-    # Commits on main only, like the job publish.
-    if: github.ref == 'refs/heads/main'
+    needs: [docker, publish]
+    # Commits on main, like the job publish, but whether that succeeds or not. Version tags once
+    # the job publish checked the tag and published the release.
+    if: >-
+      !cancelled() && needs.docker.result == 'success' &&
+      (github.ref == 'refs/heads/main' ||
+      (startsWith(github.ref, 'refs/tags/v') && needs.publish.result == 'success'))
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -320,34 +401,46 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # A re-run of an older run must not replace the images of a newer commit.
-          head=$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)
-          if [ "$head" != "$GITHUB_SHA" ]; then
-            echo "::notice::Not published: main is at $head now, its run publishes it."
-            exit 0
-          fi
-
           owner=${GITHUB_REPOSITORY_OWNER,,}
           short=${GITHUB_SHA::7}
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
-          for base in debian alpine; do
-            if [ "$base" = debian ]; then
-              tags=(latest "sha-$short")
-            else
-              tags=(alpine "sha-$short-alpine")
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            # The job publish checked that the tag is v$version.
+            tags=("$version")
+          else
+            # A re-run of an older run must not replace the images of a newer commit.
+            head=$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)
+            if [ "$head" != "$GITHUB_SHA" ]; then
+              echo "::notice::Not published: main is at $head now, its run publishes it."
+              exit 0
             fi
+            tags=(latest "sha-$short")
+            version=$version+$short
+          fi
+          for base in debian alpine; do
             for program in server client; do
               image=ghcr.io/$owner/portredirect-$program
+              # On Alpine, :latest is :alpine, and the other tags end in -alpine.
+              tag_args=()
+              for tag in "${tags[@]}"; do
+                if [ "$base" = debian ]; then
+                  tag_args+=(--tag "$image:$tag")
+                elif [ "$tag" = latest ]; then
+                  tag_args+=(--tag "$image:alpine")
+                else
+                  tag_args+=(--tag "$image:$tag-alpine")
+                fi
+              done
               # The index of an image for several platforms describes it on GitHub.
               docker buildx build --file docker/Dockerfile --target "$program" \
                 --build-arg BASE="$base" --platform linux/amd64,linux/arm64,linux/arm/v7 \
-                --tag "$image:${tags[0]}" --tag "$image:${tags[1]}" \
+                "${tag_args[@]}" \
                 --label "org.opencontainers.image.revision=$GITHUB_SHA" \
-                --label "org.opencontainers.image.version=$version+$short" \
+                --label "org.opencontainers.image.version=$version" \
                 --annotation "index:org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
                 --annotation "index:org.opencontainers.image.revision=$GITHUB_SHA" \
                 --annotation "index:org.opencontainers.image.licenses=GPL-3.0-only" \
-                --annotation "index:org.opencontainers.image.description=PortRedirect $program $version+$short, on $base" \
+                --annotation "index:org.opencontainers.image.description=PortRedirect $program $version, on $base" \
                 --push context
             done
           done

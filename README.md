@@ -46,15 +46,17 @@ In this example, we compare two methods for a web browser to reach a secure HTTP
 
 ### Prebuilt Binaries
 
-The pre-release [`snapshot`](https://github.com/FionaPreroll/vibe-portredirect/releases/tag/snapshot) has binaries of the latest commit on `main` for Linux on x86_64 (`amd64`), 64-bit ARM (`arm64`) and 32-bit ARM (`armv7`, e.g. a Raspberry Pi 2 or newer with a 32-bit system), in two variants:
+Each [release](https://github.com/FionaPreroll/vibe-portredirect/releases), e.g. `v1.0.0-rc.1`, has binaries for Linux on x86_64 (`amd64`), 64-bit ARM (`arm64`) and 32-bit ARM (`armv7`, e.g. a Raspberry Pi 2 or newer with a 32-bit system), in two variants:
 
 - **glibc** (default), e.g. `portredirect-linux-amd64.tar.gz`: for distributions with glibc 2.17 or newer, i.e. practically all but those with musl, like Alpine.
 - **musl**, e.g. `portredirect-linux-amd64-musl.tar.gz`: linked statically, so they run on any distribution, but are a little slower where the CPU limits the throughput, see [docs/PERFORMANCE.md](docs/PERFORMANCE.md#recommendations).
 
-For each commit on `main`, CI builds them, runs the tests for their architecture and replaces the previous ones.
+The pre-release [`snapshot`](https://github.com/FionaPreroll/vibe-portredirect/releases/tag/snapshot) has the same binaries of the latest commit on `main`: for each commit on `main`, CI builds them, runs the tests for their architecture and replaces the previous ones.
+Release candidates, e.g. `v1.0.0-rc.1`, are pre-releases, too, to try a version in real use before it is released.
 
 ```sh
-curl -LO https://github.com/FionaPreroll/vibe-portredirect/releases/download/snapshot/portredirect-linux-amd64.tar.gz
+release=v1.0.0-rc.1    # or snapshot
+curl -LO https://github.com/FionaPreroll/vibe-portredirect/releases/download/$release/portredirect-linux-amd64.tar.gz
 tar -xzf portredirect-linux-amd64.tar.gz
 sudo install portredirect-linux-amd64/portredirect_* /usr/local/bin/
 ```
@@ -66,7 +68,8 @@ The release notes describe how to check a download with `SHA256SUMS` and the att
 Images of both programs with the [prebuilt binaries](#prebuilt-binaries), for amd64, arm64 and armv7:
 
 - `ghcr.io/fionapreroll/portredirect-server` and `ghcr.io/fionapreroll/portredirect-client`
-- `latest`: on Debian with glibc, `alpine`: on Alpine with musl, both of the latest commit on `main`; `sha-<commit>` and `sha-<commit>-alpine`: of an earlier commit, to pin a version.
+- `<version>`, e.g. `1.0.0-rc.1`: of a [release](#prebuilt-binaries), on Debian with glibc; `<version>-alpine`: on Alpine with musl.
+- `latest` and `alpine`: of the latest commit on `main`; `sha-<commit>` and `sha-<commit>-alpine`: of an earlier commit.
 
 They run as an unprivileged user, are configured with [environment variables](#environment-variables) or a [configuration file](#configuration-file), and keep their configuration directory, e.g. the server's certificate and private key, in `/etc/portredirect`.
 
@@ -503,6 +506,18 @@ Install [BATS-Core](https://github.com/bats-core/bats-core) and these tools, the
 ```sh
 bats tests/<test_file.bats>
 ```
+
+### Releasing
+
+1. In a pull request, set the version in `Cargo.toml`, e.g. `1.0.0-rc.1`, update `Cargo.lock` and `fuzz/Cargo.lock` with `cargo update --workspace` and `cargo update --workspace --manifest-path fuzz/Cargo.toml`, and turn the section `[Unreleased]` of [CHANGELOG.md](CHANGELOG.md) into one for the version, with the date.
+2. Once it is merged, tag the merge commit with `v` and the version, and push the tag:
+   ```sh
+   git tag --annotate v1.0.0-rc.1 --message "PortRedirect 1.0.0-rc.1" <commit>
+   git push origin v1.0.0-rc.1
+   ```
+3. The workflow `release.yml` builds and tests the binaries for the tag, checks that it matches the version in `Cargo.toml` and is on `main`, and publishes the release: the binaries with the version's section of the changelog as notes, and Docker images tagged with the version. A version with a suffix, e.g. `-rc.1`, becomes a pre-release.
+
+If publishing fails, run the workflow again: it completes the draft of the release it left. It doesn't change a published release.
 
 ## Command-Line Help
 
