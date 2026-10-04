@@ -3,6 +3,9 @@
     "editor.renderWhitespace": "selection",
     "editor.formatOnSave": true,
     "editor.formatOnSaveMode": "modificationsIfAvailable",
+    // The tag "latest" moves with each commit on main (.github/workflows/release.yml), and
+    // pulling with --tags fails on a moved tag ("would clobber existing tag").
+    "git.pullTags": false,
     "cSpell.language": "en",
     "cSpell.words": [
         "addrs",

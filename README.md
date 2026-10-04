@@ -44,6 +44,21 @@ In this example, we compare two methods for a web browser to reach a secure HTTP
 
 ## Installation
 
+### Prebuilt Binaries
+
+The pre-release [`latest`](https://github.com/FionaPreroll/vibe-portredirect/releases/tag/latest) has static binaries of the latest commit on `main` for Linux on x86_64 (`amd64`), 64-bit ARM (`arm64`) and 32-bit ARM (`armv7`, e.g. a Raspberry Pi 2 or newer with a 32-bit system).
+They run on any distribution. For each commit on `main`, CI builds them, runs the tests for their architecture and replaces the previous ones.
+
+```sh
+curl -LO https://github.com/FionaPreroll/vibe-portredirect/releases/download/latest/portredirect-linux-amd64.tar.gz
+tar -xzf portredirect-linux-amd64.tar.gz
+sudo install portredirect-linux-amd64/portredirect_* /usr/local/bin/
+```
+
+The release notes describe how to check a download with `SHA256SUMS` and the attestation of where it was built.
+
+### From Source
+
 Build both binaries from a checkout of this repository (requires Rust 1.88 or newer):
 
 ```sh
