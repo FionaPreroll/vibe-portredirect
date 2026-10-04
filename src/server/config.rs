@@ -860,9 +860,8 @@ mod tests {
     #[test]
     fn test_every_option_has_an_environment_variable() {
         for arg in Args::command().get_arguments() {
-            let Some(option) = arg.get_long() else {
-                continue;
-            };
+            // The programs take options only.
+            let option = arg.get_long().unwrap();
             // A command rather than a setting: in the environment, the server would never run.
             let expected =
                 (option != "print-quic-cert-fingerprint").then(|| config::env_var_name(option));
