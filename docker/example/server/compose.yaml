@@ -1,0 +1,31 @@
+# The PortRedirect server on a public host, for the stack in ../client. See the README's
+# section Docker.
+#
+#   cp example.env .env    # and set the PSK in it
+#   docker compose up -d
+#   docker compose logs | grep fingerprint    # for the client's .env
+services:
+  portredirect-server:
+    # Debian with glibc; or :alpine, with musl.
+    image: ghcr.io/fionapreroll/portredirect-server:latest
+    restart: unless-stopped
+    environment:
+      # In the container: Docker forwards the published ports below to it.
+      PORTREDIRECT_LISTEN_HOST: 0.0.0.0
+      PORTREDIRECT_ALLOWED_CLIENT_PORTS: 80
+      PORTREDIRECT_QUIC_LISTEN_HOST: 0.0.0.0
+      PORTREDIRECT_QUIC_LISTEN_PORT: 4433
+      PORTREDIRECT_PSK: ${PORTREDIRECT_PSK:?set PORTREDIRECT_PSK in .env}
+    ports:
+      # The ports the clients may ask for, see PORTREDIRECT_ALLOWED_CLIENT_PORTS. In its own
+      # network, the server may listen on ports below 1024, though it doesn't run as root.
+      - "80:80"
+      # QUIC, for the clients.
+      - "4433:4433/udp"
+    volumes:
+      # The certificate and its private key, which the server generates when it first starts.
+      # The clients trust the certificate by its fingerprint, so keep them.
+      - certificate:/etc/portredirect
+
+volumes:
+  certificate:

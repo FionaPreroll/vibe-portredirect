@@ -12,6 +12,8 @@ Versions 0.4.0 to 0.7.0 were not published on crates.io; the latest published ve
 
 ### Added
 
+- Docker images of both programs for amd64, arm64 and armv7, of the latest commit on `main`: `ghcr.io/fionapreroll/portredirect-server` and `ghcr.io/fionapreroll/portredirect-client`, on Debian with glibc (`latest`) or on Alpine with musl (`alpine`), running as an unprivileged user. `docker/example` has a Docker Compose stack in which the client forwards to nginx, without published ports, and the server for it; CI runs both for each commit. See the README.
+- Every option can also be given in an environment variable, e.g. for containers: `PORTREDIRECT_` and the option's name in capitals, e.g. `PORTREDIRECT_DESTINATION_HOST` for `--destination-host`. The command line takes precedence over the environment, and the environment over the configuration file. Flags take `true` or `false`, several values are separated by commas. `--help` names the variables.
 - Both programs can read their settings from a TOML configuration file, `--config-file`. Its keys are the names of the options, and options on the command line or in the environment take precedence. It only names the files that hold PSKs, and relative paths in it are relative to the file. Unknown keys are errors, so typos don't go unnoticed. See the README.
 - Graceful shutdown: on `SIGINT` or `SIGTERM`, both programs start no new forwarded connections and send `DRAIN`, let running ones finish for up to `--shutdown-timeout` seconds (default 5), and then close the rest. A second signal closes them right away. A client that shuts down makes the server release its port right away, e.g. for a standby client, and a server that shuts down refuses new clients.
 - The server serves Prometheus metrics, too: `--provide-metrics` and `--metrics-listen`, on `127.0.0.1:9899` by default. Metrics of its clients have the label `client`. New metrics include failed authentication attempts, refused QUIC connections by reason, and gauges of the running tunnels and forwarded connections on both sides, e.g. the client's `portredirect_client_tunnel_up`. The README lists all metrics.
@@ -27,6 +29,7 @@ Versions 0.4.0 to 0.7.0 were not published on crates.io; the latest published ve
 
 ### Changed
 
+- The client looks up names when it uses them, instead of once when it starts: the destination's for each forwarded connection, and the server's for each connection attempt. So it follows changes of their addresses, e.g. of a container that was created again, or of a server with a dynamic address. It tries each address of the destination, e.g. IPv6 and IPv4 for `localhost`, and takes an address of the server in the family of `--quic-local-host`. A name without address when the client starts is no error any more: the client warns about the destination, and tries to connect to the server again later.
 - Options renamed for consistency before 1.0. The old names are no longer accepted, the programs exit with a message naming the new name. Update service files and scripts together with the programs:
   - `--quic-psk`, `--quic-psk-file` and `PORTREDIRECT_QUIC_PSK` are now `--psk`, `--psk-file` and `PORTREDIRECT_PSK`: the PSK authenticates the client and isn't specific to QUIC.
   - The client's `--quic-remote-hostname-match` is now `--quic-cert-hostname`, like the server option whose value it must match.

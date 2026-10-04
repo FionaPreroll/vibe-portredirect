@@ -1,0 +1,8 @@
+# Settings of portredirect_client, for compose.yaml with a configuration file instead of
+# environment variables. The PSK is in the environment, from .env.
+destination-host = "nginx"
+destination-port = 80
+remote-listen-port = 80
+quic-remote-host = "tunnel.example.com"
+quic-remote-port = 4433
+quic-cert-fingerprint = "sha256:<fingerprint of the server's certificate>"

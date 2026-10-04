@@ -61,6 +61,25 @@ sudo install portredirect-linux-amd64/portredirect_* /usr/local/bin/
 
 The release notes describe how to check a download with `SHA256SUMS` and the attestation of where it was built.
 
+### Docker
+
+Images of both programs with the [prebuilt binaries](#prebuilt-binaries), for amd64, arm64 and armv7:
+
+- `ghcr.io/fionapreroll/portredirect-server` and `ghcr.io/fionapreroll/portredirect-client`
+- `latest`: on Debian with glibc, `alpine`: on Alpine with musl, both of the latest commit on `main`; `sha-<commit>` and `sha-<commit>-alpine`: of an earlier commit, to pin a version.
+
+They run as an unprivileged user, are configured with [environment variables](#environment-variables) or a [configuration file](#configuration-file), and keep their configuration directory, e.g. the server's certificate and private key, in `/etc/portredirect`.
+
+The client fits into a Docker Compose stack: it forwards the connections that the server accepts to another container, e.g. a web server, so the stack publishes no ports and needs no port forwarding on its router.
+[docker/example](docker/example) has such a stack with nginx, and the server for it:
+
+1. On the public host, in `docker/example/server`: copy `example.env` to `.env` and set a PSK in it, e.g. from `openssl rand -hex 32`. Run `docker compose up -d`. `docker compose logs | grep fingerprint` shows the fingerprint of the server's certificate.
+2. In `docker/example/client`: copy `example.env` to `.env` and set the server's address, the fingerprint and the same PSK in it. Run `docker compose up -d`.
+3. nginx answers on the server's port 80.
+
+- **Ports:** The server's container publishes the ports clients may ask for, e.g. 80, and the QUIC port, 4433/udp. Docker passes on the external clients' IPv4 addresses, which the server's limits per address need. IPv6 clients arrive from Docker's own address unless IPv6 is enabled in Docker.
+- **UDP buffers:** Containers get the host's limits, so set them on the hosts, see [Performance](#performance).
+
 ### From Source
 
 Build both binaries from a checkout of this repository (requires Rust 1.88 or newer):
@@ -129,9 +148,9 @@ portredirect_client \
 
 **Parameters:**
 
-- **`--destination-host` & `--destination-port`:** The target TCP service.
+- **`--destination-host` & `--destination-port`:** The target TCP service. A name is looked up for each forwarded connection, and each of its addresses is tried, so the client follows changes, e.g. of a container that was created again.
 - **`--remote-listen-port`:** The TCP port the server should listen on for you. Must be one of the server's `--allowed-client-ports`.
-- **`--quic-remote-host` & `--quic-remote-port`:** The QUIC server’s address.
+- **`--quic-remote-host` & `--quic-remote-port`:** The QUIC server’s address. A name is looked up for each connection attempt, e.g. for a server with a dynamic address.
 - **`--quic-cert-fingerprint`** (recommended): Trust the server's certificate by its fingerprint instead of a copy of `cert.der`, see [Server Certificate](#server-certificate). Give it several times to trust several certificates, e.g. while the server's certificate changes.
 - **`--quic-cert-hostname`** (optional): Name the server's certificate must be issued for, if it differs from `--quic-remote-host`. Must match the server's `--quic-cert-hostname`. Not checked with `--quic-cert-fingerprint`.
 - **`--psk-file`:** File containing the pre-shared key, must match the server’s PSK.
@@ -167,12 +186,32 @@ log-level = "warn"
 portredirect_client --config-file /etc/portredirect/client.toml
 ```
 
-- **Precedence:** Options on the command line or in the environment (`PORTREDIRECT_PSK`) take precedence over the file, and the file over the defaults. So `--log-level debug` overrides the file for a single run. Flags like `--print-metrics` can only switch a setting on.
+- **Precedence:** Options on the command line or in the [environment](#environment-variables) take precedence over the file, and the file over the defaults. So `--log-level debug` overrides the file for a single run. On the command line, flags like `--print-metrics` can only switch a setting on.
 - **No secrets:** The file only names the files that hold the PSKs; it has no key for a PSK itself.
 - **Paths:** Relative paths in the file, e.g. `psk-file` or `config-dir`, are relative to the file's directory, not to the working directory.
 - **Checked:** Unknown keys, e.g. typos, and invalid values are errors: the program names the line and exits with code 2.
 - **Ports:** `allowed-client-ports` and the ports of clients can also be arrays, e.g. `[80, 443, "8000-8100"]`.
 - **Several values:** An option that can be given several times takes an array, e.g. `quic-cert-fingerprint = ["sha256:…", "sha256:…"]`.
+
+### Environment Variables
+
+Each option can also be given in an environment variable: `PORTREDIRECT_` and the option's name in capitals, with underscores, e.g. `PORTREDIRECT_DESTINATION_HOST` for `--destination-host`.
+This suits containers and service managers, see [Docker](#docker):
+
+```sh
+PORTREDIRECT_DESTINATION_HOST=127.0.0.1 PORTREDIRECT_DESTINATION_PORT=4433 \
+PORTREDIRECT_REMOTE_LISTEN_PORT=443 \
+PORTREDIRECT_QUIC_REMOTE_HOST=10.0.0.1 PORTREDIRECT_QUIC_REMOTE_PORT=12345 \
+PORTREDIRECT_QUIC_CERT_FINGERPRINT=sha256:<fingerprint of the server's certificate> \
+PORTREDIRECT_PSK_FILE=/etc/portredirect/psk \
+portredirect_client
+```
+
+- **Precedence:** The command line takes precedence over the environment, and the environment over the [configuration file](#configuration-file).
+- **Flags** take `true` or `false`, e.g. `PORTREDIRECT_PROVIDE_METRICS=true`. `false` switches off a flag that the configuration file switches on.
+- **Several values** are separated by commas, e.g. `PORTREDIRECT_ALLOWED_CLIENT_PORTS=80,443,8000-8100` or `PORTREDIRECT_QUIC_CERT_FINGERPRINT=sha256:…,sha256:…`.
+- **Help:** `--help` names each option's variable. Only the server's `--print-quic-cert-fingerprint` has none: it is a command, not a setting.
+- **PSK:** `PORTREDIRECT_PSK` holds the PSK itself, see [PSK Best Practices](#psk-best-practices).
 
 ### Several Clients and Standby
 
@@ -335,7 +374,7 @@ Always use a long, random pre-shared key when operating over untrusted networks.
 
 Both programs accept the PSK from one of these sources:
 
-- **`--psk-file <PATH>`** (recommended): Reads the PSK from a file, trailing line breaks are ignored. PortRedirect warns if the file is accessible by other users. In the [configuration file](#configuration-file), the same is `psk-file`, or `psk-files` for each of the server's [clients](#several-clients-and-standby).
+- **`--psk-file <PATH>`** (recommended): Reads the PSK from a file, trailing line breaks are ignored. PortRedirect warns if the file is accessible by other users. In the environment, the same is `PORTREDIRECT_PSK_FILE`, in the [configuration file](#configuration-file) `psk-file`, or `psk-files` for each of the server's [clients](#several-clients-and-standby).
 - **`PORTREDIRECT_PSK`** environment variable: Useful for container or service managers that inject secrets.
 - **`--psk <PSK>`**: Avoid this outside of testing. Command-line arguments are visible to every local user in the process list (`ps`, `/proc/<pid>/cmdline`) and end up in shell histories, so PortRedirect warns when it is used.
 

@@ -1,9 +1,12 @@
-name: Release binaries (Linux)
+name: Release binaries and Docker images
 # Binaries of the programs for Linux on amd64, arm64 and armv7, each tested on its architecture,
 # the ARM ones in qemu: by default for glibc, and linked statically with musl for distributions
 # without glibc. For each commit on main, they replace the files of the pre-release "latest",
-# whose tag moves to that commit. Pull requests only build and test them, so a change that breaks
-# them shows before it is merged.
+# whose tag moves to that commit. Docker images of both programs with these binaries, tested
+# with the examples in docker/example, become ghcr.io/<owner>/portredirect-server and
+# portredirect-client: :latest on Debian with glibc, :alpine with musl, and :sha-<commit> and
+# :sha-<commit>-alpine. Pull requests only build and test them, so a change that breaks them
+# shows before it is merged.
 #
 # The release changes, so release immutability must stay off (Settings, General, Releases).
 # As the tag moves, `git fetch --tags` refuses to update a local copy of it ("would clobber
@@ -232,3 +235,107 @@ jobs:
           else
             gh release create "$TAG" dist/* --prerelease --verify-tag --title "$title" --notes-file notes.md
           fi
+
+  docker:
+    name: Build and test Docker images
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download archives
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: portredirect-linux-*
+          merge-multiple: true
+          path: dist
+      - name: Prepare the build context
+        run: docker/build-context.sh dist context
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build images for all platforms
+        # Like the job publish-images below, so a change that breaks one shows here.
+        run: |
+          for base in debian alpine; do
+            for program in server client; do
+              docker buildx build --file docker/Dockerfile --target "$program" \
+                --build-arg BASE="$base" --platform linux/amd64,linux/arm64,linux/arm/v7 context
+            done
+          done
+      - name: Test the examples
+        # With the images for amd64, by the names in the examples, first on Debian, then on Alpine.
+        run: |
+          for base in debian alpine; do
+            for program in server client; do
+              docker buildx build --file docker/Dockerfile --target "$program" \
+                --build-arg BASE="$base" --platform linux/amd64 \
+                --tag "ghcr.io/fionapreroll/portredirect-$program:latest" --load context
+            done
+            docker/test-example.sh
+          done
+
+  publish-images:
+    name: Publish Docker images
+    needs: docker
+    # Commits on main only, like the job publish.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write # push the images
+    steps:
+      # For the version of the programs.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download archives
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: portredirect-linux-*
+          merge-multiple: true
+          path: dist
+      - name: Prepare the build context
+        run: docker/build-context.sh dist context
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Build and push images
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # A re-run of an older run must not replace the images of a newer commit.
+          head=$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)
+          if [ "$head" != "$GITHUB_SHA" ]; then
+            echo "::notice::Not published: main is at $head now, its run publishes it."
+            exit 0
+          fi
+
+          owner=${GITHUB_REPOSITORY_OWNER,,}
+          short=${GITHUB_SHA::7}
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          for base in debian alpine; do
+            if [ "$base" = debian ]; then
+              tags=(latest "sha-$short")
+            else
+              tags=(alpine "sha-$short-alpine")
+            fi
+            for program in server client; do
+              image=ghcr.io/$owner/portredirect-$program
+              # The index of an image for several platforms describes it on GitHub.
+              docker buildx build --file docker/Dockerfile --target "$program" \
+                --build-arg BASE="$base" --platform linux/amd64,linux/arm64,linux/arm/v7 \
+                --tag "$image:${tags[0]}" --tag "$image:${tags[1]}" \
+                --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+                --label "org.opencontainers.image.version=$version+$short" \
+                --annotation "index:org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+                --annotation "index:org.opencontainers.image.revision=$GITHUB_SHA" \
+                --annotation "index:org.opencontainers.image.licenses=GPL-3.0-only" \
+                --annotation "index:org.opencontainers.image.description=PortRedirect $program $version+$short, on $base" \
+                --push context
+            done
+          done

@@ -11,6 +11,7 @@ use tokio::time::{timeout, Duration};
 use tracing::info;
 
 use crate::app_data::{ClientAppData, ServerAppData};
+use crate::host_port::HostPort;
 use crate::quic::{client, server};
 use crate::server::PortSpec;
 use crate::tests::{capture_logs, free_udp_port};
@@ -82,7 +83,7 @@ async fn test_quic_end_to_end_multiple_clients() {
     // Spawn multiple client tasks.
     let num_clients = 5;
     let mut client_handles = Vec::with_capacity(num_clients);
-    let client_app_data = ClientAppData::new(test_psk_client, "0.0.0.0:0".parse().unwrap(), 0);
+    let client_app_data = ClientAppData::new(test_psk_client, HostPort::new("0.0.0.0", 0), 0);
 
     for i in 0..num_clients {
         // Each client gets its own configuration. (Note that we clone the config directory.)

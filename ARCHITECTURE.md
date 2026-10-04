@@ -19,6 +19,7 @@ The `missing_docs` lint fails the lint check if a module becomes public by accid
 | `src/protocol/`        | Messages on the control stream: authentication (`auth.rs`), message and parameter format (`message.rs`), `HELLO`/`WELCOME` (`control.rs`), keepalive and `DRAIN` (`keepalive.rs`). Header and error codes of data streams (`data_stream.rs`), codes for closing connections (`close.rs`). |
 | `src/quic/`            | QUIC endpoints of both sides, certificate loading and generation, trusting the server's certificate by fingerprint (`fingerprint.rs`), protocol versions (ALPN) and transport settings, admission of new connections on the server. |
 | `src/limits.rs`        | Connection limits per address, how fast an address may open connections, blocking of addresses after failed authentication attempts. |
+| `src/host_port.rs`     | Hosts given by name or address, which are looked up when they are used: the client's destination and server. |
 | `src/forward.rs`       | Copies data in both directions between a TCP connection and a QUIC stream, passes on aborts, closes idle connections. |
 | `src/metrics.rs`       | Prometheus endpoint and helpers for the metrics, shared by both binaries.                                    |
 | `src/config.rs`        | Configuration files: reading them, their precedence and values, shared by both binaries.                     |
@@ -32,6 +33,7 @@ The `missing_docs` lint fails the lint check if a module becomes public by accid
 | `tests/cli.rs`         | Tests of the programs: command line, configuration files, exit codes, signals and error messages.            |
 | `tests/*.bats`         | End-to-end tests and benchmarks of the release binaries with external tools.                                 |
 | `fuzz/`                | Fuzz targets for cargo-fuzz, see [fuzz/README.md](fuzz/README.md).                                           |
+| `docker/`              | Dockerfile of the images, the Docker Compose examples and their test, see the README.                       |
 | `examples/`            | `link_emulator.rs`: emulates a network link with delay and loss for benchmarks, see [docs/PERFORMANCE.md](docs/PERFORMANCE.md). |
 | `utils/`               | Benchmark, plotting and documentation tools. `link_benchmark.py` measures tunnels over emulated links.       |
 

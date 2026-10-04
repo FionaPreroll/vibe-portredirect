@@ -35,7 +35,7 @@ pub struct PskArgs {
     /// File containing the pre-shared key for authentication over QUIC.
     /// Trailing line breaks are ignored. A pre-shared key is required: from this file, the
     /// environment variable, --psk or the configuration file.
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", env = "PORTREDIRECT_PSK_FILE")]
     pub psk_file: Option<PathBuf>,
 }
 

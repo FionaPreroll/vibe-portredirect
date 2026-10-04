@@ -4,6 +4,7 @@
 // License: GPL-3.0-only
 
 use anyhow::{anyhow, Result};
+use clap::builder::BoolishValueParser;
 use clap::error::ErrorKind;
 use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser};
 use serde::Deserialize;
@@ -43,95 +44,132 @@ pub struct Args {
     /// TOML file with settings. Its keys are the names of the options without the leading
     /// dashes, e.g. max-connections = 100. Options given on the command line or in the
     /// environment take precedence.
-    #[clap(long, value_name = "PATH")]
+    #[clap(long, value_name = "PATH", env = "PORTREDIRECT_CONFIG_FILE")]
     pub config_file: Option<PathBuf>,
 
     /// Full path to configuration directory, with the server's certificate cert.der, unless
     /// --quic-cert-fingerprint is given.
-    #[clap(long, value_name = "PATH")]
+    #[clap(long, value_name = "PATH", env = "PORTREDIRECT_CONFIG_DIR")]
     pub config_dir: Option<PathBuf>,
 
-    /// Destination host for data coming from QUIC connections. Required, here or in the
-    /// configuration file.
-    #[clap(long, required_unless_present = "config_file")]
+    /// Destination host for data coming from QUIC connections. Required, here, in the
+    /// environment or in the configuration file.
+    #[clap(
+        long,
+        required_unless_present = "config_file",
+        env = "PORTREDIRECT_DESTINATION_HOST"
+    )]
     pub destination_host: Option<String>,
 
-    /// Destination port (currently TCP only). Required, here or in the configuration file.
+    /// Destination port (currently TCP only). Required, here, in the environment or in the
+    /// configuration file.
     #[clap(
         long,
         value_parser = clap::value_parser!(u16).range(1..),
-        required_unless_present = "config_file"
+        required_unless_present = "config_file",
+        env = "PORTREDIRECT_DESTINATION_PORT"
     )]
     pub destination_port: Option<u16>,
 
     /// TCP port the server should listen on for external connections.
-    /// Must be allowed by the server's --allowed-client-ports. Required, here or in the
-    /// configuration file.
+    /// Must be allowed by the server's --allowed-client-ports. Required, here, in the environment
+    /// or in the configuration file.
     #[clap(
         long,
         value_parser = clap::value_parser!(u16).range(1..),
-        required_unless_present = "config_file"
+        required_unless_present = "config_file",
+        env = "PORTREDIRECT_REMOTE_LISTEN_PORT"
     )]
     pub remote_listen_port: Option<u16>,
 
     /// Name to authenticate with, if the server knows several clients: 1 to 64 letters, digits,
     /// dots, underscores or hyphens.
-    #[clap(long, default_value = ClientName::DEFAULT)]
+    #[clap(
+        long,
+        default_value = ClientName::DEFAULT,
+        env = "PORTREDIRECT_CLIENT_NAME"
+    )]
     pub client_name: ClientName,
 
-    /// QUIC connection remote host (server). Required, here or in the configuration file.
-    #[clap(long, required_unless_present = "config_file")]
+    /// QUIC connection remote host (server). Required, here, in the environment or in the
+    /// configuration file.
+    #[clap(
+        long,
+        required_unless_present = "config_file",
+        env = "PORTREDIRECT_QUIC_REMOTE_HOST"
+    )]
     pub quic_remote_host: Option<String>,
 
-    /// QUIC connection remote port (server). Required, here or in the configuration file.
+    /// QUIC connection remote port (server). Required, here, in the environment or in the
+    /// configuration file.
     #[clap(
         long,
         value_parser = clap::value_parser!(u16).range(1..),
-        required_unless_present = "config_file"
+        required_unless_present = "config_file",
+        env = "PORTREDIRECT_QUIC_REMOTE_PORT"
     )]
     pub quic_remote_port: Option<u16>,
 
     /// QUIC connection local host to bind to (client).
-    #[clap(long, default_value = "0.0.0.0")]
+    #[clap(long, default_value = "0.0.0.0", env = "PORTREDIRECT_QUIC_LOCAL_HOST")]
     pub quic_local_host: String,
 
     /// QUIC connection local port to bind to (client).
-    #[clap(long, default_value = "0")]
+    #[clap(long, default_value = "0", env = "PORTREDIRECT_QUIC_LOCAL_PORT")]
     pub quic_local_port: u16,
 
     /// Serve Prometheus metrics via HTTP at /metrics, see --metrics-listen.
-    #[clap(long)]
+    #[clap(
+        long,
+        env = "PORTREDIRECT_PROVIDE_METRICS",
+        value_parser = BoolishValueParser::new()
+    )]
     pub provide_metrics: bool,
 
     /// Address and port for --provide-metrics. The endpoint has no authentication, only make it
     /// reachable from trusted networks.
-    #[clap(long, default_value = "127.0.0.1:9898")]
+    #[clap(
+        long,
+        default_value = "127.0.0.1:9898",
+        env = "PORTREDIRECT_METRICS_LISTEN"
+    )]
     pub metrics_listen: SocketAddr,
 
     /// Maximum number of concurrently forwarded connections, i.e. connections to the destination.
     #[clap(
         long,
         default_value_t = PortRedirectProtocol::DEFAULT_MAX_FORWARDED_CONNECTIONS as u32,
-        value_parser = clap::value_parser!(u32).range(1..)
+        value_parser = clap::value_parser!(u32).range(1..),
+        env = "PORTREDIRECT_MAX_CONNECTIONS"
     )]
     pub max_connections: u32,
 
     /// How fast to send to the server. bbr is much faster on links that lose packets for other
     /// reasons than congestion, e.g. wireless ones. Set the server's option, too, for the other
     /// direction.
-    #[clap(long, value_enum, default_value_t = CongestionControl::Cubic)]
+    #[clap(
+        long,
+        value_enum,
+        default_value_t = CongestionControl::Cubic,
+        env = "PORTREDIRECT_CONGESTION_CONTROL"
+    )]
     pub congestion_control: CongestionControl,
 
     /// Name the server's TLS certificate must be issued for (Subject Alt Name), if it differs
     /// from --quic-remote-host. Must match the server's --quic-cert-hostname. Not checked with
     /// --quic-cert-fingerprint.
-    #[clap(long)]
+    #[clap(long, env = "PORTREDIRECT_QUIC_CERT_HOSTNAME")]
     pub quic_cert_hostname: Option<String>,
 
     /// Trust the server's certificate by its fingerprint instead of cert.der: sha256: and 64 hex
     /// digits, as the server's --print-quic-cert-fingerprint prints. Give it several times to
     /// trust several certificates, e.g. while the server's certificate changes.
-    #[clap(long, value_name = "FINGERPRINT")]
+    #[clap(
+        long,
+        value_name = "FINGERPRINT",
+        env = "PORTREDIRECT_QUIC_CERT_FINGERPRINT",
+        value_delimiter = ','
+    )]
     pub quic_cert_fingerprint: Vec<CertFingerprint>,
 
     #[command(flatten)]
@@ -139,12 +177,16 @@ pub struct Args {
 
     /// Seconds that running forwarded connections may take to finish when shutting down on
     /// SIGINT or SIGTERM, 0 to close them right away. A second signal closes them right away.
-    #[clap(long, default_value_t = DEFAULT_SHUTDOWN_TIMEOUT.as_secs())]
+    #[clap(
+        long,
+        default_value_t = DEFAULT_SHUTDOWN_TIMEOUT.as_secs(),
+        env = "PORTREDIRECT_SHUTDOWN_TIMEOUT"
+    )]
     pub shutdown_timeout: u64,
 
     /// Log messages up to this level: off, error, warn, info, debug or trace. The RUST_LOG
     /// environment variable, if set, takes precedence and can set levels per module.
-    #[clap(long, default_value = "info")]
+    #[clap(long, default_value = "info", env = "PORTREDIRECT_LOG_LEVEL")]
     pub log_level: LevelFilter,
 }
 
@@ -577,8 +619,9 @@ mod tests {
                 "a pre-shared key is required: use --psk-file, PORTREDIRECT_PSK, --psk, or psk-file in the configuration file".to_string()
             } else {
                 format!(
-                    "--{0} is required, on the command line or as {0} in the configuration file",
-                    missing
+                    "--{0} is required, on the command line, as {1} in the environment or as {0} in the configuration file",
+                    missing,
+                    config::env_var_name(missing)
                 )
             };
             assert!(message.contains(&expected), "{}: {}", missing, message);
@@ -587,6 +630,20 @@ mod tests {
         let err = config(&["--psk", "secret"]).unwrap_err();
         let err = err.downcast::<clap::Error>().unwrap();
         assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn test_every_option_has_an_environment_variable() {
+        for arg in Args::command().get_arguments() {
+            // The programs take options only.
+            let option = arg.get_long().unwrap();
+            assert_eq!(
+                arg.get_env().and_then(|env| env.to_str()),
+                Some(config::env_var_name(option).as_str()),
+                "--{}",
+                option
+            );
+        }
     }
 
     #[test]

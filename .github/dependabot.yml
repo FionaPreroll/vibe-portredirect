@@ -16,6 +16,12 @@ updates:
     schedule:
       interval: "weekly"
 
+  # Keeps the digest-pinned base images in docker/Dockerfile up to date.
+  - package-ecosystem: "docker"
+    directory: "/docker"
+    schedule:
+      interval: "weekly"
+
   # Keeps the SHA-pinned GitHub Actions in .github/workflows up to date.
   - package-ecosystem: "github-actions"
     directory: "/"

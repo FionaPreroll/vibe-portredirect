@@ -76,10 +76,15 @@ struct Program {
 
 impl Program {
     fn start(program: &str, args: &[&str], env: &[(&str, &str)]) -> Program {
-        let mut child = Command::new(program)
+        let mut command = Command::new(program);
+        // Only the settings of the test, not those of the environment the tests run in.
+        for (name, _) in std::env::vars_os() {
+            if name.to_string_lossy().starts_with("PORTREDIRECT_") {
+                command.env_remove(name);
+            }
+        }
+        let mut child = command
             .args(args)
-            .env_remove("PORTREDIRECT_PSK")
-            .env_remove("PORTREDIRECT_QUIC_PSK")
             .env_remove("RUST_LOG")
             .envs(env.iter().copied())
             .stdin(Stdio::null())
@@ -615,6 +620,70 @@ async fn client_without_certificate_exits_with_code_1() -> Result<()> {
 }
 
 #[tokio::test]
+async fn client_looks_up_names_when_it_uses_them() -> Result<()> {
+    let (server_dir, client_dir) = (tempfile::tempdir()?, tempfile::tempdir()?);
+    let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
+    let echo_addr = start_echo_server().await?;
+    let mut server = start_server_with(server_dir.path(), quic_port, listen_port, &[]).await?;
+    fs::copy(
+        server_dir.path().join("cert.der"),
+        client_dir.path().join("cert.der"),
+    )?;
+    // Starts a client of the server at `server_host` for the destination at `destination_host`.
+    let start_client = |server_host: &str, destination_host: &str| {
+        let mut args = client_args(client_dir.path(), quic_port, echo_addr.port(), listen_port);
+        for (option, host) in [
+            ("--quic-remote-host", server_host),
+            ("--destination-host", destination_host),
+        ] {
+            let value = args.iter().position(|arg| arg == option).unwrap() + 1;
+            args[value] = host.to_string();
+        }
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        Program::start(CLIENT, &args, &[("PORTREDIRECT_PSK", PSK)])
+    };
+
+    // By name: the client takes an address of its socket's family, IPv4, for the server, and
+    // tries each address of the destination, which accepts connections on IPv4 only.
+    let mut client = start_client("localhost", "localhost");
+    client.wait_for_output("Tunnel established").await?;
+    assert_echo(listen_port).await?;
+    client.terminate();
+    assert_eq!(client.exit_code().await?, 0, "{}", client.output());
+    wait_until_closed(listen_port).await?;
+
+    // A destination without address doesn't stop the client, e.g. a container that doesn't run
+    // yet: each connection fails until it has one.
+    let mut client = start_client("localhost", "nonexistent.invalid");
+    client.wait_for_output("Tunnel established").await?;
+    let warning = "The destination nonexistent.invalid:";
+    assert!(client.output().contains(warning), "{}", client.output());
+    let mut external = TcpStream::connect(localhost(listen_port)).await?;
+    let mut byte = [0u8; 1];
+    let read = timeout(WAIT_TIMEOUT, external.read(&mut byte)).await?;
+    assert!(!matches!(read, Ok(1)), "{:?}", read);
+    client
+        .wait_for_output("failed to connect to destination nonexistent.invalid:")
+        .await?;
+    client.terminate();
+    assert_eq!(client.exit_code().await?, 0, "{}", client.output());
+    wait_until_closed(listen_port).await?;
+
+    // Nor does a server without address: the client tries again later.
+    let mut client = start_client("nonexistent.invalid", "localhost");
+    client
+        .wait_for_output("failed to look up the server nonexistent.invalid:")
+        .await?;
+    client.wait_for_output("Reconnecting in").await?;
+    client.terminate();
+    assert_eq!(client.exit_code().await?, 0, "{}", client.output());
+
+    server.terminate();
+    assert_eq!(server.exit_code().await?, 0, "{}", server.output());
+    Ok(())
+}
+
+#[tokio::test]
 async fn server_does_not_start_without_its_private_key() -> Result<()> {
     let config_dir = tempfile::tempdir()?;
     // The certificate the server generated on its first start, but not its private key.
@@ -804,6 +873,74 @@ log-level = "error"
 }
 
 #[tokio::test]
+async fn programs_read_their_options_from_the_environment() -> Result<()> {
+    let (server_dir, client_dir) = (tempfile::tempdir()?, tempfile::tempdir()?);
+    let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
+    let echo_port = start_echo_server().await?.port().to_string();
+    let (quic_port, listen_port_text) = (quic_port.to_string(), listen_port.to_string());
+
+    // The environment takes precedence over the configuration file, which would make the server
+    // listen elsewhere and log errors only.
+    let server_config = server_dir.path().join("server.toml");
+    fs::write(
+        &server_config,
+        "quic-listen-port = 1\nlog-level = \"error\"\n",
+    )?;
+    let allowed_ports = format!("1,{}", listen_port);
+    let mut server = Program::start(
+        SERVER,
+        &[],
+        &[
+            ("PORTREDIRECT_CONFIG_FILE", path_str(&server_config)),
+            ("PORTREDIRECT_CONFIG_DIR", path_str(server_dir.path())),
+            ("PORTREDIRECT_LISTEN_HOST", "127.0.0.1"),
+            ("PORTREDIRECT_ALLOWED_CLIENT_PORTS", &allowed_ports),
+            ("PORTREDIRECT_QUIC_LISTEN_PORT", &quic_port),
+            ("PORTREDIRECT_QUIC_CERT_HOSTNAME", "localhost"),
+            ("PORTREDIRECT_PRINT_METRICS", "true"),
+            ("PORTREDIRECT_LOG_LEVEL", "info"),
+            ("PORTREDIRECT_PSK", PSK),
+        ],
+    );
+    server.wait_for_output("QUIC server is ready").await?;
+    let mut print = Program::start(
+        SERVER,
+        &["--print-quic-cert-fingerprint"],
+        &[("PORTREDIRECT_CONFIG_DIR", path_str(server_dir.path()))],
+    );
+    assert_eq!(print.exit_code().await?, 0, "{}", print.output());
+    // Several values, separated by commas: another certificate's and the server's.
+    let fingerprints = format!("sha256:{},{}", "ab".repeat(32), print.stdout().trim());
+
+    // The command line takes precedence over the environment, which names another port.
+    let psk_file = client_dir.path().join("psk");
+    write_psk_file(&psk_file, PSK, 0o600)?;
+    let mut client = Program::start(
+        CLIENT,
+        &["--remote-listen-port", &listen_port_text],
+        &[
+            ("PORTREDIRECT_CONFIG_DIR", path_str(client_dir.path())),
+            ("PORTREDIRECT_DESTINATION_HOST", "127.0.0.1"),
+            ("PORTREDIRECT_DESTINATION_PORT", &echo_port),
+            ("PORTREDIRECT_REMOTE_LISTEN_PORT", "1"),
+            ("PORTREDIRECT_QUIC_REMOTE_HOST", "127.0.0.1"),
+            ("PORTREDIRECT_QUIC_REMOTE_PORT", &quic_port),
+            ("PORTREDIRECT_QUIC_CERT_FINGERPRINT", &fingerprints),
+            ("PORTREDIRECT_PSK_FILE", path_str(&psk_file)),
+        ],
+    );
+    client.wait_for_output("Tunnel established").await?;
+    assert_echo(listen_port).await?;
+    server.wait_for_output("tunnels_total: 1").await?;
+
+    client.terminate();
+    assert_eq!(client.exit_code().await?, 0, "{}", client.output());
+    server.terminate();
+    assert_eq!(server.exit_code().await?, 0, "{}", server.output());
+    Ok(())
+}
+
+#[tokio::test]
 async fn server_prints_the_fingerprint_of_its_certificate() -> Result<()> {
     let config_dir = tempfile::tempdir()?;
     let args = [
@@ -865,7 +1002,7 @@ async fn invalid_configuration_files_exit_with_code_2() -> Result<()> {
             SERVER,
             &clients,
             &[("PORTREDIRECT_PSK", PSK)],
-            "PORTREDIRECT_PSK doesn't apply",
+            "a PSK on the command line or in the environment doesn't apply",
         ),
         (
             SERVER,

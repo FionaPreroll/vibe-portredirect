@@ -1,0 +1,33 @@
+# A stack with a web server that is reachable through the PortRedirect server in ../server, on
+# its port 80, though the stack publishes no ports. See the README's section Docker.
+#
+#   cp example.env .env    # and fill it in
+#   docker compose up -d
+services:
+  nginx:
+    image: nginx:alpine
+    restart: unless-stopped
+    # No ports: portredirect-client forwards the connections that the server accepts to
+    # nginx:80, in the stack's network.
+
+  portredirect-client:
+    # Debian with glibc; or :alpine, with musl.
+    image: ghcr.io/fionapreroll/portredirect-client:latest
+    restart: unless-stopped
+    environment:
+      PORTREDIRECT_DESTINATION_HOST: nginx
+      PORTREDIRECT_DESTINATION_PORT: 80
+      PORTREDIRECT_REMOTE_LISTEN_PORT: 80
+      PORTREDIRECT_QUIC_REMOTE_HOST: ${PORTREDIRECT_QUIC_REMOTE_HOST:?set the server's address in .env}
+      PORTREDIRECT_QUIC_REMOTE_PORT: 4433
+      PORTREDIRECT_QUIC_CERT_FINGERPRINT: ${PORTREDIRECT_QUIC_CERT_FINGERPRINT:?set the fingerprint of the server's certificate in .env}
+      PORTREDIRECT_PSK: ${PORTREDIRECT_PSK:?set PORTREDIRECT_PSK in .env}
+    # Or with the configuration file client.toml instead of the settings above. The PSK stays in
+    # the environment, which takes precedence over the file.
+    # environment:
+    #   PORTREDIRECT_CONFIG_FILE: /etc/portredirect/client.toml
+    #   PORTREDIRECT_PSK: ${PORTREDIRECT_PSK:?set PORTREDIRECT_PSK in .env}
+    # volumes:
+    #   - ./client.toml:/etc/portredirect/client.toml:ro
+    depends_on:
+      - nginx
