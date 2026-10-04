@@ -316,6 +316,7 @@ Only after that, the server opens the TCP port the client asked for. Addresses t
 
 - [docs/PROTOCOL.md](docs/PROTOCOL.md) describes the protocol in detail.
 - [SECURITY.md](SECURITY.md) describes the security model, known limitations and how to report vulnerabilities.
+- [docs/SECURITY-REVIEW.md](docs/SECURITY-REVIEW.md) is the internal security review before 1.0.
 
 ## Development
 
@@ -340,6 +341,18 @@ Before committing, run the linters (`cargo fmt --check`, `cargo clippy` and, if 
 
 ```sh
 make lint
+```
+
+### Fuzzing and Dependency Checks
+
+The fuzz targets in `fuzz/` feed random input to the parsers of the protocol.
+They need a nightly toolchain and [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz); `make fuzz` runs each of them for a minute, see [fuzz/README.md](fuzz/README.md).
+`make test` runs a short smoke test of the same parsers on stable Rust.
+
+[cargo-deny](https://github.com/EmbarkStudios/cargo-deny) checks the dependencies for known vulnerabilities, licenses that don't go with the GPL, and sources other than crates.io, as configured in `deny.toml`:
+
+```sh
+make deny
 ```
 
 ### BATS Tests

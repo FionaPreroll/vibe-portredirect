@@ -13,6 +13,8 @@
 #   test_python   : Run Python unit tests (Data Cruncher and Connection Stress Test).
 #   test_bats     : Run BATS end-to-end tests (needs bats, iperf3, nc, pv, curl and Python dependencies).
 #   coverage      : Measure the test coverage of the Cargo tests (needs cargo-llvm-cov).
+#   deny          : Check the dependencies' advisories, licenses and sources (needs cargo-deny).
+#   fuzz          : Run each fuzz target for FUZZ_SECONDS seconds (needs nightly Rust and cargo-fuzz).
 #   clean         : Clean build artifacts using Cargo's built-in clean command.
 #   run_server    : Run the 'portredirect_server' binary with extra arguments. Pass args via the ARGS variable.
 #   run_client    : Run the 'portredirect_client' binary with extra arguments. Pass args via the ARGS variable.
@@ -46,7 +48,10 @@
 #       Runs the client binary with additional arguments.
 #############################################
 
-.PHONY: all docs build release lint lint_fix test test_bats test_cargo test_cargo_debug test_python coverage clean run_server run_client
+.PHONY: all docs build release lint lint_fix test test_bats test_cargo test_cargo_debug test_python coverage deny fuzz clean run_server run_client
+
+# Seconds to run each fuzz target for, see the fuzz target.
+FUZZ_SECONDS ?= 60
 
 # Default target: build for release.
 all: test release
@@ -135,6 +140,24 @@ coverage:
 	@echo "Measuring test coverage..."
 	@cargo llvm-cov --workspace --html $(ARGS)
 	@cargo llvm-cov report --summary-only
+
+# Check the dependencies for known vulnerabilities, unmaintained crates, licenses that don't go
+# with the GPL and sources other than crates.io, as configured in deny.toml.
+# Install the tool with: cargo install cargo-deny
+# * (This target is called by CI as well.)
+deny:
+	@echo "Checking dependencies (cargo deny)..."
+	@cargo deny --locked check
+
+# Run each fuzz target in fuzz/ for FUZZ_SECONDS seconds, e.g. make fuzz FUZZ_SECONDS=600.
+# Stops at the first failure; fuzz/README.md describes how to reproduce it.
+# Install the tools with: rustup toolchain install nightly && cargo install cargo-fuzz
+# * (This target is called by CI as well.)
+fuzz:
+	@cd fuzz && for target in $$(cargo +nightly fuzz list); do \
+		echo "Fuzzing $$target for $(FUZZ_SECONDS) seconds..."; \
+		cargo +nightly fuzz run $$target -- -max_total_time=$(FUZZ_SECONDS) -dict=portredirect.dict || exit 1; \
+	done
 
 # Run Python unit tests.
 # * (This target is called by CI as well.)

@@ -1,0 +1,66 @@
+[package]
+name = "portredirect-fuzz"
+version = "0.0.0"
+edition = "2021"
+license = "GPL-3.0-only"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+portredirect = { path = ".." }
+
+# A workspace of its own, so the main crate's Cargo.lock stays free of fuzzing dependencies.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "server_authentication"
+path = "fuzz_targets/server_authentication.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "client_authentication"
+path = "fuzz_targets/client_authentication.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hello"
+path = "fuzz_targets/hello.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "welcome"
+path = "fuzz_targets/welcome.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "control_messages"
+path = "fuzz_targets/control_messages.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "connection_header"
+path = "fuzz_targets/connection_header.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parameters"
+path = "fuzz_targets/parameters.rs"
+test = false
+doc = false
+bench = false

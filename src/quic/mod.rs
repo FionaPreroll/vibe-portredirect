@@ -69,6 +69,10 @@ pub fn configure_transport_config(transport_config: &mut TransportConfig) {
 
     // We don't want to "sacrifice privacy" to more easily measure latency
     transport_config.allow_spin(false);
+
+    // The server reads no datagrams, so clients may not send any. Otherwise each connection
+    // could buffer up to 1.25 MB of them, even before the client authenticates.
+    transport_config.datagram_receive_buffer_size(None);
 }
 
 /// Returns the transport settings of the client.
@@ -86,6 +90,8 @@ pub fn client_transport_config(max_forwarded_connections: usize) -> TransportCon
     // Keep NAT mappings on the client's side alive, too.
     transport_config.keep_alive_interval(Some(PortRedirectProtocol::QUIC_KEEP_ALIVE_INTERVAL));
     transport_config.allow_spin(false);
+    // The client reads no datagrams, so the server may not send any.
+    transport_config.datagram_receive_buffer_size(None);
     transport_config
 }
 
