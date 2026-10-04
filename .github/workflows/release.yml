@@ -1,14 +1,16 @@
 name: Release binaries and Docker images
 # Binaries of the programs for Linux on amd64, arm64 and armv7, each tested on its architecture,
 # the ARM ones in qemu: by default for glibc, and linked statically with musl for distributions
-# without glibc. For each commit on main, they replace the files of the pre-release "latest",
+# without glibc. For each commit on main, they replace the files of the pre-release "snapshot",
 # whose tag moves to that commit. Docker images of both programs with these binaries, tested
 # with the examples in docker/example, become ghcr.io/<owner>/portredirect-server and
 # portredirect-client: :latest on Debian with glibc, :alpine with musl, and :sha-<commit> and
 # :sha-<commit>-alpine. Pull requests only build and test them, so a change that breaks them
 # shows before it is merged.
 #
-# The release changes, so release immutability must stay off (Settings, General, Releases).
+# The release changes, so release immutability must stay off (Settings, General, Releases). An
+# immutable release takes no new files, its tag doesn't move, and GitHub never lets its tag name
+# be used again, not even after the release and the tag are deleted: that happened to "latest".
 # As the tag moves, `git fetch --tags` refuses to update a local copy of it ("would clobber
 # existing tag"); `git fetch --tags --force` updates it, and VS Code doesn't fetch tags on pull
 # in this repository (.vscode/settings.json).
@@ -148,7 +150,7 @@ jobs:
           overwrite: true
 
   publish:
-    name: Publish pre-release "latest"
+    name: Publish pre-release "snapshot"
     needs: build
     # Commits on main only, not pull requests or other branches started by hand.
     if: github.ref == 'refs/heads/main'
@@ -161,7 +163,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
-      TAG: latest
+      TAG: snapshot
     steps:
       # For the version and the date of the commit.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -187,6 +189,16 @@ jobs:
           if [ "$head" != "$GITHUB_SHA" ]; then
             echo "::notice::Not published: main is at $head now, its run publishes it."
             exit 0
+          fi
+
+          # An immutable release takes no new files and its tag doesn't move, see above.
+          if [ "$(gh api "repos/$GH_REPO/immutable-releases" --jq .enabled 2>/dev/null)" = true ]; then
+            echo "::error::Release immutability is on (Settings, General, Releases). The pre-release $TAG takes the files of each new commit, so turn it off."
+            exit 1
+          fi
+          if [ "$(gh api "repos/$GH_REPO/releases/tags/$TAG" --jq .immutable 2>/dev/null)" = true ]; then
+            echo "::error::The pre-release $TAG is immutable and can't change any more. Delete it and its tag, and give the pre-release a new tag name in this workflow: GitHub doesn't let the tag name of an immutable release be used again."
+            exit 1
           fi
 
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)

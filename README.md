@@ -46,7 +46,7 @@ In this example, we compare two methods for a web browser to reach a secure HTTP
 
 ### Prebuilt Binaries
 
-The pre-release [`latest`](https://github.com/FionaPreroll/vibe-portredirect/releases/tag/latest) has binaries of the latest commit on `main` for Linux on x86_64 (`amd64`), 64-bit ARM (`arm64`) and 32-bit ARM (`armv7`, e.g. a Raspberry Pi 2 or newer with a 32-bit system), in two variants:
+The pre-release [`snapshot`](https://github.com/FionaPreroll/vibe-portredirect/releases/tag/snapshot) has binaries of the latest commit on `main` for Linux on x86_64 (`amd64`), 64-bit ARM (`arm64`) and 32-bit ARM (`armv7`, e.g. a Raspberry Pi 2 or newer with a 32-bit system), in two variants:
 
 - **glibc** (default), e.g. `portredirect-linux-amd64.tar.gz`: for distributions with glibc 2.17 or newer, i.e. practically all but those with musl, like Alpine.
 - **musl**, e.g. `portredirect-linux-amd64-musl.tar.gz`: linked statically, so they run on any distribution, but are a little slower where the CPU limits the throughput, see [docs/PERFORMANCE.md](docs/PERFORMANCE.md#recommendations).
@@ -54,7 +54,7 @@ The pre-release [`latest`](https://github.com/FionaPreroll/vibe-portredirect/rel
 For each commit on `main`, CI builds them, runs the tests for their architecture and replaces the previous ones.
 
 ```sh
-curl -LO https://github.com/FionaPreroll/vibe-portredirect/releases/download/latest/portredirect-linux-amd64.tar.gz
+curl -LO https://github.com/FionaPreroll/vibe-portredirect/releases/download/snapshot/portredirect-linux-amd64.tar.gz
 tar -xzf portredirect-linux-amd64.tar.gz
 sudo install portredirect-linux-amd64/portredirect_* /usr/local/bin/
 ```
