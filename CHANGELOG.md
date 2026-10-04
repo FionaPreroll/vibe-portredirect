@@ -35,7 +35,6 @@ Versions 0.4.0 to 0.7.0 were not published on crates.io; the latest published ve
 
 - The server warns when it refuses QUIC connections, with the reason, e.g. how much longer the address is blocked, at most once a minute for each reason. So far, it logged refusals only at the debug level, apart from its connection limit. A client that the server refuses names the possible reasons, once until it connects again.
 - Log messages of a tunnel name its client as `tunnel{client="web"}` instead of `client{name="web"}`, so JSON log messages don't have two keys `name`.
-
 - The client looks up names when it uses them, instead of once when it starts: the destination's for each forwarded connection, and the server's for each connection attempt. So it follows changes of their addresses, e.g. of a container that was created again, or of a server with a dynamic address. It tries each address of the destination, e.g. IPv6 and IPv4 for `localhost`, and takes an address of the server in the family of `--quic-local-host`. A name without address when the client starts is no error any more: the client warns about the destination, and tries to connect to the server again later.
 - Options renamed for consistency before 1.0. The old names are no longer accepted, the programs exit with a message naming the new name. Update service files and scripts together with the programs:
   - `--quic-psk`, `--quic-psk-file` and `PORTREDIRECT_QUIC_PSK` are now `--psk`, `--psk-file` and `PORTREDIRECT_PSK`: the PSK authenticates the client and isn't specific to QUIC.
