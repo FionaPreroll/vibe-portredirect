@@ -25,6 +25,7 @@ use crate::limits::QuicAdmission;
 use crate::net::canonical;
 use crate::private_files::{warn_if_accessible_by_others, write_private_file};
 use crate::protocol::close::CloseCode;
+use crate::protocol::keepalive::CONTROL_CHANNEL_TIMEOUT;
 use crate::quic::fingerprint::CertFingerprint;
 use crate::quic::{
     bind_server_endpoint, configure_transport_config, CongestionControl, ALPN_QUIC_PORTREDIRECT,
@@ -89,6 +90,8 @@ impl ConnectionLimit {
 /// * `admission` - Limits per client address and blocking after failed authentication attempts.
 /// * `handshake_timeout` - Time a client has to complete the TLS handshake. Longer handshakes,
 ///   e.g. stalled on purpose, are aborted and count as failed attempts.
+/// * `keepalive_timeout` - Time within which an established tunnel's client must send its next
+///   message, usually a PING. Otherwise its keepalive failed, and the server ends the tunnel.
 /// * `congestion_control` - How fast the server sends.
 /// * `app_data` - Application-specific data.
 #[derive(Debug)]
@@ -101,6 +104,7 @@ pub struct ServerConfig<AppDataType> {
     pub connection_limit: ConnectionLimit,
     pub admission: Arc<QuicAdmission>,
     pub handshake_timeout: Duration,
+    pub keepalive_timeout: Duration,
     pub congestion_control: CongestionControl,
     /// When to shut down, and the forwarded connections that may finish meanwhile.
     pub shutdown: Shutdown,
@@ -139,6 +143,7 @@ impl<AppDataType> ServerConfig<AppDataType> {
             connection_limit: ConnectionLimit::new(connection_limit),
             admission: Arc::new(QuicAdmission::default()),
             handshake_timeout: HANDSHAKE_TIMEOUT,
+            keepalive_timeout: CONTROL_CHANNEL_TIMEOUT,
             congestion_control: CongestionControl::default(),
             shutdown: Shutdown::default(),
             app_data,

@@ -22,6 +22,9 @@ use tracing::{debug, info, warn};
 const READ_TIMEOUT: Duration = PortRedirectProtocol::CONNECTION_KEEPALIVE_READ_TIMEOUT;
 /// How often a PING is sent over the connection.
 const KEEP_ALIVE_INTERVAL: Duration = PortRedirectProtocol::CONNECTION_KEEPALIVE_INTERVAL;
+/// How long the server waits for the next message from the client: a PING is due every
+/// `KEEP_ALIVE_INTERVAL`, and may take `READ_TIMEOUT` to arrive.
+pub const CONTROL_CHANNEL_TIMEOUT: Duration = KEEP_ALIVE_INTERVAL.saturating_add(READ_TIMEOUT);
 
 /// Runs the keepalive loop on the client side.
 ///
@@ -116,17 +119,19 @@ impl ControlChannelEnd {
 /// The server waits for messages from the client and answers each PING with a PONG. On DRAIN, it
 /// cancels `listener_token`, which stops the TCP listener, and goes on. When `shutdown` starts
 /// draining, it sends DRAIN to the client and cancels `listener_token`, too. The loop ends on an
-/// unexpected message, a timeout or a closed stream, and then cancels `listener_token`, too.
+/// unexpected message, a closed stream or when no message arrives within `timeout`, usually
+/// [`CONTROL_CHANNEL_TIMEOUT`], and then cancels `listener_token`, too.
 pub async fn run_control_channel_loop<T>(
     control_stream: T,
     listener_token: CancellationToken,
     shutdown: Shutdown,
+    timeout: Duration,
 ) -> ControlChannelEnd
 where
     T: AsyncRead + AsyncWrite + Unpin,
 {
     let mut stream = MessageStream::new(control_stream);
-    let mut deadline = Instant::now() + KEEP_ALIVE_INTERVAL + READ_TIMEOUT;
+    let mut deadline = Instant::now() + timeout;
     let mut drain_sent = false;
 
     let end = loop {
@@ -164,7 +169,7 @@ where
                 break ControlChannelEnd::Timeout;
             }
         };
-        deadline = Instant::now() + KEEP_ALIVE_INTERVAL + READ_TIMEOUT;
+        deadline = Instant::now() + timeout;
 
         match message.kind {
             MessageType::Ping => {
@@ -415,7 +420,13 @@ mod tests {
             .build();
         let listener_token = CancellationToken::new();
 
-        let end = run_control_channel_loop(mock, listener_token.clone(), Shutdown::default()).await;
+        let end = run_control_channel_loop(
+            mock,
+            listener_token.clone(),
+            Shutdown::default(),
+            CONTROL_CHANNEL_TIMEOUT,
+        )
+        .await;
 
         assert!(
             matches!(end, ControlChannelEnd::StreamClosed(None)),
@@ -434,6 +445,7 @@ mod tests {
             server_side,
             listener_token.clone(),
             Shutdown::default(),
+            CONTROL_CHANNEL_TIMEOUT,
         ));
 
         client_side.write_all(DRAIN).await.unwrap();
@@ -460,6 +472,7 @@ mod tests {
             server_side,
             listener_token.clone(),
             shutdown.clone(),
+            CONTROL_CHANNEL_TIMEOUT,
         ));
 
         // The server drains while it reads a PING, which doesn't get lost.
@@ -489,7 +502,13 @@ mod tests {
         let mock = Builder::new()
             .write_error(io::Error::other("connection lost"))
             .build();
-        let end = run_control_channel_loop(mock, CancellationToken::new(), shutdown).await;
+        let end = run_control_channel_loop(
+            mock,
+            CancellationToken::new(),
+            shutdown,
+            CONTROL_CHANNEL_TIMEOUT,
+        )
+        .await;
         assert!(
             matches!(&end, ControlChannelEnd::StreamClosed(Some(_))),
             "{:?}",
@@ -502,7 +521,13 @@ mod tests {
         let mock = Builder::new().read(&[1, 0, 0]).build();
         let listener_token = CancellationToken::new();
 
-        let end = run_control_channel_loop(mock, listener_token.clone(), Shutdown::default()).await;
+        let end = run_control_channel_loop(
+            mock,
+            listener_token.clone(),
+            Shutdown::default(),
+            CONTROL_CHANNEL_TIMEOUT,
+        )
+        .await;
 
         assert!(
             matches!(&end, ControlChannelEnd::ProtocolViolation(m) if m.contains("unexpected Hello")),
@@ -518,8 +543,13 @@ mod tests {
         // Unknown type, and a message longer than allowed.
         for bytes in [&b"P"[..], &[3, 0xff, 0xff]] {
             let mock = Builder::new().read(bytes).build();
-            let end =
-                run_control_channel_loop(mock, CancellationToken::new(), Shutdown::default()).await;
+            let end = run_control_channel_loop(
+                mock,
+                CancellationToken::new(),
+                Shutdown::default(),
+                CONTROL_CHANNEL_TIMEOUT,
+            )
+            .await;
             assert!(
                 matches!(&end, ControlChannelEnd::ProtocolViolation(_)),
                 "{:?}: {:?}",
@@ -535,8 +565,13 @@ mod tests {
             .read(&[3, 0, 2, 0xaa, 0xbb])
             .write(PONG)
             .build();
-        let end =
-            run_control_channel_loop(mock, CancellationToken::new(), Shutdown::default()).await;
+        let end = run_control_channel_loop(
+            mock,
+            CancellationToken::new(),
+            Shutdown::default(),
+            CONTROL_CHANNEL_TIMEOUT,
+        )
+        .await;
         assert!(
             matches!(end, ControlChannelEnd::StreamClosed(None)),
             "{:?}",
@@ -552,8 +587,13 @@ mod tests {
             .write(PONG)
             .build();
 
-        let end =
-            run_control_channel_loop(mock, CancellationToken::new(), Shutdown::default()).await;
+        let end = run_control_channel_loop(
+            mock,
+            CancellationToken::new(),
+            Shutdown::default(),
+            CONTROL_CHANNEL_TIMEOUT,
+        )
+        .await;
 
         assert!(
             matches!(end, ControlChannelEnd::StreamClosed(None)),
@@ -569,6 +609,7 @@ mod tests {
             server_side,
             CancellationToken::new(),
             Shutdown::default(),
+            CONTROL_CHANNEL_TIMEOUT,
         ));
 
         client_side.write_all(&PING.repeat(2)).await.unwrap();
@@ -589,8 +630,13 @@ mod tests {
     async fn test_server_stops_on_truncated_message() {
         let mock = Builder::new().read(&PING[..2]).build();
 
-        let end =
-            run_control_channel_loop(mock, CancellationToken::new(), Shutdown::default()).await;
+        let end = run_control_channel_loop(
+            mock,
+            CancellationToken::new(),
+            Shutdown::default(),
+            CONTROL_CHANNEL_TIMEOUT,
+        )
+        .await;
 
         assert!(
             matches!(&end, ControlChannelEnd::StreamClosed(Some(_))),
@@ -607,8 +653,13 @@ mod tests {
             .write_error(io::Error::other("connection lost"))
             .build();
 
-        let end =
-            run_control_channel_loop(mock, CancellationToken::new(), Shutdown::default()).await;
+        let end = run_control_channel_loop(
+            mock,
+            CancellationToken::new(),
+            Shutdown::default(),
+            CONTROL_CHANNEL_TIMEOUT,
+        )
+        .await;
 
         assert!(
             matches!(&end, ControlChannelEnd::StreamClosed(Some(_))),
@@ -622,8 +673,13 @@ mod tests {
         let listener_token = CancellationToken::new();
         let start = tokio::time::Instant::now();
 
-        let end =
-            run_control_channel_loop(NeverRead, listener_token.clone(), Shutdown::default()).await;
+        let end = run_control_channel_loop(
+            NeverRead,
+            listener_token.clone(),
+            Shutdown::default(),
+            CONTROL_CHANNEL_TIMEOUT,
+        )
+        .await;
 
         assert!(matches!(end, ControlChannelEnd::Timeout), "{:?}", end);
         assert_eq!(end.close_code(), CloseCode::KeepaliveFailed);
@@ -641,6 +697,7 @@ mod tests {
             server_side,
             listener_token.clone(),
             Shutdown::default(),
+            CONTROL_CHANNEL_TIMEOUT,
         ));
 
         // Run the client much longer than the server's PING timeout.
