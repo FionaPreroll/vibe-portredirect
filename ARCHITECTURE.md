@@ -34,8 +34,8 @@ The `missing_docs` lint fails the lint check if a module becomes public by accid
 | `tests/*.bats`         | End-to-end tests and benchmarks of the release binaries with external tools.                                 |
 | `fuzz/`                | Fuzz targets for cargo-fuzz, see [fuzz/README.md](fuzz/README.md).                                           |
 | `docker/`              | Dockerfile of the images, the Docker Compose examples and their test, see the README.                       |
-| `examples/`            | `link_emulator.rs`: emulates a network link with delay and loss for benchmarks, see [docs/PERFORMANCE.md](docs/PERFORMANCE.md). |
-| `utils/`               | Benchmark, plotting and documentation tools. `link_benchmark.py` measures tunnels over emulated links.       |
+| `examples/`            | Configuration files of both programs with every setting, `server.toml` and `client.toml`. Tests check that they are valid and complete. |
+| `utils/`               | Benchmark, plotting and documentation tools. `link_benchmark.py` measures tunnels over links that `link_emulator.rs` emulates with delay and loss, see [docs/PERFORMANCE.md](docs/PERFORMANCE.md); cargo builds the emulator as an example. |
 
 ## Call Hierarchy
 

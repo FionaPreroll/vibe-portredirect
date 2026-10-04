@@ -398,8 +398,33 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::examples;
     use secrecy::ExposeSecret;
     use std::fs;
+
+    #[test]
+    fn test_example_is_valid_and_has_every_setting() -> Result<()> {
+        let path = examples::path("client.toml");
+        // Valid as it is, ...
+        let config = config(&["--config-file", path.to_str().unwrap()])?;
+        assert_eq!(config.quic_remote_host, "tunnel.example.com");
+        // ... and with the settings that are commented out, which show the defaults.
+        let text = fs::read_to_string(&path)?;
+        let dir = tempfile::tempdir()?;
+        let uncommented = dir.path().join("client.toml");
+        fs::write(&uncommented, examples::uncommented(&text))?;
+        let file = ConfigFile::read(&uncommented)?;
+        assert_eq!(file.client_name, Some(ClientName::default()));
+        assert_eq!(file.log_level, Some(LevelFilter::INFO));
+        // Every option that a configuration file can have is in it.
+        let missing = examples::missing_options(&Args::command(), &text, &["config-file", "psk"]);
+        assert!(
+            missing.is_empty(),
+            "examples/client.toml lacks {:?}",
+            missing
+        );
+        Ok(())
+    }
 
     /// Returns the configuration given by the command-line `args`.
     fn config(args: &[&str]) -> Result<Config> {

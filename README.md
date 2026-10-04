@@ -186,6 +186,8 @@ log-level = "warn"
 portredirect_client --config-file /etc/portredirect/client.toml
 ```
 
+[examples/server.toml](examples/server.toml) and [examples/client.toml](examples/client.toml) have every setting, with explanations and the defaults.
+
 - **Precedence:** Options on the command line or in the [environment](#environment-variables) take precedence over the file, and the file over the defaults. So `--log-level debug` overrides the file for a single run. On the command line, flags like `--print-metrics` can only switch a setting on.
 - **No secrets:** The file only names the files that hold the PSKs; it has no key for a PSK itself.
 - **Paths:** Relative paths in the file, e.g. `psk-file` or `config-dir`, are relative to the file's directory, not to the working directory.

@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # Sends data through a tunnel whose QUIC packets cross an emulated link with 50 ms round-trip
-# time and 1 % loss in each direction (examples/link_emulator.rs), and checks that it arrives
+# time and 1 % loss in each direction (utils/link_emulator.rs), and checks that it arrives
 # unchanged, in both directions.
 #
 #   nc  -->  portredirect_server  -->  link_emulator  -->  portredirect_client  -->  nc

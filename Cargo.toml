@@ -56,3 +56,10 @@ path = "src/bin/portredirect_server.rs"
 [[bin]]
 name = "portredirect_client"
 path = "src/bin/portredirect_client.rs"
+
+# A tool for benchmarks, see docs/PERFORMANCE.md. As an example, cargo builds and checks it with
+# the crate, but doesn't install it; it lives in utils/, next to link_benchmark.py, so examples/
+# only holds examples of using PortRedirect.
+[[example]]
+name = "link_emulator"
+path = "utils/link_emulator.rs"

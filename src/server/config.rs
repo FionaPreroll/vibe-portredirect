@@ -571,9 +571,41 @@ fn check_clients(clients: &[ConfiguredClient]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::examples;
     use crate::server::AllowedPorts;
     use secrecy::ExposeSecret;
     use std::fs;
+
+    #[test]
+    fn test_example_is_valid_and_has_every_setting() -> Result<()> {
+        let path = examples::path("server.toml");
+        // Valid as it is, ...
+        let config = config(&["--config-file", path.to_str().unwrap()])?;
+        assert!(matches!(&config.clients, Clients::List(clients) if clients.len() == 3));
+        // ... and with the settings that are commented out, which show the defaults.
+        let text = fs::read_to_string(&path)?;
+        let dir = tempfile::tempdir()?;
+        let uncommented = dir.path().join("server.toml");
+        fs::write(&uncommented, examples::uncommented(&text))?;
+        let file = ConfigFile::read(&uncommented)?;
+        assert_eq!(
+            file.max_quic_connections.map(NonZeroU32::get),
+            Some(DEFAULT_MAX_QUIC_CONNECTIONS)
+        );
+        assert_eq!(file.log_level, Some(LevelFilter::INFO));
+        // Every option that a configuration file can have is in it.
+        let missing = examples::missing_options(
+            &Args::command(),
+            &text,
+            &["config-file", "psk", "print-quic-cert-fingerprint"],
+        );
+        assert!(
+            missing.is_empty(),
+            "examples/server.toml lacks {:?}",
+            missing
+        );
+        Ok(())
+    }
 
     /// Returns what the command-line `args` ask for.
     fn command(args: &[&str]) -> Result<Command> {

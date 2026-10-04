@@ -1,0 +1,108 @@
+# Configuration of portredirect_server with every setting, for --config-file:
+#
+#   portredirect_server --config-file /etc/portredirect/server.toml
+#
+# The keys are the names of the options without the leading dashes, see
+# portredirect_server --help. Settings that are commented out show their defaults. Options on
+# the command line or in the environment (PORTREDIRECT_...) take precedence over this file.
+# Relative paths are relative to this file's directory. The file has no key for a PSK itself,
+# only for the files that hold the PSKs.
+
+# Holds the server's certificate and its private key, cert.der and key.der, which the server
+# generates when it first starts. Keep them: clients trust the certificate. Default: portredirect
+# in the user's configuration directory, e.g. ~/.config/portredirect.
+# config-dir = "/etc/portredirect"
+
+# --- External connections ---
+
+# Address to listen on for external TCP connections, on the ports the clients ask for. 0.0.0.0
+# is every IPv4 address. Required.
+listen-host = "0.0.0.0"
+
+# --- QUIC connections of the clients ---
+
+# Address and UDP port to listen on for the clients. The default only accepts clients on the
+# same host; 0.0.0.0 is every IPv4 address.
+quic-listen-host = "0.0.0.0"
+# quic-listen-port = 4433
+
+# Name the server's certificate is issued for, when the server generates it. Clients that trust
+# a copy of cert.der check it, clients that trust the certificate by its fingerprint don't.
+# quic-cert-hostname = "127.0.0.1"
+
+# --- Limits ---
+
+# QUIC connections at the same time, including ones that aren't authenticated yet. Each client
+# uses one.
+# max-quic-connections = 64
+
+# Forwarded connections of each client at the same time. Further ones wait until one ends.
+# max-connections = 512
+
+# Forwarded connections of each external IP address (IPv6: of each /64 network) at the same
+# time, 0 for no limit. Further ones are closed right away.
+# max-connections-per-ip = 64
+
+# New forwarded connections of each external IP address: max-connection-burst-per-ip at once,
+# then max-connection-rate-per-ip per second, 0 for no limit. Further ones are closed right away.
+# max-connection-rate-per-ip = 20
+# max-connection-burst-per-ip = 64
+
+# Seconds without data transfer after which a forwarded connection is closed, 0 for never.
+# idle-timeout = 600
+
+# --- Performance ---
+
+# How fast to send to the clients: cubic, or bbr, which is much faster on links that lose
+# packets for other reasons than congestion, e.g. wireless ones. See docs/PERFORMANCE.md.
+# congestion-control = "cubic"
+
+# --- Operation ---
+
+# Seconds that running forwarded connections may take to finish when the server shuts down on
+# SIGINT or SIGTERM, 0 to close them right away.
+# shutdown-timeout = 5
+
+# Log messages up to this level: off, error, warn, info, debug or trace. The RUST_LOG
+# environment variable, if set, takes precedence.
+# log-level = "info"
+
+# Serve Prometheus metrics at /metrics on metrics-listen. The endpoint has no authentication,
+# only make it reachable from trusted networks.
+# provide-metrics = false
+# metrics-listen = "127.0.0.1:9899"
+
+# Print the metrics to stderr every second, if a value changes.
+# print-metrics = false
+
+# --- Clients ---
+
+# Either a single client, named default, with the PSK in this file and these ports:
+# psk-file = "psk"
+# allowed-client-ports = "80,443"
+
+# Or several clients, each with its own name, PSKs and ports. A client authenticates with its
+# name, its client-name, and its PSK, and may only ask for its own ports. The server reads this
+# file only when it starts, so restart it after adding a client: until then, the server doesn't
+# know the client, and blocks its address after 5 attempts, see the README's Troubleshooting.
+#
+# These tables come last, as the settings above don't belong to a client.
+[[clients]]
+# 1 to 64 letters, digits, dots, underscores or hyphens.
+name = "web"
+# A file with the client's PSK, or two while the PSK changes, see the README.
+psk-files = ["clients/web.psk"]
+# A string like "80,443,8000-8100", or an array like [80, 443, "8000-8100"].
+ports = "80,443"
+
+[[clients]]
+# Clients may share ports on purpose: a standby client gets them when the first one is gone.
+name = "web-standby"
+psk-files = ["clients/web-standby.psk"]
+ports = "80,443"
+
+[[clients]]
+# While the PSK changes, both are accepted.
+name = "mail"
+psk-files = ["clients/mail.psk", "clients/mail-next.psk"]
+ports = [25, 465, 993]
