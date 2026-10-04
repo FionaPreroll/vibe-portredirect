@@ -61,6 +61,7 @@ tar -xzf portredirect-linux-amd64.tar.gz
 sudo install portredirect-linux-amd64/portredirect_* /usr/local/bin/
 ```
 
+Each archive also has example configuration files with every setting, `examples/server.toml` and `examples/client.toml`, see [Configuration File](#configuration-file).
 The release notes describe how to check a download with `SHA256SUMS` and the attestation of where it was built.
 
 ### Docker

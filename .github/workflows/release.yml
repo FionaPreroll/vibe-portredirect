@@ -139,9 +139,11 @@ jobs:
           fi
       - name: Pack binaries
         run: |
-          mkdir "$ARCHIVE"
+          mkdir -p "$ARCHIVE/examples"
           cp "target/$TARGET/release/portredirect_server" "target/$TARGET/release/portredirect_client" \
             README.md CHANGELOG.md LICENSE "$ARCHIVE/"
+          # Where the README's links expect them.
+          cp examples/server.toml examples/client.toml "$ARCHIVE/examples/"
           "$ARCHIVE/portredirect_server" --version
           "$ARCHIVE/portredirect_client" --version
           tar --create --gzip --owner=0 --group=0 --numeric-owner --file "$ARCHIVE.tar.gz" "$ARCHIVE"
@@ -225,7 +227,7 @@ jobs:
           - **glibc:** for distributions with glibc $GLIBC_VERSION or newer, i.e. practically all but those with musl, like Alpine. Faster than musl where the CPU limits the throughput.
           - **musl:** linked statically, so they run on any distribution.
 
-          Each archive holds \`portredirect_server\` and \`portredirect_client\`, with the README, the changelog and the license.
+          Each archive holds \`portredirect_server\` and \`portredirect_client\`, with the README, the changelog, the license and example configuration files with every setting, \`examples/server.toml\` and \`examples/client.toml\`.
           Update server and clients together: they must speak the same protocol version.
 
           To check a download, compare its checksum, and verify with the [GitHub CLI](https://cli.github.com) that this repository's workflow built it:
