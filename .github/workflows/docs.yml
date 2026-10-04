@@ -1,4 +1,4 @@
-name: Documentation (Build test only)
+name: Documentation
 on:
   push:
     branches: ["main"]
@@ -23,23 +23,23 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y graphviz
-      - name: Install Pip dependencies
-        run: pip install -r ./utils/requirements.txt
-      - name: Install Cargo dependencies
-        run: cargo install --locked cargo-modules
-      - name: Make checksums of current documentation files
-        run: |
-          ls -l docs/
-          sha256sum docs/* | tee checksums-1.txt
+      # The version is pinned: another one may write the module graph differently, which would
+      # look like a stale graph. Update it here and run make docs when updating it.
+      - name: Install cargo-modules
+        run: cargo install --locked cargo-modules@0.27.0
+      - name: Check the rendered diagrams
+        # Before make docs renders them again: each committed SVG must show what its source says.
+        run: utils/check-diagrams.py docs/*.dot
       - name: Build documentation
         run: make docs
-      - name: Make checksums of built documentation files
+      - name: Check the generated diagram sources
+        # The module graph must list the current modules. Only the sources are compared: the
+        # layout of the SVGs depends on the version of Graphviz.
         run: |
-          ls -l docs/
-          sha256sum docs/* | tee checksums-2.txt
-      - name: Compare generated documentation to repository
-        run: |
-          diff -u checksums-{1,2}.txt | tee docs/checksums.diff
+          if ! git diff --exit-code -- 'docs/*.dot'; then
+            echo "::error::The module graph is out of date. Run make docs and commit docs/cargo-mods-lib.dot and .svg."
+            exit 1
+          fi
       - name: Upload documentation
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

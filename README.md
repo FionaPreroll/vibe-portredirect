@@ -9,7 +9,7 @@
 PortRedirect is a lightweight user-space TCP forwarder that bridges your frontend and backend via a secure QUIC tunnel. It has two components:
 
 - **Server:** Listens for incoming TCP connections (e.g., on port 443) and tunnels them over a persistent QUIC connection.
-- **Client:** Connects to the QUIC server, receives tunneled streams, and forwards them to the target TCP service (e.g., `localhost:4433`).
+- **Client:** Connects to the QUIC server, receives tunneled streams, and forwards them to the target TCP service (e.g., `localhost:8443`).
 
 Both use a pre-shared key (PSK) for authentication. The server auto-generates a self-signed certificate and private key on first run (stored in `~/.config/portredirect`). The client verifies the server by the certificate's fingerprint or a copy of the certificate, see [Server Certificate](#server-certificate).
 
@@ -143,11 +143,11 @@ The server also limits the QUIC connections per address, gives clients 10 second
 
 ### Running the Backend Client
 
-To forward traffic to a local service (e.g., an `nginx` server on `127.0.0.1:4433`), run:
+To forward traffic to a local service (e.g., an `nginx` server on `127.0.0.1:8443`), run:
 
 ```sh
 portredirect_client \
-    --destination-host 127.0.0.1 --destination-port 4433 \
+    --destination-host 127.0.0.1 --destination-port 8443 \
     --remote-listen-port 443 \
     --quic-remote-host 10.0.0.1 --quic-remote-port 12345 \
     --quic-cert-fingerprint sha256:<fingerprint of the server's certificate> \
@@ -171,8 +171,8 @@ portredirect_client \
 - **`--shutdown-timeout`**, **`--log-level`**, **`--log-format`** and **`--congestion-control`:** As for the server. `--congestion-control` decides how fast each side sends, so set it on both.
 - **`--log-connections`:** Log each forwarded connection, independently of `--log-level`: the external client's address, which the server passes on, the destination, how long the connection lasted and how much data it transferred. Off by default, as it logs the addresses of the external clients. A connection that fails is logged as `Connection aborted`, with the error.
   ```
-  INFO portredirect::connections: Connection opened external_client=198.51.100.7:56360 destination=127.0.0.1:4433
-  INFO portredirect::connections: Connection closed external_client=198.51.100.7:56360 destination=127.0.0.1:4433 duration_ms=1520 bytes_to_destination=517 bytes_from_destination=10342
+  INFO portredirect::connections: Connection opened external_client=198.51.100.7:56360 destination=127.0.0.1:8443
+  INFO portredirect::connections: Connection closed external_client=198.51.100.7:56360 destination=127.0.0.1:8443 duration_ms=1520 bytes_to_destination=517 bytes_from_destination=10342
   ```
 
 > **Important:** The client must trust the server's certificate. Start the server first to generate it, then give the client the certificate's fingerprint with `--quic-cert-fingerprint`, see [Server Certificate](#server-certificate).
@@ -187,7 +187,7 @@ Its keys are the names of the options without the leading dashes, and its values
 ```toml
 # /etc/portredirect/client.toml
 destination-host = "127.0.0.1"
-destination-port = 4433
+destination-port = 8443
 remote-listen-port = 443
 quic-remote-host = "10.0.0.1"
 quic-remote-port = 12345
@@ -215,7 +215,7 @@ Each option can also be given in an environment variable: `PORTREDIRECT_` and th
 This suits containers and service managers, see [Docker](#docker):
 
 ```sh
-PORTREDIRECT_DESTINATION_HOST=127.0.0.1 PORTREDIRECT_DESTINATION_PORT=4433 \
+PORTREDIRECT_DESTINATION_HOST=127.0.0.1 PORTREDIRECT_DESTINATION_PORT=8443 \
 PORTREDIRECT_REMOTE_LISTEN_PORT=443 \
 PORTREDIRECT_QUIC_REMOTE_HOST=10.0.0.1 PORTREDIRECT_QUIC_REMOTE_PORT=12345 \
 PORTREDIRECT_QUIC_CERT_FINGERPRINT=sha256:<fingerprint of the server's certificate> \

@@ -45,7 +45,7 @@ The `missing_docs` lint fails the lint check if a module becomes public by accid
 
 Which function calls which on the way from a program's start to a forwarded connection, as [Mermaid](https://mermaid.js.org) diagrams, which GitHub shows as graphics.
 Dashed arrows are optional or run beside the main path; the labels say when a call happens.
-[docs/cargo-mods-lib.svg](docs/cargo-mods-lib.svg) shows the modules, `make docs` generates it.
+[docs/cargo-mods-lib.svg](docs/cargo-mods-lib.svg) shows the modules. `make docs` generates it and renders the diagrams in `docs/*.dot`; CI checks that both are current.
 
 ### Server
 
