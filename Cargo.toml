@@ -1,6 +1,6 @@
 [package]
 name = "portredirect"
-version = "0.7.0"
+version = "1.0.0-rc.1"
 edition = "2021"
 rust-version = "1.88.0"
 description = "PortRedirect is a tool that bridges your frontend and backend by redirecting TCP connections through a persistent QUIC connection. It provides both a server (accepting TCP connections and forwarding them via QUIC) and a client (relaying QUIC streams to a TCP destination)."
@@ -13,6 +13,16 @@ keywords = ["tcp", "quic", "networking", "port-forwarding"]
 categories = ["network-programming", "command-line-utilities"]
 
 authors = ["Fiona <fipreroll+app@gmail.com>"]
+# Only what builds and tests the programs, and their documentation: not CI, Docker, the
+# benchmark tools or the BATS tests.
+include = [
+    "/src/**/*.rs",
+    "/tests/*.rs",
+    "/examples/*.toml",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/LICENSE",
+]
 
 [dependencies]
 anyhow = "1.0.97"
