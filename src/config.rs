@@ -1,11 +1,13 @@
-// PortRedirect - Configuration files
+// PortRedirect - Configuration files and environment variables
 //
 // Both programs can read their settings from a TOML file given with --config-file. Its keys are
 // the names of the command-line options without the leading dashes, e.g. `max-connections`, and
-// its values are written like on the command line. A setting on the command line, or in the
-// environment, takes precedence over the file, and the file over the defaults. Secrets are only
-// referenced by the paths of the files holding them. Relative paths in the file are relative to
-// the file's directory, so the configuration doesn't depend on the working directory, e.g. of a
+// its values are written like on the command line. Each option can also be given in the
+// environment, as PORTREDIRECT_ and its name in capitals, e.g. PORTREDIRECT_MAX_CONNECTIONS, see
+// [`env_var_name`]. The command line takes precedence over the environment, the environment over
+// the file, and the file over the defaults. Secrets are only referenced by the paths of the files
+// holding them, or given in the environment. Relative paths in the file are relative to the
+// file's directory, so the configuration doesn't depend on the working directory, e.g. of a
 // service.
 //
 // License: GPL-3.0-only
@@ -100,14 +102,21 @@ pub fn merge_option<T>(
 }
 
 /// Returns the setting of the required option `--{option}`, or an error if neither the command
-/// line nor the configuration file has it.
+/// line, the environment nor the configuration file has it.
 pub fn required<T>(setting: Option<T>, option: &str) -> Result<T> {
     setting.ok_or_else(|| {
         anyhow!(
-            "--{0} is required, on the command line or as {0} in the configuration file",
-            option
+            "--{0} is required, on the command line, as {1} in the environment or as {0} in the configuration file",
+            option,
+            env_var_name(option)
         )
     })
+}
+
+/// Returns the environment variable that can hold the option `--{option}`: PORTREDIRECT_ and the
+/// option's name in capitals, with underscores, e.g. PORTREDIRECT_DESTINATION_HOST.
+pub fn env_var_name(option: &str) -> String {
+    format!("PORTREDIRECT_{}", option.to_uppercase().replace('-', "_"))
 }
 
 /// Returns `path` from the configuration file at `config_file`, relative to the file's directory
@@ -328,7 +337,16 @@ mod tests {
         let err = required::<u16>(None, "listen-host").unwrap_err();
         assert_eq!(
             err.to_string(),
-            "--listen-host is required, on the command line or as listen-host in the configuration file"
+            "--listen-host is required, on the command line, as PORTREDIRECT_LISTEN_HOST in the environment or as listen-host in the configuration file"
+        );
+    }
+
+    #[test]
+    fn test_environment_variable_names() {
+        assert_eq!(env_var_name("psk"), PSK_ENV_VAR);
+        assert_eq!(
+            env_var_name("max-connection-rate-per-ip"),
+            "PORTREDIRECT_MAX_CONNECTION_RATE_PER_IP"
         );
     }
 

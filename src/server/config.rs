@@ -4,6 +4,7 @@
 // License: GPL-3.0-only
 
 use anyhow::{anyhow, bail, Result};
+use clap::builder::BoolishValueParser;
 use clap::error::ErrorKind;
 use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser};
 use serde::Deserialize;
@@ -49,41 +50,51 @@ pub struct Args {
     /// TOML file with settings, e.g. a list of clients. Its keys are the names of the options
     /// without the leading dashes, e.g. max-connections = 100. Options given on the command line
     /// or in the environment take precedence.
-    #[clap(long, value_name = "PATH")]
+    #[clap(long, value_name = "PATH", env = "PORTREDIRECT_CONFIG_FILE")]
     pub config_file: Option<PathBuf>,
 
     /// Full path to configuration directory.
-    #[clap(long, value_name = "PATH")]
+    #[clap(long, value_name = "PATH", env = "PORTREDIRECT_CONFIG_DIR")]
     pub config_dir: Option<PathBuf>,
 
     /// Host to listen on for external TCP connections, on the ports the clients ask for.
-    /// Required, here or in the configuration file.
+    /// Required, here, in the environment or in the configuration file.
     #[clap(
         long,
-        required_unless_present_any = ["config_file", "print_quic_cert_fingerprint"]
+        required_unless_present_any = ["config_file", "print_quic_cert_fingerprint"],
+        env = "PORTREDIRECT_LISTEN_HOST"
     )]
     pub listen_host: Option<String>,
 
-    /// Allowed ports for clients to request, e.g., "80,443,1000-2000". Required, here or in the
-    /// configuration file, unless it lists clients with their own ports.
+    /// Allowed ports for clients to request, e.g., "80,443,1000-2000". Required, here, in the
+    /// environment or in the configuration file, unless it lists clients with their own ports.
     #[clap(
         long,
         value_delimiter = ',',
-        required_unless_present_any = ["config_file", "print_quic_cert_fingerprint"]
+        required_unless_present_any = ["config_file", "print_quic_cert_fingerprint"],
+        env = "PORTREDIRECT_ALLOWED_CLIENT_PORTS"
     )]
     pub allowed_client_ports: Option<Vec<PortSpec>>,
 
     /// Host to listen on for QUIC connections from clients.
-    #[clap(long, default_value = "127.0.0.1")]
+    #[clap(
+        long,
+        default_value = "127.0.0.1",
+        env = "PORTREDIRECT_QUIC_LISTEN_HOST"
+    )]
     pub quic_listen_host: String,
 
     /// UDP port to listen on for QUIC connections from clients.
-    #[clap(long, default_value = "4433")]
+    #[clap(long, default_value = "4433", env = "PORTREDIRECT_QUIC_LISTEN_PORT")]
     pub quic_listen_port: u16,
 
     /// Name the server's generated certificate is issued for (Subject Alt Name). Clients check
     /// it, see their --quic-cert-hostname.
-    #[clap(long, default_value = "127.0.0.1")]
+    #[clap(
+        long,
+        default_value = "127.0.0.1",
+        env = "PORTREDIRECT_QUIC_CERT_HOSTNAME"
+    )]
     pub quic_cert_hostname: String,
 
     /// Print the fingerprint of the server's certificate and exit. Clients can trust the
@@ -100,7 +111,8 @@ pub struct Args {
     #[clap(
         long,
         default_value_t = DEFAULT_MAX_QUIC_CONNECTIONS,
-        value_parser = clap::value_parser!(u32).range(1..)
+        value_parser = clap::value_parser!(u32).range(1..),
+        env = "PORTREDIRECT_MAX_QUIC_CONNECTIONS"
     )]
     pub max_quic_connections: u32,
 
@@ -109,18 +121,27 @@ pub struct Args {
     #[clap(
         long,
         default_value_t = PortRedirectProtocol::DEFAULT_MAX_FORWARDED_CONNECTIONS as u32,
-        value_parser = clap::value_parser!(u32).range(1..)
+        value_parser = clap::value_parser!(u32).range(1..),
+        env = "PORTREDIRECT_MAX_CONNECTIONS"
     )]
     pub max_connections: u32,
 
     /// Maximum number of concurrently forwarded TCP connections per external IP address
     /// (IPv6: per /64 network), 0 for no limit. Further connections are closed right away.
-    #[clap(long, default_value_t = ForwardingLimits::DEFAULT_MAX_CONNECTIONS_PER_IP as u32)]
+    #[clap(
+        long,
+        default_value_t = ForwardingLimits::DEFAULT_MAX_CONNECTIONS_PER_IP as u32,
+        env = "PORTREDIRECT_MAX_CONNECTIONS_PER_IP"
+    )]
     pub max_connections_per_ip: u32,
 
     /// Maximum number of new forwarded TCP connections per second and external IP address
     /// (IPv6: per /64 network), 0 for no limit. Further connections are closed right away.
-    #[clap(long, default_value_t = ForwardingLimits::DEFAULT_MAX_CONNECTION_RATE_PER_IP)]
+    #[clap(
+        long,
+        default_value_t = ForwardingLimits::DEFAULT_MAX_CONNECTION_RATE_PER_IP,
+        env = "PORTREDIRECT_MAX_CONNECTION_RATE_PER_IP"
+    )]
     pub max_connection_rate_per_ip: u32,
 
     /// Number of new forwarded TCP connections an external IP address may open at once, before
@@ -128,42 +149,56 @@ pub struct Args {
     #[clap(
         long,
         default_value_t = ForwardingLimits::DEFAULT_MAX_CONNECTION_BURST_PER_IP,
-        value_parser = clap::value_parser!(u32).range(1..)
+        value_parser = clap::value_parser!(u32).range(1..),
+        env = "PORTREDIRECT_MAX_CONNECTION_BURST_PER_IP"
     )]
     pub max_connection_burst_per_ip: u32,
 
     /// Close forwarded TCP connections after this many seconds without data transfer,
     /// 0 to never close idle connections.
-    #[clap(long, default_value_t = ForwardingLimits::DEFAULT_IDLE_TIMEOUT.as_secs())]
+    #[clap(
+        long,
+        default_value_t = ForwardingLimits::DEFAULT_IDLE_TIMEOUT.as_secs(),
+        env = "PORTREDIRECT_IDLE_TIMEOUT"
+    )]
     pub idle_timeout: u64,
 
     /// How fast to send to clients. bbr is much faster on links that lose packets for other
     /// reasons than congestion, e.g. wireless ones. Set the clients' option, too, for the other
     /// direction.
-    #[clap(long, value_enum, default_value_t = CongestionControl::Cubic)]
+    #[clap(
+        long,
+        value_enum,
+        default_value_t = CongestionControl::Cubic,
+        env = "PORTREDIRECT_CONGESTION_CONTROL"
+    )]
     pub congestion_control: CongestionControl,
 
     /// Print metrics to stderr every second, if any value changes.
-    #[clap(long)]
+    #[clap(long, env = "PORTREDIRECT_PRINT_METRICS", value_parser = BoolishValueParser::new())]
     pub print_metrics: bool,
 
     /// Serve Prometheus metrics via HTTP at /metrics, see --metrics-listen.
-    #[clap(long)]
+    #[clap(long, env = "PORTREDIRECT_PROVIDE_METRICS", value_parser = BoolishValueParser::new())]
     pub provide_metrics: bool,
 
     /// Address and port for --provide-metrics. The endpoint has no authentication, only make it
     /// reachable from trusted networks.
-    #[clap(long, default_value = DEFAULT_METRICS_LISTEN)]
+    #[clap(long, default_value = DEFAULT_METRICS_LISTEN, env = "PORTREDIRECT_METRICS_LISTEN")]
     pub metrics_listen: SocketAddr,
 
     /// Seconds that running forwarded connections may take to finish when shutting down on
     /// SIGINT or SIGTERM, 0 to close them right away. A second signal closes them right away.
-    #[clap(long, default_value_t = DEFAULT_SHUTDOWN_TIMEOUT.as_secs())]
+    #[clap(
+        long,
+        default_value_t = DEFAULT_SHUTDOWN_TIMEOUT.as_secs(),
+        env = "PORTREDIRECT_SHUTDOWN_TIMEOUT"
+    )]
     pub shutdown_timeout: u64,
 
     /// Log messages up to this level: off, error, warn, info, debug or trace. The RUST_LOG
     /// environment variable, if set, takes precedence and can set levels per module.
-    #[clap(long, default_value = "info")]
+    #[clap(long, default_value = "info", env = "PORTREDIRECT_LOG_LEVEL")]
     pub log_level: LevelFilter,
 }
 
@@ -362,7 +397,9 @@ impl Config {
             Some(clients) => {
                 // Each client has its own PSKs and ports, so these settings would be ambiguous.
                 let single_client_setting = if psk.is_some() {
-                    Some(format!("a PSK on the command line or in {}", PSK_ENV_VAR))
+                    Some(String::from(
+                        "a PSK on the command line or in the environment",
+                    ))
                 } else if args.allowed_client_ports.is_some() {
                     Some("--allowed-client-ports".into())
                 } else if file.psk_file.is_some() {
@@ -821,18 +858,36 @@ mod tests {
     }
 
     #[test]
+    fn test_every_option_has_an_environment_variable() {
+        for arg in Args::command().get_arguments() {
+            let Some(option) = arg.get_long() else {
+                continue;
+            };
+            // A command rather than a setting: in the environment, the server would never run.
+            let expected =
+                (option != "print-quic-cert-fingerprint").then(|| config::env_var_name(option));
+            assert_eq!(
+                arg.get_env().and_then(|env| env.to_str()),
+                expected.as_deref(),
+                "--{}",
+                option
+            );
+        }
+    }
+
+    #[test]
     fn test_clients_exclude_settings_of_a_single_client() {
         let clients = "listen-host = \"0.0.0.0\"\n[[clients]]\nname = \"home\"\npsk-files = [\"home.psk\"]\nports = 443\n";
         for (text, args, expected) in [
             (
                 clients.to_string(),
                 &["--psk", "secret"][..],
-                "so a PSK on the command line or in PORTREDIRECT_PSK doesn't apply",
+                "so a PSK on the command line or in the environment doesn't apply",
             ),
             (
                 clients.to_string(),
                 &["--psk-file", "psk"],
-                "so a PSK on the command line or in PORTREDIRECT_PSK doesn't apply",
+                "so a PSK on the command line or in the environment doesn't apply",
             ),
             (
                 clients.to_string(),
@@ -963,7 +1018,7 @@ mod tests {
         for (text, expected) in [
             (
                 "allowed-client-ports = 443\npsk-file = \"psk\"",
-                "--listen-host is required, on the command line or as listen-host in the configuration file",
+                "--listen-host is required, on the command line, as PORTREDIRECT_LISTEN_HOST in the environment or as listen-host in the configuration file",
             ),
             (
                 "listen-host = \"::\"\npsk-file = \"psk\"",

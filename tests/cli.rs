@@ -76,10 +76,15 @@ struct Program {
 
 impl Program {
     fn start(program: &str, args: &[&str], env: &[(&str, &str)]) -> Program {
-        let mut child = Command::new(program)
+        let mut command = Command::new(program);
+        // Only the settings of the test, not those of the environment the tests run in.
+        for (name, _) in std::env::vars_os() {
+            if name.to_string_lossy().starts_with("PORTREDIRECT_") {
+                command.env_remove(name);
+            }
+        }
+        let mut child = command
             .args(args)
-            .env_remove("PORTREDIRECT_PSK")
-            .env_remove("PORTREDIRECT_QUIC_PSK")
             .env_remove("RUST_LOG")
             .envs(env.iter().copied())
             .stdin(Stdio::null())
@@ -804,6 +809,74 @@ log-level = "error"
 }
 
 #[tokio::test]
+async fn programs_read_their_options_from_the_environment() -> Result<()> {
+    let (server_dir, client_dir) = (tempfile::tempdir()?, tempfile::tempdir()?);
+    let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
+    let echo_port = start_echo_server().await?.port().to_string();
+    let (quic_port, listen_port_text) = (quic_port.to_string(), listen_port.to_string());
+
+    // The environment takes precedence over the configuration file, which would make the server
+    // listen elsewhere and log errors only.
+    let server_config = server_dir.path().join("server.toml");
+    fs::write(
+        &server_config,
+        "quic-listen-port = 1\nlog-level = \"error\"\n",
+    )?;
+    let allowed_ports = format!("1,{}", listen_port);
+    let mut server = Program::start(
+        SERVER,
+        &[],
+        &[
+            ("PORTREDIRECT_CONFIG_FILE", path_str(&server_config)),
+            ("PORTREDIRECT_CONFIG_DIR", path_str(server_dir.path())),
+            ("PORTREDIRECT_LISTEN_HOST", "127.0.0.1"),
+            ("PORTREDIRECT_ALLOWED_CLIENT_PORTS", &allowed_ports),
+            ("PORTREDIRECT_QUIC_LISTEN_PORT", &quic_port),
+            ("PORTREDIRECT_QUIC_CERT_HOSTNAME", "localhost"),
+            ("PORTREDIRECT_PRINT_METRICS", "true"),
+            ("PORTREDIRECT_LOG_LEVEL", "info"),
+            ("PORTREDIRECT_PSK", PSK),
+        ],
+    );
+    server.wait_for_output("QUIC server is ready").await?;
+    let mut print = Program::start(
+        SERVER,
+        &["--print-quic-cert-fingerprint"],
+        &[("PORTREDIRECT_CONFIG_DIR", path_str(server_dir.path()))],
+    );
+    assert_eq!(print.exit_code().await?, 0, "{}", print.output());
+    // Several values, separated by commas: another certificate's and the server's.
+    let fingerprints = format!("sha256:{},{}", "ab".repeat(32), print.stdout().trim());
+
+    // The command line takes precedence over the environment, which names another port.
+    let psk_file = client_dir.path().join("psk");
+    write_psk_file(&psk_file, PSK, 0o600)?;
+    let mut client = Program::start(
+        CLIENT,
+        &["--remote-listen-port", &listen_port_text],
+        &[
+            ("PORTREDIRECT_CONFIG_DIR", path_str(client_dir.path())),
+            ("PORTREDIRECT_DESTINATION_HOST", "127.0.0.1"),
+            ("PORTREDIRECT_DESTINATION_PORT", &echo_port),
+            ("PORTREDIRECT_REMOTE_LISTEN_PORT", "1"),
+            ("PORTREDIRECT_QUIC_REMOTE_HOST", "127.0.0.1"),
+            ("PORTREDIRECT_QUIC_REMOTE_PORT", &quic_port),
+            ("PORTREDIRECT_QUIC_CERT_FINGERPRINT", &fingerprints),
+            ("PORTREDIRECT_PSK_FILE", path_str(&psk_file)),
+        ],
+    );
+    client.wait_for_output("Tunnel established").await?;
+    assert_echo(listen_port).await?;
+    server.wait_for_output("tunnels_total: 1").await?;
+
+    client.terminate();
+    assert_eq!(client.exit_code().await?, 0, "{}", client.output());
+    server.terminate();
+    assert_eq!(server.exit_code().await?, 0, "{}", server.output());
+    Ok(())
+}
+
+#[tokio::test]
 async fn server_prints_the_fingerprint_of_its_certificate() -> Result<()> {
     let config_dir = tempfile::tempdir()?;
     let args = [
@@ -865,7 +938,7 @@ async fn invalid_configuration_files_exit_with_code_2() -> Result<()> {
             SERVER,
             &clients,
             &[("PORTREDIRECT_PSK", PSK)],
-            "PORTREDIRECT_PSK doesn't apply",
+            "a PSK on the command line or in the environment doesn't apply",
         ),
         (
             SERVER,
