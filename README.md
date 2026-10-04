@@ -89,6 +89,7 @@ portredirect_server \
 - **`--max-quic-connections`:** Maximum number of QUIC connections, including connections that are not authenticated yet (default 64). Each client uses one.
 - **`--max-connections`:** Maximum number of concurrently forwarded TCP connections per client (default 512). Further connections wait until one ends.
 - **`--max-connections-per-ip`:** Maximum number of concurrently forwarded TCP connections per external IP address, for IPv6 per /64 network (default 64, `0` for no limit). Further connections are closed right away. Raise it if many users share an address, e.g. behind a NAT.
+- **`--max-connection-rate-per-ip`** and **`--max-connection-burst-per-ip`:** How fast an external IP address, for IPv6 a /64 network, may open new forwarded TCP connections: after up to `--max-connection-burst-per-ip` at once (default 64), at most `--max-connection-rate-per-ip` per second (default 20, `0` for no limit). Further connections are closed right away. Each forwarded connection makes the client connect to the destination, so this limits the load a single host can put on it. Raise them like `--max-connections-per-ip`.
 - **`--idle-timeout`:** Close forwarded TCP connections after this many seconds without data transfer (default 600, `0` to never close idle connections). Raise it for protocols with long idle times, e.g. SSH without keep-alive messages.
 
 The server also limits the QUIC connections per address, gives clients 10 seconds for the TLS handshake and blocks addresses for 10 minutes after repeated failed attempts, see [Limits](docs/PROTOCOL.md#limits).
@@ -270,7 +271,7 @@ All metrics are listed from the start, with 0. Metrics of the server's clients h
 | `keepalive_failures_total`                        | counter | `client` | Tunnels closed because no keepalive message arrived in time.                                 |
 | `forwarded_connections_total`                     | counter | `client` | External connections forwarded through the tunnel.                                           |
 | `forwarded_connections_active`                    | gauge   | `client` | Forwarded connections that are running.                                                       |
-| `forwarded_connections_refused_total`             | counter | `client` | External connections closed right away, as their address had too many connections.          |
+| `forwarded_connections_refused_total`             | counter | `client`, `reason` | External connections closed right away, as their address had too many connections (`address_limit`) or opened new ones too fast (`rate_limit`). |
 | `forwarded_connections_failed_total`              | counter | `client` | External connections that couldn't be forwarded, as the client accepted no stream for them.  |
 | `forwarded_connections_aborted_total`             | counter | `client` | Forwarded connections that ended with an error, e.g. an abort.                               |
 | `accept_errors_total`                             | counter | `client` | Failures to accept an external connection, e.g. for lack of file descriptors.                |

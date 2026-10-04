@@ -115,9 +115,12 @@ impl ServerMetrics {
                 "Forwarded connections that are running",
                 &["client"],
             ),
-            forwarded_connections_refused: by_client(
+            forwarded_connections_refused: counter_vec(
+                &registry,
+                PREFIX,
                 "forwarded_connections_refused_total",
-                "External connections closed right away, as their address had too many connections",
+                "External connections closed right away, as their address had too many connections or opened them too fast, by reason",
+                &["client", "reason"],
             ),
             forwarded_connections_failed: by_client(
                 "forwarded_connections_failed_total",
@@ -160,6 +163,10 @@ impl ServerMetrics {
     /// 0 before the client connected.
     pub fn client(&self, client: &ClientName) -> ClientMetrics {
         let label = [client.as_str()];
+        let refused = |reason: &str| {
+            self.forwarded_connections_refused
+                .with_label_values(&[client.as_str(), reason])
+        };
         ClientMetrics {
             tunnels: self.tunnels.with_label_values(&label),
             tunnels_active: self.tunnels_active.with_label_values(&label),
@@ -168,9 +175,10 @@ impl ServerMetrics {
             forwarded_connections_active: self
                 .forwarded_connections_active
                 .with_label_values(&label),
-            forwarded_connections_refused: self
-                .forwarded_connections_refused
-                .with_label_values(&label),
+            forwarded_connections_refused: RefusedConnections {
+                address_limit: refused("address_limit"),
+                rate_limit: refused("rate_limit"),
+            },
             forwarded_connections_failed: self
                 .forwarded_connections_failed
                 .with_label_values(&label),
@@ -192,12 +200,21 @@ pub struct ClientMetrics {
     pub keepalive_failures: IntCounter,
     pub forwarded_connections: IntCounter,
     pub forwarded_connections_active: IntGauge,
-    pub forwarded_connections_refused: IntCounter,
+    pub forwarded_connections_refused: RefusedConnections,
     pub forwarded_connections_failed: IntCounter,
     pub forwarded_connections_aborted: IntCounter,
     pub accept_errors: IntCounter,
     pub bytes_from_external: IntCounter,
     pub bytes_to_external: IntCounter,
+}
+
+/// External connections the server closed right away, by the label `reason`.
+#[derive(Clone, Debug)]
+pub struct RefusedConnections {
+    /// The address had as many connections as allowed.
+    pub address_limit: IntCounter,
+    /// The address opened new connections faster than allowed.
+    pub rate_limit: IntCounter,
 }
 
 #[cfg(test)]
@@ -225,11 +242,12 @@ mod tests {
         let home = metrics.client(&"home".parse().unwrap());
         metrics.client(&"office".parse().unwrap());
         home.forwarded_connections.inc();
+        home.forwarded_connections_refused.rate_limit.inc();
         metrics.refused(RefusalReason::Blocked);
 
         assert_eq!(
             summary(&metrics.registry, PREFIX),
-            "accept_errors_total: 0 | authentication_failures_total: 0 | bytes_from_external_total: 0 | bytes_to_external_total: 0 | forwarded_connections_aborted_total: 0 | forwarded_connections_active: 0 | forwarded_connections_failed_total: 0 | forwarded_connections_refused_total: 0 | forwarded_connections_total: 1 | keepalive_failures_total: 0 | quic_connections_refused_total: 1 | tunnels_active: 0 | tunnels_total: 0"
+            "accept_errors_total: 0 | authentication_failures_total: 0 | bytes_from_external_total: 0 | bytes_to_external_total: 0 | forwarded_connections_aborted_total: 0 | forwarded_connections_active: 0 | forwarded_connections_failed_total: 0 | forwarded_connections_refused_total: 1 | forwarded_connections_total: 1 | keepalive_failures_total: 0 | quic_connections_refused_total: 1 | tunnels_active: 0 | tunnels_total: 0"
         );
 
         let mut text = Vec::new();
@@ -243,6 +261,8 @@ mod tests {
         for line in [
             "portredirect_server_forwarded_connections_total{client=\"home\"} 1\n",
             "portredirect_server_forwarded_connections_total{client=\"office\"} 0\n",
+            "portredirect_server_forwarded_connections_refused_total{client=\"home\",reason=\"rate_limit\"} 1\n",
+            "portredirect_server_forwarded_connections_refused_total{client=\"office\",reason=\"address_limit\"} 0\n",
             "portredirect_server_quic_connections_refused_total{reason=\"blocked\"} 1\n",
             "portredirect_server_quic_connections_refused_total{reason=\"shutting_down\"} 0\n",
         ] {

@@ -42,7 +42,7 @@ The wire protocol is described in [docs/PROTOCOL.md](docs/PROTOCOL.md).
 - The proofs of the PSK are HMACs bound to the TLS session and the client's name, so they can't be replayed or relayed into another connection, and are verified in constant time.
   An unknown name fails like a wrong PSK, in the same time, so the server doesn't reveal which names exist.
 - Online guessing of the PSK is slow: an address is blocked for 10 minutes after 5 failed attempts within 10 minutes.
-- Limits on the resources a single host can use: QUIC connections, forwarded connections per client and per external address, and the time a forwarded connection may stay idle.
+- Limits on the resources a single host can use: QUIC connections, forwarded connections per client and per external address, how fast an external address may open new forwarded connections, and the time a forwarded connection may stay idle.
   A client that stalls the TLS handshake doesn't hold up other clients; the server closes its connection after 10 seconds.
   See [Limits](docs/PROTOCOL.md#limits) for the defaults and options.
 
@@ -56,5 +56,4 @@ The wire protocol is described in [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
 These are known weaknesses that are not fixed yet. Take them into account when you expose PortRedirect to untrusted networks.
 
-- **Distributed attacks:** the limits apply per address (IPv6: per /64 network). An attacker with many addresses can still use up the server's QUIC connections (`--max-quic-connections`) or a client's forwarded connections (`--max-connections`), and keep guessing the PSK online from each of them. A long random PSK makes guessing hopeless anyway.
-- **No rate limit for new forwarded connections:** the number of concurrent forwarded connections is limited, but not how fast new ones are opened. Each of them makes the client connect to the destination.
+- **Distributed attacks:** the limits apply per address (IPv6: per /64 network). An attacker with many addresses can still use up the server's QUIC connections (`--max-quic-connections`) or a client's forwarded connections (`--max-connections`), open new forwarded connections at the full rate from each address, and keep guessing the PSK online from each of them. A long random PSK makes guessing hopeless anyway.

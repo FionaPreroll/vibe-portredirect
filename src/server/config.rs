@@ -117,6 +117,20 @@ pub struct Args {
     #[clap(long, default_value_t = ForwardingLimits::DEFAULT_MAX_CONNECTIONS_PER_IP as u32)]
     pub max_connections_per_ip: u32,
 
+    /// Maximum number of new forwarded TCP connections per second and external IP address
+    /// (IPv6: per /64 network), 0 for no limit. Further connections are closed right away.
+    #[clap(long, default_value_t = ForwardingLimits::DEFAULT_MAX_CONNECTION_RATE_PER_IP)]
+    pub max_connection_rate_per_ip: u32,
+
+    /// Number of new forwarded TCP connections an external IP address may open at once, before
+    /// --max-connection-rate-per-ip applies.
+    #[clap(
+        long,
+        default_value_t = ForwardingLimits::DEFAULT_MAX_CONNECTION_BURST_PER_IP,
+        value_parser = clap::value_parser!(u32).range(1..)
+    )]
+    pub max_connection_burst_per_ip: u32,
+
     /// Close forwarded TCP connections after this many seconds without data transfer,
     /// 0 to never close idle connections.
     #[clap(long, default_value_t = ForwardingLimits::DEFAULT_IDLE_TIMEOUT.as_secs())]
@@ -162,6 +176,8 @@ pub struct ConfigFile {
     pub max_quic_connections: Option<NonZeroU32>,
     pub max_connections: Option<NonZeroU32>,
     pub max_connections_per_ip: Option<u32>,
+    pub max_connection_rate_per_ip: Option<u32>,
+    pub max_connection_burst_per_ip: Option<NonZeroU32>,
     pub idle_timeout: Option<u64>,
     pub print_metrics: Option<bool>,
     pub provide_metrics: Option<bool>,
@@ -397,6 +413,18 @@ impl Config {
             args.max_connections_per_ip,
             file.max_connections_per_ip,
         );
+        let max_connection_rate_per_ip = merge(
+            matches,
+            "max_connection_rate_per_ip",
+            args.max_connection_rate_per_ip,
+            file.max_connection_rate_per_ip,
+        );
+        let max_connection_burst_per_ip = merge(
+            matches,
+            "max_connection_burst_per_ip",
+            args.max_connection_burst_per_ip,
+            file.max_connection_burst_per_ip.map(NonZeroU32::get),
+        );
         let provide_metrics = merge(
             matches,
             "provide_metrics",
@@ -441,6 +469,8 @@ impl Config {
             forwarding_limits: ForwardingLimits {
                 max_connections: max_connections as usize,
                 max_connections_per_ip: max_connections_per_ip as usize,
+                max_connection_rate_per_ip,
+                max_connection_burst_per_ip,
                 idle_timeout: (idle_timeout > 0).then(|| Duration::from_secs(idle_timeout)),
             },
             print_metrics: merge(
@@ -535,6 +565,8 @@ mod tests {
         max-quic-connections = 10
         max-connections = 20
         max-connections-per-ip = 0
+        max-connection-rate-per-ip = 0
+        max-connection-burst-per-ip = 5
         idle-timeout = 0
         print-metrics = true
         provide-metrics = true
@@ -605,6 +637,8 @@ mod tests {
             ForwardingLimits {
                 max_connections: 20,
                 max_connections_per_ip: 0,
+                max_connection_rate_per_ip: 0,
+                max_connection_burst_per_ip: 5,
                 idle_timeout: None,
             }
         );
@@ -642,6 +676,10 @@ mod tests {
                 "40",
                 "--max-connections-per-ip",
                 "50",
+                "--max-connection-rate-per-ip",
+                "7",
+                "--max-connection-burst-per-ip",
+                "8",
                 "--idle-timeout",
                 "60",
                 "--metrics-listen",
@@ -675,6 +713,8 @@ mod tests {
             ForwardingLimits {
                 max_connections: 40,
                 max_connections_per_ip: 50,
+                max_connection_rate_per_ip: 7,
+                max_connection_burst_per_ip: 8,
                 idle_timeout: Some(Duration::from_secs(60)),
             }
         );
@@ -791,6 +831,27 @@ mod tests {
             let message = error_with_file(&text, args);
             assert!(message.contains(expected), "{:?}: {}", args, message);
         }
+    }
+
+    #[test]
+    fn test_connection_burst_is_at_least_one() {
+        let message = error_with_file("max-connection-burst-per-ip = 0", &[]);
+        assert!(message.contains("nonzero"), "{}", message);
+        let args = [
+            "--listen-host",
+            "::",
+            "--allowed-client-ports",
+            "443",
+            "--psk",
+            "secret",
+            "--max-connection-burst-per-ip",
+            "0",
+        ];
+        let err = config(&args)
+            .unwrap_err()
+            .downcast::<clap::Error>()
+            .unwrap();
+        assert_eq!(err.kind(), ErrorKind::ValueValidation);
     }
 
     #[test]
