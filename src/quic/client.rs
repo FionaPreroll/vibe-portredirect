@@ -11,6 +11,7 @@ use std::time::Duration;
 use std::{fs, net::SocketAddr, path::PathBuf, sync::Arc, time::Instant};
 use tracing::info;
 
+use super::fingerprint::{CertFingerprint, FingerprintVerifier};
 use super::{client_transport_config, ALPN_QUIC_PORTREDIRECT};
 use crate::protocol::close::CloseCode;
 use crate::shutdown::Shutdown;
@@ -22,8 +23,11 @@ const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 #[derive(Debug)]
 pub struct ClientConfig<AppDataType> {
     pub remote_hostname_match: Option<String>,
-    pub ca_path: Option<PathBuf>,
+    /// The server's certificate to trust, unless `cert_fingerprints` are given.
     pub cert_file: PathBuf,
+    /// Fingerprints of the server certificates to trust instead of `cert_file`, whatever names
+    /// they are issued for.
+    pub cert_fingerprints: Vec<CertFingerprint>,
 
     pub local_socket: SocketAddr,
     pub remote_socket: SocketAddr,
@@ -48,8 +52,8 @@ impl<AppDataType> ClientConfig<AppDataType> {
     ) -> Self {
         ClientConfig {
             remote_hostname_match,
-            ca_path: None,
             cert_file: config_dir.join("cert.der"),
+            cert_fingerprints: Vec::new(),
             local_socket,
             remote_socket,
             connection_limit,
@@ -67,30 +71,43 @@ pub struct QuicClient<AppDataType> {
 }
 
 impl<AppDataType> QuicClient<AppDataType> {
-    /// Loads the server certificate to trust and binds the local endpoint.
+    /// Loads the server certificate to trust, unless its fingerprints are given, and binds the
+    /// local endpoint.
     ///
     /// Prerequisite: A rustls CryptoProvider must be available before calling this function,
     /// call CryptoProvider::install_default() before this point.
     pub fn new(config: ClientConfig<AppDataType>) -> Result<Self> {
         info!("Starting PR QUIC client setup");
 
-        // Trust the CA chain, or if none is given, the server's certificate.
-        let certificate_path = config.ca_path.as_ref().unwrap_or(&config.cert_file);
-        let certificate = fs::read(certificate_path).with_context(|| {
-            format!(
-                "failed to read the server certificate {}, copy cert.der from the server's configuration directory",
-                certificate_path.display()
-            )
-        })?;
-        let mut roots = rustls::RootCertStore::empty();
-        roots
-            .add(CertificateDer::from(certificate))
-            .with_context(|| format!("invalid certificate {}", certificate_path.display()))?;
-
-        // Crypto setup.
-        let mut client_crypto = rustls::ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth();
+        let mut client_crypto = if config.cert_fingerprints.is_empty() {
+            // Trust the server's certificate, issued for the server's name.
+            let certificate_path = &config.cert_file;
+            let certificate = fs::read(certificate_path).with_context(|| {
+                format!(
+                    "failed to read the server certificate {}, copy cert.der from the server's configuration directory or trust it by its fingerprint with --quic-cert-fingerprint",
+                    certificate_path.display()
+                )
+            })?;
+            let mut roots = rustls::RootCertStore::empty();
+            roots
+                .add(CertificateDer::from(certificate))
+                .with_context(|| format!("invalid certificate {}", certificate_path.display()))?;
+            rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth()
+        } else {
+            let fingerprints = config.cert_fingerprints.clone();
+            let trusted: Vec<String> = fingerprints.iter().map(ToString::to_string).collect();
+            let trusted = trusted.join(", ");
+            info!(
+                "Trusting server certificates with the fingerprints {}",
+                trusted
+            );
+            rustls::ClientConfig::builder()
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(FingerprintVerifier::new(fingerprints)))
+                .with_no_client_auth()
+        };
         client_crypto.alpn_protocols = ALPN_QUIC_PORTREDIRECT.iter().map(|&x| x.into()).collect();
 
         // QUIC client setup.
@@ -171,4 +188,115 @@ where
     let result = handle_incoming(Arc::clone(client.config()), connection).await;
     info!("PR QUIC connection terminated after {:?}.", start.elapsed());
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use quinn::crypto::rustls::QuicServerConfig;
+    use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+    use rustls::server::{ClientHello, ResolvesServerCert};
+    use rustls::sign::CertifiedKey;
+    use std::net::Ipv4Addr;
+
+    /// Presents the same certificate to every client, and signs with a key that may not belong
+    /// to it.
+    #[derive(Debug)]
+    struct FixedCertificate(Arc<CertifiedKey>);
+
+    impl ResolvesServerCert for FixedCertificate {
+        fn resolve(&self, _client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+            Some(Arc::clone(&self.0))
+        }
+    }
+
+    /// Returns a QUIC server endpoint that presents `certificate` and signs with `key`.
+    fn server_endpoint(
+        certificate: &rcgen::CertifiedKey<rcgen::KeyPair>,
+        key: &rcgen::KeyPair,
+    ) -> Result<quinn::Endpoint> {
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der()));
+        let key = rustls::crypto::ring::default_provider()
+            .key_provider
+            .load_private_key(key)?;
+        let presented = CertifiedKey::new(vec![certificate.cert.der().clone()], key);
+        let mut crypto = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_cert_resolver(Arc::new(FixedCertificate(Arc::new(presented))));
+        crypto.alpn_protocols = ALPN_QUIC_PORTREDIRECT.iter().map(|&x| x.into()).collect();
+        let config =
+            quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(crypto)?));
+        let local = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+        Ok(quinn::Endpoint::server(config, local)?)
+    }
+
+    /// Connects to a server that presents `certificate` and signs with `key`. The client trusts
+    /// certificates with `fingerprints`, has no copy of the certificate and expects a name the
+    /// certificate isn't issued for.
+    async fn connect(
+        certificate: &rcgen::CertifiedKey<rcgen::KeyPair>,
+        key: &rcgen::KeyPair,
+        fingerprints: Vec<CertFingerprint>,
+    ) -> Result<()> {
+        let server = server_endpoint(certificate, key)?;
+        let empty_dir = tempfile::tempdir()?;
+        let local = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+        let name = Some("another-name".to_string());
+        let config_dir = empty_dir.path().to_path_buf();
+        let mut config = ClientConfig::create_default_config(
+            config_dir,
+            local,
+            server.local_addr()?,
+            name,
+            None,
+            (),
+        );
+        config.cert_fingerprints = fingerprints;
+        let client = QuicClient::new(config)?;
+        let accept = async {
+            if let Some(incoming) = server.accept().await {
+                let _ = incoming.await;
+            }
+        };
+        let ((), connected) = tokio::join!(accept, client.connect());
+        connected?.close(0u8.into(), b"done");
+        Ok(())
+    }
+
+    fn generate() -> rcgen::CertifiedKey<rcgen::KeyPair> {
+        rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_client_trusts_a_certificate_by_its_fingerprint() -> Result<()> {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let (server, other) = (generate(), generate());
+        let key = &server.signing_key;
+        let fingerprint = CertFingerprint::of(server.cert.der());
+        let other_fingerprint = CertFingerprint::of(other.cert.der());
+
+        // One of several fingerprints is enough, e.g. while the certificate changes.
+        connect(&server, key, vec![other_fingerprint, fingerprint]).await?;
+
+        let err = connect(&server, key, vec![other_fingerprint]).await;
+        let err = format!("{:#}", err.unwrap_err());
+        assert!(err.contains(&fingerprint.to_string()), "{}", err);
+        let expected = "isn't one of --quic-cert-fingerprint";
+        assert!(err.contains(expected), "{}", err);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_server_with_the_certificate_but_not_its_key_is_rejected() -> Result<()> {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let (pinned, attacker) = (generate(), generate());
+        let fingerprint = CertFingerprint::of(pinned.cert.der());
+
+        // E.g. someone who copied cert.der, but has no access to key.der.
+        let result = connect(&pinned, &attacker.signing_key, vec![fingerprint]).await;
+
+        let err = format!("{:#}", result.unwrap_err());
+        assert!(err.contains("BadSignature"), "{}", err);
+        Ok(())
+    }
 }

@@ -11,7 +11,7 @@ PortRedirect is a lightweight user-space TCP forwarder that bridges your fronten
 - **Server:** Listens for incoming TCP connections (e.g., on port 443) and tunnels them over a persistent QUIC connection.
 - **Client:** Connects to the QUIC server, receives tunneled streams, and forwards them to the target TCP service (e.g., `localhost:4433`).
 
-Both use a pre-shared key (PSK) for authentication. The server auto-generates a self-signed certificate and private key on first run (stored in `~/.config/portredirect`), which the client uses to verify the server.
+Both use a pre-shared key (PSK) for authentication. The server auto-generates a self-signed certificate and private key on first run (stored in `~/.config/portredirect`). The client verifies the server by the certificate's fingerprint or a copy of the certificate, see [Server Certificate](#server-certificate).
 
 ### **Bling:**
 
@@ -78,6 +78,7 @@ portredirect_server \
 - **`--psk-file`:** File containing the pre-shared key, see [PSK Best Practices](#psk-best-practices).
 - **`--config-file`:** TOML file with settings, e.g. a list of clients, see [Configuration File](#configuration-file).
 - **`--config-dir`:** Where the certificate and private key are stored (default `~/.config/portredirect`). If only one of them is there, the server doesn't start, instead of generating a new pair that clients wouldn't trust.
+- **`--print-quic-cert-fingerprint`:** Print the fingerprint of the certificate, for the clients' `--quic-cert-fingerprint`, and exit, see [Server Certificate](#server-certificate). If there is no certificate yet, generates it first.
 - **`--provide-metrics`:** Serve Prometheus metrics at `http://127.0.0.1:9899/metrics`, or at the address given with `--metrics-listen`, see [Metrics](#metrics). The endpoint has no authentication, only make it reachable from trusted networks.
 - **`--print-metrics`:** Print the metrics to stderr when they change, each summed over all clients.
 - **`--shutdown-timeout`:** Seconds that running forwarded connections may take to finish when the server shuts down (default 5), see [Shutting Down](#shutting-down).
@@ -101,6 +102,7 @@ portredirect_client \
     --destination-host 127.0.0.1 --destination-port 4433 \
     --remote-listen-port 443 \
     --quic-remote-host 10.0.0.1 --quic-remote-port 12345 \
+    --quic-cert-fingerprint sha256:<fingerprint of the server's certificate> \
     --psk-file /etc/portredirect/psk
 ```
 
@@ -109,16 +111,18 @@ portredirect_client \
 - **`--destination-host` & `--destination-port`:** The target TCP service.
 - **`--remote-listen-port`:** The TCP port the server should listen on for you. Must be one of the server's `--allowed-client-ports`.
 - **`--quic-remote-host` & `--quic-remote-port`:** The QUIC server’s address.
-- **`--quic-cert-hostname`** (optional): Name the server's certificate must be issued for, if it differs from `--quic-remote-host`. Must match the server's `--quic-cert-hostname`.
+- **`--quic-cert-fingerprint`** (recommended): Trust the server's certificate by its fingerprint instead of a copy of `cert.der`, see [Server Certificate](#server-certificate). Give it several times to trust several certificates, e.g. while the server's certificate changes.
+- **`--quic-cert-hostname`** (optional): Name the server's certificate must be issued for, if it differs from `--quic-remote-host`. Must match the server's `--quic-cert-hostname`. Not checked with `--quic-cert-fingerprint`.
 - **`--psk-file`:** File containing the pre-shared key, must match the server’s PSK.
 - **`--client-name`** (optional): Name the client authenticates with, 1 to 64 letters, digits, dots, underscores or hyphens (default `default`). A server configured with `--psk-file` and `--allowed-client-ports` knows a single client named `default`, see [Several Clients and Standby](#several-clients-and-standby).
 - **`--config-file`:** TOML file with settings, see [Configuration File](#configuration-file).
-- **`--config-dir`:** Where the server's certificate `cert.der` is read from (default `~/.config/portredirect`).
+- **`--config-dir`:** Where the server's certificate `cert.der` is read from, unless `--quic-cert-fingerprint` is given (default `~/.config/portredirect`).
 - **`--max-connections`:** Maximum number of concurrently forwarded connections (default 512).
 - **`--provide-metrics`:** Serve Prometheus metrics at `http://127.0.0.1:9898/metrics`, or at the address given with `--metrics-listen`, see [Metrics](#metrics). The endpoint has no authentication, only make it reachable from trusted networks.
 - **`--shutdown-timeout`** and **`--log-level`:** As for the server.
 
-> **Important:** Start the server first to generate its certificate, then copy **only the certificate** `~/.config/portredirect/cert.der` from the server to the client's configuration directory (by default the same path).
+> **Important:** The client must trust the server's certificate. Start the server first to generate it, then give the client the certificate's fingerprint with `--quic-cert-fingerprint`, see [Server Certificate](#server-certificate).
+> Or copy **only the certificate** `~/.config/portredirect/cert.der` from the server to the client's configuration directory (by default the same path).
 > Never copy the private key `key.der`: anyone who has it can impersonate your server. The server creates it readable only by its owner (mode `0600`) and warns if it is accessible by others.
 
 ### Configuration File
@@ -133,6 +137,7 @@ destination-port = 4433
 remote-listen-port = 443
 quic-remote-host = "10.0.0.1"
 quic-remote-port = 12345
+quic-cert-fingerprint = "sha256:<fingerprint of the server's certificate>"
 psk-file = "psk"
 log-level = "warn"
 ```
@@ -146,6 +151,7 @@ portredirect_client --config-file /etc/portredirect/client.toml
 - **Paths:** Relative paths in the file, e.g. `psk-file` or `config-dir`, are relative to the file's directory, not to the working directory.
 - **Checked:** Unknown keys, e.g. typos, and invalid values are errors: the program names the line and exits with code 2.
 - **Ports:** `allowed-client-ports` and the ports of clients can also be arrays, e.g. `[80, 443, "8000-8100"]`.
+- **Several values:** An option that can be given several times takes an array, e.g. `quic-cert-fingerprint = ["sha256:…", "sha256:…"]`.
 
 ### Several Clients and Standby
 
@@ -181,13 +187,48 @@ A client can only use its own ports, so it can't take over another client's port
 - **Changing a PSK:** A client can have two PSK files while its PSK changes, like `mail` above. Add the new PSK file on the server and restart it, switch the client to the new PSK, then remove the old file from the server's configuration.
 - **Logs:** The server's log messages name the client of each connection.
 
+### Server Certificate
+
+On its first start, the server generates a self-signed certificate and its private key, `cert.der` and `key.der` in its configuration directory.
+A client trusts the server in one of two ways:
+
+- **By fingerprint** (recommended): the SHA-256 hash of the certificate, given with `--quic-cert-fingerprint`, or `quic-cert-fingerprint` in the configuration file. It is a line of text, e.g. for a service file or configuration management, so no file needs to be copied. The client doesn't check the name the certificate is issued for, nor how long it is valid, as the fingerprint stands for exactly one certificate.
+- **By a copy** of `cert.der` in the client's configuration directory. The client also checks that the certificate is issued for its `--quic-cert-hostname`, or for the address of `--quic-remote-host`.
+
+A fingerprint is `sha256:` and 64 hex digits. Get it on the server in either of these ways, or from the server's log, which shows it when the server starts:
+
+```sh
+portredirect_server --config-file /etc/portredirect/server.toml --print-quic-cert-fingerprint
+sha256sum ~/.config/portredirect/cert.der    # the same digits, without sha256:
+```
+
+The client also accepts it without `sha256:`, and with colons between the bytes, as `openssl x509 -fingerprint -sha256` prints it.
+
+#### Changing the Server Certificate
+
+E.g. if the private key may have been exposed, or the certificate should be issued for another name.
+With fingerprints, the clients trust the new certificate before the server uses it, so they only reconnect:
+
+1. Prepare the new certificate in another directory. This prints its fingerprint:
+   ```sh
+   portredirect_server --config-dir /etc/portredirect/next --quic-cert-hostname 10.0.0.1 --print-quic-cert-fingerprint
+   ```
+2. On every client, add the new fingerprint to the old one and restart the client:
+   ```toml
+   quic-cert-fingerprint = ["sha256:<old fingerprint>", "sha256:<new fingerprint>"]
+   ```
+3. Move `cert.der` and `key.der` from `/etc/portredirect/next` into the server's configuration directory, replacing the old ones, and restart the server. The clients reconnect and trust the new certificate.
+4. Remove the old fingerprint from the clients, and delete any copies of the old private key.
+
+Clients that trust a copy of `cert.der` need the new one at step 3, so switch them to fingerprints first.
+
 ### Reconnects and Exit Codes
 
 The client keeps the tunnel up on its own: whenever the connection to the server ends, it connects again, after 1 second at first and up to 60 seconds after repeated failures.
 It only exits:
 
 - with code 0 on `SIGINT` or `SIGTERM`, after letting running connections finish, see [Shutting Down](#shutting-down);
-- with code 1 if connecting again would fail the same way until the configuration changes, e.g. because the server rejects the PSK or the port, or the server's certificate doesn't match `cert.der`;
+- with code 1 if connecting again would fail the same way until the configuration changes, e.g. because the server rejects the PSK or the port, or the server's certificate has none of the fingerprints or doesn't match `cert.der`;
 - with code 1 if another client with the same name took over the port, e.g. a second instance by mistake: otherwise, the two would take the port from each other in turns;
 - with code 2 on invalid command-line arguments or an invalid configuration file.
 
@@ -269,7 +310,7 @@ A PSK given on the command line or in the environment takes precedence over the 
 
 ## Authentication & Certificate Verification
 
-PortRedirect secures QUIC tunnels using auto-generated certificates and a pre-shared key (PSK). The client verifies the server’s certificate, then the client names itself, and client and server prove to each other that they know the client's PSK, with HMAC proofs bound to the TLS session.
+PortRedirect secures QUIC tunnels using auto-generated certificates and a pre-shared key (PSK). The client verifies the server’s certificate, by its fingerprint or a copy, then the client names itself, and client and server prove to each other that they know the client's PSK, with HMAC proofs bound to the TLS session.
 Only after that, the server opens the TCP port the client asked for. Addresses that fail to authenticate repeatedly are blocked for a while.
 
 - [docs/PROTOCOL.md](docs/PROTOCOL.md) describes the protocol in detail.

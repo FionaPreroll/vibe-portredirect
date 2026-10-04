@@ -32,6 +32,7 @@ use crate::protocol::control::{receive_hello, send_welcome, SERVER_SOFTWARE};
 use crate::protocol::control::{request_listen_port, Greeting, CLIENT_SOFTWARE};
 use crate::protocol::message::{read_message, write_message, Message, MessageType};
 use crate::quic::client::{run_quic_client, ClientConfig, QuicClient};
+use crate::quic::fingerprint::CertFingerprint;
 use crate::quic::server::{load_or_generate_quic_cert, run_quic_server, ServerConfig};
 use crate::server::auth::authenticate_quic_client;
 use crate::server::client_handler::handle_quic_client_connection;
@@ -39,7 +40,7 @@ use crate::server::clients::{ClientEntry, ClientList};
 use crate::server::metrics::{ClientMetrics, METRICS};
 use crate::server::{ForwardingLimits, PortSpec};
 use crate::shutdown::Shutdown;
-use crate::tests::capture_logs;
+use crate::tests::{capture_logs, free_tcp_port, free_udp_port};
 use crate::PortRedirectProtocol;
 
 const TEST_PSK: &str = "integration-test-psk";
@@ -48,22 +49,6 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn localhost(port: u16) -> SocketAddr {
     SocketAddr::from((Ipv4Addr::LOCALHOST, port))
-}
-
-/// Returns a TCP port that was free a moment ago.
-fn free_tcp_port() -> u16 {
-    std::net::TcpListener::bind(localhost(0))
-        .and_then(|l| l.local_addr())
-        .expect("failed to find free TCP port")
-        .port()
-}
-
-/// Returns a UDP port that was free a moment ago.
-fn free_udp_port() -> u16 {
-    std::net::UdpSocket::bind(localhost(0))
-        .and_then(|s| s.local_addr())
-        .expect("failed to find free UDP port")
-        .port()
 }
 
 /// Deterministic test data, different for each seed.
@@ -276,6 +261,7 @@ fn client_settings(
         quic_local_addr: localhost(0),
         quic_remote_addr: localhost(quic_port),
         quic_cert_hostname: Some(CERT_HOSTNAME.into()),
+        cert_fingerprints: Vec::new(),
         max_connections: PortRedirectProtocol::DEFAULT_MAX_FORWARDED_CONNECTIONS,
         metrics_addr: None,
         reconnect_backoff: Backoff::new(Duration::from_millis(100), Duration::from_secs(1)),
@@ -435,6 +421,30 @@ async fn connect_through_tunnel(port: u16) -> Result<TcpStream> {
             Err(_) => sleep(Duration::from_millis(50)).await,
         }
     }
+}
+
+/// Sends `message` through the tunnel until it comes back, e.g. while the client reconnects.
+async fn echo_once_the_tunnel_is_back(port: u16, message: &[u8]) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let attempt = async {
+            let stream = connect_through_tunnel(port).await?;
+            echo_roundtrip(stream, message.to_vec()).await
+        };
+        if let Ok(Ok(echoed)) = timeout(Duration::from_secs(2), attempt).await {
+            if echoed == message {
+                return Ok(());
+            }
+        }
+        anyhow::ensure!(Instant::now() < deadline, "tunnel did not come back");
+        sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Returns the fingerprint of the server certificate in `config_dir`.
+fn fingerprint_of(config_dir: &tempfile::TempDir) -> Result<CertFingerprint> {
+    let certificate = std::fs::read(config_dir.path().join("cert.der"))?;
+    Ok(CertFingerprint::of(&certificate))
 }
 
 /// Connects to the server's external TCP port from the local address `source`.
@@ -943,21 +953,118 @@ async fn client_reconnects_after_server_restart() -> Result<()> {
         );
 
         // The client reconnects and the tunnel works again.
-        let deadline = Instant::now() + Duration::from_secs(15);
-        loop {
-            let attempt = async {
-                let stream = connect_through_tunnel(listen_port).await?;
-                echo_roundtrip(stream, b"after".to_vec()).await
-            };
-            if let Ok(Ok(echoed)) = timeout(Duration::from_secs(2), attempt).await {
-                if echoed == b"after" {
-                    break;
-                }
-            }
-            anyhow::ensure!(Instant::now() < deadline, "tunnel did not come back");
-            sleep(Duration::from_millis(100)).await;
-        }
+        echo_once_the_tunnel_is_back(listen_port, b"after").await
+    })
+    .await
+}
+
+#[tokio::test]
+async fn client_trusts_the_server_by_the_fingerprint_of_its_certificate() -> Result<()> {
+    let (config_dir, _logs) = setup();
+    let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
+    let echo_addr = start_echo_server().await;
+    let _server = start_server(
+        config_dir.path(),
+        quic_port,
+        vec![PortSpec::Single(listen_port)],
+    );
+    // The client has no copy of the certificate.
+    let client_dir = tempfile::tempdir()?;
+    let mut settings = client_settings(
+        client_dir.path(),
+        quic_port,
+        TEST_PSK,
+        echo_addr,
+        listen_port,
+    );
+    settings.cert_fingerprints = vec![fingerprint_of(&config_dir)?];
+    let _client = spawn_client(settings);
+
+    with_timeout(async {
+        let stream = connect_through_tunnel(listen_port).await?;
+        assert_eq!(echo_roundtrip(stream, b"pinned".to_vec()).await?, b"pinned");
         Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn client_gives_up_on_a_certificate_with_another_fingerprint() -> Result<()> {
+    let (config_dir, _logs) = setup();
+    let other_certificate = certificate_dir();
+    let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
+    let echo_addr = start_echo_server().await;
+    let _server = start_server(
+        config_dir.path(),
+        quic_port,
+        vec![PortSpec::Single(listen_port)],
+    );
+    // The client trusts the server's certificate by cert.der, but its fingerprint takes
+    // precedence.
+    let mut settings = client_settings(
+        config_dir.path(),
+        quic_port,
+        TEST_PSK,
+        echo_addr,
+        listen_port,
+    );
+    settings.cert_fingerprints = vec![fingerprint_of(&other_certificate)?];
+    let client = spawn_client(settings);
+
+    with_timeout(async {
+        let error = format!("{:#}", client.result().await.unwrap_err());
+        let fingerprint = fingerprint_of(&config_dir)?.to_string();
+        assert!(error.contains(&fingerprint), "unexpected error: {}", error);
+        assert!(error.contains("giving up"), "unexpected error: {}", error);
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn server_certificate_changes_while_clients_trust_both_fingerprints() -> Result<()> {
+    let (old_certificate, _logs) = setup();
+    let new_certificate = certificate_dir();
+    let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
+    let echo_addr = start_echo_server().await;
+    let allowed_ports = vec![PortSpec::Single(listen_port)];
+
+    let old_server_shutdown = Shutdown::default();
+    let old_server = start_server_until(
+        old_certificate.path(),
+        quic_port,
+        allowed_ports.clone(),
+        old_server_shutdown.clone(),
+    );
+    // While the certificate changes, the client trusts both.
+    let client_dir = tempfile::tempdir()?;
+    let mut settings = client_settings(
+        client_dir.path(),
+        quic_port,
+        TEST_PSK,
+        echo_addr,
+        listen_port,
+    );
+    settings.cert_fingerprints = vec![
+        fingerprint_of(&old_certificate)?,
+        fingerprint_of(&new_certificate)?,
+    ];
+    let _client = spawn_client(settings);
+
+    with_timeout(async {
+        let stream = connect_through_tunnel(listen_port).await?;
+        assert_eq!(echo_roundtrip(stream, b"old".to_vec()).await?, b"old");
+
+        // The server restarts with the new certificate, and the client reconnects.
+        old_server_shutdown.drain();
+        old_server.await??;
+        let _new_server = start_server_until(
+            new_certificate.path(),
+            quic_port,
+            allowed_ports,
+            Shutdown::default(),
+        );
+        echo_once_the_tunnel_is_back(listen_port, b"new").await
     })
     .await
 }

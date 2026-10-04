@@ -7,6 +7,7 @@ use quinn::TransportConfig;
 use crate::PortRedirectProtocol;
 
 pub(crate) mod client;
+pub(crate) mod fingerprint;
 pub(crate) mod server;
 
 // QUIC ALPN field: the protocol versions this program speaks, see ProtocolVersion.

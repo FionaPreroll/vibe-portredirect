@@ -4,12 +4,16 @@
 #![cfg(unix)]
 
 use anyhow::{anyhow, Result};
+use std::collections::hash_map::RandomState;
 use std::fs;
+use std::hash::BuildHasher;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::ops::Range;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Stdio;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::process::{Child, Command};
@@ -27,18 +31,36 @@ fn localhost(port: u16) -> SocketAddr {
     SocketAddr::from((Ipv4Addr::LOCALHOST, port))
 }
 
-fn free_tcp_port() -> u16 {
-    std::net::TcpListener::bind(localhost(0))
-        .and_then(|l| l.local_addr())
-        .expect("failed to find free TCP port")
-        .port()
+/// Ports for the programs' servers and listeners, handed out one at a time.
+///
+/// The operating system picks the ports of sockets bound to port 0, which includes outgoing
+/// connections, from a range above these: from 32768 on Linux, from 49152 on macOS. So neither
+/// another test nor such a socket can take a port between a test finding it free and the program
+/// binding it. The in-process tests use the ports above these.
+const TEST_PORTS: Range<u16> = 10000..20000;
+
+/// Returns a port from [`TEST_PORTS`] that no other test got, and that `is_free` finds free.
+fn unused_port(is_free: impl Fn(SocketAddr) -> bool) -> u16 {
+    // A random start makes collisions with test programs running at the same time unlikely.
+    static START: LazyLock<usize> =
+        LazyLock::new(|| RandomState::new().hash_one(0) as usize % TEST_PORTS.len());
+    static HANDED_OUT: AtomicUsize = AtomicUsize::new(0);
+    let len = TEST_PORTS.len();
+    (0..len)
+        .map(|_| HANDED_OUT.fetch_add(1, Ordering::Relaxed))
+        .map(|n| TEST_PORTS.start + ((*START + n) % len) as u16)
+        .find(|&port| is_free(localhost(port)))
+        .expect("no free port for tests")
 }
 
+/// Returns a TCP port on localhost for a test alone, see [`TEST_PORTS`].
+fn free_tcp_port() -> u16 {
+    unused_port(|addr| std::net::TcpListener::bind(addr).is_ok())
+}
+
+/// Returns a UDP port on localhost for a test alone, see [`TEST_PORTS`].
 fn free_udp_port() -> u16 {
-    std::net::UdpSocket::bind(localhost(0))
-        .and_then(|s| s.local_addr())
-        .expect("failed to find free UDP port")
-        .port()
+    unused_port(|addr| std::net::UdpSocket::bind(addr).is_ok())
 }
 
 /// A running program whose output is collected in the background.
@@ -702,11 +724,26 @@ ports = [{listen_port}]
     );
     assert!(server.output().contains(&standby), "{}", server.output());
 
+    // Instead of a copy of the certificate, the client gets its fingerprint, which the server
+    // also logs.
+    let mut print = Program::start(
+        SERVER,
+        &[
+            "--config-file",
+            path_str(&server_config),
+            "--print-quic-cert-fingerprint",
+        ],
+        &[],
+    );
+    assert_eq!(print.exit_code().await?, 0, "{}", print.output());
+    let fingerprint = print.stdout().trim().to_string();
+    let logged = format!(
+        "Certificate fingerprint, for the clients' --quic-cert-fingerprint: {}",
+        fingerprint
+    );
+    assert!(server.output().contains(&logged), "{}", server.output());
+
     // The client already uses the office's next PSK.
-    fs::copy(
-        server_dir.path().join("state").join("cert.der"),
-        client_dir.path().join("cert.der"),
-    )?;
     write_psk_file(&client_dir.path().join("psk"), office_next_psk, 0o600)?;
     let client_config = client_dir.path().join("client.toml");
     fs::write(
@@ -720,7 +757,7 @@ remote-listen-port = {listen_port}
 client-name = "office"
 quic-remote-host = "127.0.0.1"
 quic-remote-port = {quic_port}
-quic-cert-hostname = "localhost"
+quic-cert-fingerprint = "{fingerprint}"
 psk-file = "psk"
 log-level = "error"
 "#,
@@ -763,6 +800,36 @@ log-level = "error"
 
     server.terminate();
     assert_eq!(server.exit_code().await?, 0, "{}", server.output());
+    Ok(())
+}
+
+#[tokio::test]
+async fn server_prints_the_fingerprint_of_its_certificate() -> Result<()> {
+    let config_dir = tempfile::tempdir()?;
+    let args = [
+        "--config-dir",
+        path_str(config_dir.path()),
+        "--print-quic-cert-fingerprint",
+    ];
+
+    // Without a certificate, the server generates one first. It needs no clients, as it doesn't
+    // run.
+    let mut generated = Program::start(SERVER, &args, &[]);
+    assert_eq!(generated.exit_code().await?, 0, "{}", generated.output());
+    let certificate = fs::read(config_dir.path().join("cert.der"))?;
+    let digest = ring::digest::digest(&ring::digest::SHA256, &certificate);
+    let hex: String = digest
+        .as_ref()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect();
+    // As sha256sum prints it.
+    assert_eq!(generated.stdout(), format!("sha256:{}\n", hex));
+
+    // Then it prints the fingerprint of the same certificate.
+    let mut loaded = Program::start(SERVER, &args, &[]);
+    assert_eq!(loaded.exit_code().await?, 0, "{}", loaded.output());
+    assert_eq!(loaded.stdout(), generated.stdout());
     Ok(())
 }
 

@@ -13,7 +13,7 @@ use tracing::info;
 use crate::app_data::{ClientAppData, ServerAppData};
 use crate::quic::{client, server};
 use crate::server::PortSpec;
-use crate::tests::capture_logs;
+use crate::tests::{capture_logs, free_udp_port};
 
 // This is an end-to-end test that sets up a QUIC server and multiple clients, and tests that they can
 // successfully establish and hold multiple connections at the same time.
@@ -30,11 +30,7 @@ async fn test_quic_end_to_end_multiple_clients() {
     info!("Using config directory: {:?}", config_dir);
 
     // Define the test server port
-    // A UDP port that was free a moment ago, so tests running in parallel don't collide.
-    let test_port = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
-        .and_then(|socket| socket.local_addr())
-        .expect("failed to find a free UDP port")
-        .port();
+    let test_port = free_udp_port();
 
     // PSK is required so this tests needs one.
     let test_psk = "test_psk";

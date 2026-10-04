@@ -8,9 +8,11 @@ use tracing::{error, info, span, Level};
 
 use crate::app_data::ServerAppData;
 use crate::metrics::{print_metrics_loop, serve_metrics};
-use crate::quic::server::{run_quic_server, ServerConfig};
+use crate::quic::server::{
+    ensure_server_certificate, run_quic_server, server_fingerprint, ServerConfig,
+};
 use crate::server::client_handler::handle_quic_client_connection;
-use crate::server::config::Config;
+use crate::server::config::{CertificateConfig, Command};
 use crate::server::metrics::{METRICS, PREFIX};
 use crate::shutdown::Shutdown;
 use crate::{get_config_dir, init_logging};
@@ -19,7 +21,10 @@ use crate::{get_config_dir, init_logging};
 #[tokio::main]
 pub async fn main() -> Result<()> {
     // Read the command line, the environment and the configuration file.
-    let config = Config::from_command_line();
+    let config = match Command::from_command_line() {
+        Command::Run(config) => *config,
+        Command::PrintFingerprint(settings) => return print_fingerprint(settings),
+    };
 
     init_logging(config.log_level);
 
@@ -84,6 +89,20 @@ pub async fn main() -> Result<()> {
         .with_context(|| "PortRedirect Server Error")?;
 
     info!("PortRedirect Server exited cleanly");
+    Ok(())
+}
+
+/// Prints the fingerprint of the server's certificate, generating the certificate first if there
+/// is none.
+fn print_fingerprint(config: CertificateConfig) -> Result<()> {
+    init_logging(config.log_level);
+    let config_dir =
+        get_config_dir(config.config_dir).context("Failed to get configuration directory")?;
+    ensure_server_certificate(&config_dir, config.quic_cert_hostname)?;
+    // In two steps, so the printed fingerprint doesn't depend on what a function named after
+    // certificates returns: CodeQL takes that for secrets, and would report printing it as
+    // logging them.
+    println!("{}", server_fingerprint(&config_dir)?);
     Ok(())
 }
 
