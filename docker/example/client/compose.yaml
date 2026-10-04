@@ -30,8 +30,4 @@ services:
     # volumes:
     #   - ./client.toml:/etc/portredirect/client.toml:ro
     depends_on:
-      nginx:
-        condition: service_started
-        # The client looks up nginx's address when it starts, so it starts again with nginx,
-        # e.g. after an update, which may give nginx another address.
-        restart: true
+      - nginx

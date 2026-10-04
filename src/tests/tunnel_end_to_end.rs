@@ -262,7 +262,7 @@ fn client_settings(
         app_data: ClientAppData::new(psk.into(), destination, remote_listen_port),
         config_dir: config_dir.to_path_buf(),
         quic_local_addr: localhost(0),
-        quic_remote_addr: localhost(quic_port),
+        quic_remote: localhost(quic_port).into(),
         quic_cert_hostname: Some(CERT_HOSTNAME.into()),
         cert_fingerprints: Vec::new(),
         max_connections: PortRedirectProtocol::DEFAULT_MAX_FORWARDED_CONNECTIONS,

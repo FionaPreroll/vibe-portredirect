@@ -13,6 +13,7 @@ use tracing::info;
 
 use super::fingerprint::{CertFingerprint, FingerprintVerifier};
 use super::{bind_endpoint, client_transport_config, CongestionControl, ALPN_QUIC_PORTREDIRECT};
+use crate::host_port::HostPort;
 use crate::protocol::close::CloseCode;
 use crate::shutdown::Shutdown;
 use crate::PortRedirectProtocol;
@@ -30,7 +31,8 @@ pub struct ClientConfig<AppDataType> {
     pub cert_fingerprints: Vec<CertFingerprint>,
 
     pub local_socket: SocketAddr,
-    pub remote_socket: SocketAddr,
+    /// The server. A name is looked up for each connection attempt.
+    pub remote: HostPort,
     /// Maximum number of concurrently forwarded connections, i.e. streams the server may open.
     /// Defaults to `PortRedirectProtocol::DEFAULT_MAX_FORWARDED_CONNECTIONS`.
     pub connection_limit: Option<usize>,
@@ -47,7 +49,7 @@ impl<AppDataType> ClientConfig<AppDataType> {
     pub fn create_default_config(
         config_dir: PathBuf,
         local_socket: SocketAddr,
-        remote_socket: SocketAddr,
+        remote: impl Into<HostPort>,
         remote_hostname_match: Option<String>,
         connection_limit: Option<usize>,
         app_data: AppDataType,
@@ -57,7 +59,7 @@ impl<AppDataType> ClientConfig<AppDataType> {
             cert_file: config_dir.join("cert.der"),
             cert_fingerprints: Vec::new(),
             local_socket,
-            remote_socket,
+            remote: remote.into(),
             connection_limit,
             congestion_control: CongestionControl::default(),
             shutdown: Shutdown::default(),
@@ -70,7 +72,6 @@ impl<AppDataType> ClientConfig<AppDataType> {
 pub struct QuicClient<AppDataType> {
     config: Arc<ClientConfig<AppDataType>>,
     endpoint: quinn::Endpoint,
-    server_name: String,
 }
 
 impl<AppDataType> QuicClient<AppDataType> {
@@ -127,15 +128,9 @@ impl<AppDataType> QuicClient<AppDataType> {
             .with_context(|| format!("failed to bind {}", config.local_socket))?;
         endpoint.set_default_client_config(client_config);
 
-        let server_name = config
-            .remote_hostname_match
-            .clone()
-            .unwrap_or_else(|| config.remote_socket.ip().to_string());
-
         Ok(Self {
             config: Arc::new(config),
             endpoint,
-            server_name,
         })
     }
 
@@ -144,21 +139,42 @@ impl<AppDataType> QuicClient<AppDataType> {
     }
 
     /// Connects to the server, or rather: establishes the tunnel's QUIC connection.
+    ///
+    /// Looks up the server's name first, see [`QuicClient::server_address`]. The server's
+    /// certificate must be issued for the name in `remote_hostname_match`, or else for the
+    /// address.
     pub async fn connect(&self) -> Result<quinn::Connection> {
         let start = Instant::now();
+        let remote = self.server_address().await?;
+        let server_name = self
+            .config
+            .remote_hostname_match
+            .clone()
+            .unwrap_or_else(|| remote.ip().to_string());
         info!(
-            server_name_match = self.server_name,
+            server_name_match = server_name,
             local = self.config.local_socket.to_string(),
-            remote = self.config.remote_socket.to_string(),
+            remote = remote.to_string(),
             "Connecting to PR QUIC Server"
         );
         let connection = self
             .endpoint
-            .connect(self.config.remote_socket, &self.server_name)?
+            .connect(remote, &server_name)?
             .await
             .context("failed to connect")?;
         info!("PR QUIC connection established in {:?}.", start.elapsed());
         Ok(connection)
+    }
+
+    /// Looks up the server's addresses, and returns the one to connect to, see [`address_for`].
+    async fn server_address(&self) -> Result<SocketAddr> {
+        let remote = &self.config.remote;
+        let addresses = remote
+            .lookup()
+            .await
+            .with_context(|| format!("failed to look up the server {}", remote))?;
+        address_for(self.config.local_socket, &addresses)
+            .with_context(|| format!("the server {} has no address", remote))
     }
 
     /// Closes all connections and waits until the server has been notified, but not longer
@@ -167,6 +183,16 @@ impl<AppDataType> QuicClient<AppDataType> {
         self.endpoint.close(CloseCode::Ok.code(), reason.as_bytes());
         let _ = tokio::time::timeout(CLOSE_TIMEOUT, self.endpoint.wait_idle()).await;
     }
+}
+
+/// Returns the first of the server's `addresses` of the family of the `local` socket, e.g. IPv4,
+/// which the socket can send to, or else the first one, if any.
+fn address_for(local: SocketAddr, addresses: &[SocketAddr]) -> Option<SocketAddr> {
+    addresses
+        .iter()
+        .find(|address| address.is_ipv4() == local.is_ipv4())
+        .or(addresses.first())
+        .copied()
 }
 
 /// Connects to the server once and runs `handle_incoming` for the connection, for tests.
@@ -202,6 +228,21 @@ mod tests {
     use rustls::server::{ClientHello, ResolvesServerCert};
     use rustls::sign::CertifiedKey;
     use std::net::Ipv4Addr;
+
+    #[test]
+    fn test_server_address_of_the_local_family() {
+        let [v4, v6]: [SocketAddr; 2] =
+            ["127.0.0.1:4433", "[::1]:4433"].map(|a| a.parse().unwrap());
+        let [local_v4, local_v6]: [SocketAddr; 2] =
+            ["0.0.0.0:0", "[::]:0"].map(|a| a.parse().unwrap());
+        // E.g. localhost, IPv6 first.
+        assert_eq!(address_for(local_v4, &[v6, v4]), Some(v4));
+        assert_eq!(address_for(local_v6, &[v4, v6]), Some(v6));
+        // Without one of the family, the first.
+        assert_eq!(address_for(local_v4, &[v6]), Some(v6));
+        assert_eq!(address_for(local_v6, &[v4]), Some(v4));
+        assert_eq!(address_for(local_v4, &[]), None);
+    }
 
     /// Presents the same certificate to every client, and signs with a key that may not belong
     /// to it.

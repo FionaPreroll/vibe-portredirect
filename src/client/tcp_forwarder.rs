@@ -16,7 +16,7 @@ use std::time::Duration;
 use tokio::time::timeout;
 use tracing::debug;
 
-/// Time to wait for the destination to accept a connection.
+/// Time to look up the destination and wait for it to accept a connection.
 const DESTINATION_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Time to wait for the header of a new data stream, which the server sends right away.
@@ -54,12 +54,13 @@ pub async fn forward_tcp_to_quic_stream(
         }
     };
 
-    // Create client-side TCP connection to the destination
-    let destination = config.app_data.forward_destination;
+    // Connect to the destination. A name is looked up each time, and each of its addresses is
+    // tried in turn, e.g. IPv6 and IPv4 for localhost.
+    let destination = &config.app_data.forward_destination;
     debug!("Forwarding connection from {} to {}", peer, destination);
     let connected = timeout(
         DESTINATION_CONNECT_TIMEOUT,
-        tokio::net::TcpStream::connect(destination),
+        tokio::net::TcpStream::connect(destination.as_tuple()),
     )
     .await;
     let tcp_stream = match connected {

@@ -7,6 +7,7 @@ use super::reconnect::{is_permanent_error, Backoff};
 use super::server_handler::handle_quic_server_connection;
 
 use crate::app_data::ClientAppData;
+use crate::host_port::HostPort;
 use crate::metrics::serve_metrics;
 use crate::protocol::close::CloseCode;
 use crate::protocol::message::ProtocolViolation;
@@ -32,7 +33,8 @@ pub struct ClientSettings {
     /// Directory with the server's certificate `cert.der`, unless `cert_fingerprints` are given.
     pub config_dir: PathBuf,
     pub quic_local_addr: SocketAddr,
-    pub quic_remote_addr: SocketAddr,
+    /// The server. A name is looked up for each connection attempt.
+    pub quic_remote: HostPort,
     /// Name the server's certificate must be issued for, defaults to the remote IP address.
     pub quic_cert_hostname: Option<String>,
     /// Fingerprints of the server certificates to trust instead of `cert.der`, if any.
@@ -70,7 +72,7 @@ pub async fn run_client(settings: ClientSettings) -> Result<()> {
     let mut quic_client_config = ClientConfig::create_default_config(
         settings.config_dir,
         settings.quic_local_addr,
-        settings.quic_remote_addr,
+        settings.quic_remote,
         settings.quic_cert_hostname,
         Some(settings.max_connections),
         settings.app_data,

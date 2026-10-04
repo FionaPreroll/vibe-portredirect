@@ -5,12 +5,13 @@
 use anyhow::{anyhow, Context, Result};
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::process::ExitCode;
-use tracing::{error, info, span, Level};
+use tracing::{error, info, span, warn, Level};
 
 use crate::app_data::ClientAppData;
 use crate::client::config::Config;
 use crate::client::reconnect::Backoff;
 use crate::client::run_client::{run_client, ClientSettings};
+use crate::host_port::HostPort;
 use crate::shutdown::Shutdown;
 use crate::{get_config_dir, init_logging};
 
@@ -48,19 +49,22 @@ async fn run(config: Config) -> Result<()> {
     let quic_local_addr = resolve_socket_addr(&config.quic_local_host, config.quic_local_port)
         .context("resolving QUIC local address")?;
 
-    // Resolve remote UDP server address.
-    let quic_remote_addr = resolve_socket_addr(&config.quic_remote_host, config.quic_remote_port)
-        .context("resolving QUIC remote address")?;
-
-    // Resolve the forward destination for the tunneled TCP connections.
-    let forward_destination =
-        resolve_socket_addr(&config.destination_host, config.destination_port)
-            .context("resolving destination address")?;
+    // The server and the destination: names are looked up each time they are used, see
+    // HostPort. So a connection attempt fails while the server's name has no address, and a
+    // forwarded connection while the destination's name has none, e.g. until its container runs.
+    let quic_remote = HostPort::new(config.quic_remote_host, config.quic_remote_port);
+    let forward_destination = HostPort::new(config.destination_host, config.destination_port);
+    if let Err(e) = forward_destination.lookup().await {
+        warn!(
+            "The destination {} has no address yet: {}. It is looked up again for each connection.",
+            forward_destination, e
+        );
+    }
 
     info!(
         destination = %forward_destination,
         local = %quic_local_addr,
-        remote = %quic_remote_addr,
+        remote = %quic_remote,
         "Initializing QUIC Client"
     );
 
@@ -75,7 +79,7 @@ async fn run(config: Config) -> Result<()> {
             .with_client_name(config.client_name),
         config_dir,
         quic_local_addr,
-        quic_remote_addr,
+        quic_remote,
         quic_cert_hostname: config.quic_cert_hostname,
         cert_fingerprints: config.quic_cert_fingerprints,
         max_connections: config.max_connections,

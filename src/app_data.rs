@@ -4,9 +4,9 @@
 
 use secrecy::SecretString;
 use std::fmt;
-use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
+use crate::host_port::HostPort;
 use crate::protocol::auth::ClientName;
 use crate::server::clients::ClientList;
 use crate::server::port_registry::PortRegistry;
@@ -80,8 +80,8 @@ pub struct ClientAppData {
     pub client_name: ClientName,
     pub connection_auth_psk: SecretString,
 
-    // The destination address to forward packets to.
-    pub forward_destination: SocketAddr,
+    /// Where to forward connections to. A name is looked up for each connection.
+    pub forward_destination: HostPort,
 
     // TCP port the server should listen on for external connections.
     pub remote_listen_port: u16,
@@ -92,7 +92,7 @@ impl ClientAppData {
     /// [`ClientAppData::with_client_name`].
     pub fn new(
         connection_auth_psk: SecretString,
-        forward_destination: SocketAddr,
+        forward_destination: impl Into<HostPort>,
         remote_listen_port: u16,
     ) -> Self {
         ClientAppData {
@@ -100,7 +100,7 @@ impl ClientAppData {
             client_name: ClientName::default(),
             connection_auth_psk,
 
-            forward_destination,
+            forward_destination: forward_destination.into(),
             remote_listen_port,
         }
     }
@@ -127,7 +127,7 @@ mod tests {
     fn test_display_hides_the_psk() {
         let server = ServerAppData::new("server-secret".into(), "0.0.0.0".into(), Vec::new());
         let client =
-            ClientAppData::new("client-secret".into(), "127.0.0.1:80".parse().unwrap(), 443)
+            ClientAppData::new("client-secret".into(), HostPort::new("127.0.0.1", 80), 443)
                 .with_client_name("home".parse().unwrap());
 
         let (server, client) = (server.to_string(), client.to_string());

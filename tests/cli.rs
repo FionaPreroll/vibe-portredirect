@@ -620,6 +620,70 @@ async fn client_without_certificate_exits_with_code_1() -> Result<()> {
 }
 
 #[tokio::test]
+async fn client_looks_up_names_when_it_uses_them() -> Result<()> {
+    let (server_dir, client_dir) = (tempfile::tempdir()?, tempfile::tempdir()?);
+    let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
+    let echo_addr = start_echo_server().await?;
+    let mut server = start_server_with(server_dir.path(), quic_port, listen_port, &[]).await?;
+    fs::copy(
+        server_dir.path().join("cert.der"),
+        client_dir.path().join("cert.der"),
+    )?;
+    // Starts a client of the server at `server_host` for the destination at `destination_host`.
+    let start_client = |server_host: &str, destination_host: &str| {
+        let mut args = client_args(client_dir.path(), quic_port, echo_addr.port(), listen_port);
+        for (option, host) in [
+            ("--quic-remote-host", server_host),
+            ("--destination-host", destination_host),
+        ] {
+            let value = args.iter().position(|arg| arg == option).unwrap() + 1;
+            args[value] = host.to_string();
+        }
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        Program::start(CLIENT, &args, &[("PORTREDIRECT_PSK", PSK)])
+    };
+
+    // By name: the client takes an address of its socket's family, IPv4, for the server, and
+    // tries each address of the destination, which accepts connections on IPv4 only.
+    let mut client = start_client("localhost", "localhost");
+    client.wait_for_output("Tunnel established").await?;
+    assert_echo(listen_port).await?;
+    client.terminate();
+    assert_eq!(client.exit_code().await?, 0, "{}", client.output());
+    wait_until_closed(listen_port).await?;
+
+    // A destination without address doesn't stop the client, e.g. a container that doesn't run
+    // yet: each connection fails until it has one.
+    let mut client = start_client("localhost", "nonexistent.invalid");
+    client.wait_for_output("Tunnel established").await?;
+    let warning = "The destination nonexistent.invalid:";
+    assert!(client.output().contains(warning), "{}", client.output());
+    let mut external = TcpStream::connect(localhost(listen_port)).await?;
+    let mut byte = [0u8; 1];
+    let read = timeout(WAIT_TIMEOUT, external.read(&mut byte)).await?;
+    assert!(!matches!(read, Ok(1)), "{:?}", read);
+    client
+        .wait_for_output("failed to connect to destination nonexistent.invalid:")
+        .await?;
+    client.terminate();
+    assert_eq!(client.exit_code().await?, 0, "{}", client.output());
+    wait_until_closed(listen_port).await?;
+
+    // Nor does a server without address: the client tries again later.
+    let mut client = start_client("nonexistent.invalid", "localhost");
+    client
+        .wait_for_output("failed to look up the server nonexistent.invalid:")
+        .await?;
+    client.wait_for_output("Reconnecting in").await?;
+    client.terminate();
+    assert_eq!(client.exit_code().await?, 0, "{}", client.output());
+
+    server.terminate();
+    assert_eq!(server.exit_code().await?, 0, "{}", server.output());
+    Ok(())
+}
+
+#[tokio::test]
 async fn server_does_not_start_without_its_private_key() -> Result<()> {
     let config_dir = tempfile::tempdir()?;
     // The certificate the server generated on its first start, but not its private key.

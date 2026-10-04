@@ -78,7 +78,6 @@ The client fits into a Docker Compose stack: it forwards the connections that th
 3. nginx answers on the server's port 80.
 
 - **Ports:** The server's container publishes the ports clients may ask for, e.g. 80, and the QUIC port, 4433/udp. Docker passes on the external clients' IPv4 addresses, which the server's limits per address need. IPv6 clients arrive from Docker's own address unless IPv6 is enabled in Docker.
-- **Destination:** The client looks up the destination's address when it starts. If the destination's container is created again, e.g. for an update, it may get another address: the example restarts the client with nginx.
 - **UDP buffers:** Containers get the host's limits, so set them on the hosts, see [Performance](#performance).
 
 ### From Source
@@ -149,9 +148,9 @@ portredirect_client \
 
 **Parameters:**
 
-- **`--destination-host` & `--destination-port`:** The target TCP service.
+- **`--destination-host` & `--destination-port`:** The target TCP service. A name is looked up for each forwarded connection, and each of its addresses is tried, so the client follows changes, e.g. of a container that was created again.
 - **`--remote-listen-port`:** The TCP port the server should listen on for you. Must be one of the server's `--allowed-client-ports`.
-- **`--quic-remote-host` & `--quic-remote-port`:** The QUIC server’s address.
+- **`--quic-remote-host` & `--quic-remote-port`:** The QUIC server’s address. A name is looked up for each connection attempt, e.g. for a server with a dynamic address.
 - **`--quic-cert-fingerprint`** (recommended): Trust the server's certificate by its fingerprint instead of a copy of `cert.der`, see [Server Certificate](#server-certificate). Give it several times to trust several certificates, e.g. while the server's certificate changes.
 - **`--quic-cert-hostname`** (optional): Name the server's certificate must be issued for, if it differs from `--quic-remote-host`. Must match the server's `--quic-cert-hostname`. Not checked with `--quic-cert-fingerprint`.
 - **`--psk-file`:** File containing the pre-shared key, must match the server’s PSK.

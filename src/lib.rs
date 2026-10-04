@@ -34,6 +34,7 @@ mod forward;
 #[cfg(any(test, fuzzing))]
 #[doc(hidden)]
 pub mod fuzz;
+mod host_port;
 mod limits;
 mod metrics;
 mod private_files;
