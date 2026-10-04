@@ -1,0 +1,188 @@
+name: Release binaries (Linux)
+# Static binaries of the programs for Linux on amd64, arm64 and armv7, each tested on its
+# architecture, the ARM ones in qemu. For each commit on main, they replace the files of the
+# pre-release "latest", whose tag moves to that commit. Pull requests only build and test them,
+# so a change that breaks them shows before it is merged.
+#
+# The release changes, so release immutability must stay off (Settings, General, Releases).
+# As the tag moves, `git fetch --tags` refuses to update a local copy of it ("would clobber
+# existing tag"); `git fetch --tags --force` updates it, and VS Code doesn't fetch tags on pull
+# in this repository (.vscode/settings.json).
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # A new push to a pull request cancels the run for the previous one. On main, a run finishes
+  # before the next one starts, so publishing isn't interrupted halfway.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+defaults:
+  run:
+    shell: bash
+env:
+  CARGO_TERM_COLOR: always
+jobs:
+  build:
+    name: Build and test (${{ matrix.arch }})
+    # The setup below is tested on this version. The binaries don't depend on it.
+    runs-on: ubuntu-24.04
+    # A test that hangs in qemu mustn't hold up the runs of newer commits on main for hours.
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            target: x86_64-unknown-linux-musl
+            packages: musl-tools
+          - arch: arm64
+            target: aarch64-unknown-linux-musl
+            packages: clang qemu-user-static
+          - arch: armv7
+            target: armv7-unknown-linux-musleabihf
+            packages: clang qemu-user-static
+    env:
+      TARGET: ${{ matrix.target }}
+      ARCHIVE: portredirect-linux-${{ matrix.arch }}
+      # Rust brings musl's C library for these targets, so the binaries are linked statically
+      # and run on any distribution. ring compiles C code: for x86_64 with musl-tools, for ARM
+      # with clang, as ring needs no C headers of the target then, and rust-lld links. So no
+      # cross toolchain is needed.
+      CC_aarch64_unknown_linux_musl: clang
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
+      CC_armv7_unknown_linux_musleabihf: clang
+      CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER: rust-lld
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+      - name: Install Ubuntu packages
+        env:
+          PACKAGES: ${{ matrix.packages }}
+        run: |
+          sudo apt-get update
+          xargs sudo apt-get install -y <<< "$PACKAGES"
+      - name: Run ARM binaries in qemu
+        if: matrix.arch != 'amd64'
+        # The kernel starts ARM binaries with qemu, also those that the tests start.
+        run: |
+          sudo systemctl restart systemd-binfmt
+          cat /proc/sys/fs/binfmt_misc/qemu-arm /proc/sys/fs/binfmt_misc/qemu-aarch64
+      - name: Run tests
+        # In release mode, like the binaries below, which reuses most of the compiled code.
+        run: cargo test --release --locked --target "$TARGET"
+      - name: Build binaries
+        run: cargo build --release --locked --target "$TARGET" --bins
+      - name: Pack binaries
+        run: |
+          mkdir "$ARCHIVE"
+          cp "target/$TARGET/release/portredirect_server" "target/$TARGET/release/portredirect_client" \
+            README.md CHANGELOG.md LICENSE "$ARCHIVE/"
+          "$ARCHIVE/portredirect_server" --version
+          "$ARCHIVE/portredirect_client" --version
+          tar --create --gzip --owner=0 --group=0 --numeric-owner --file "$ARCHIVE.tar.gz" "$ARCHIVE"
+      - name: Upload archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ env.ARCHIVE }}
+          path: ${{ env.ARCHIVE }}.tar.gz
+          if-no-files-found: error
+          # Re-running the job replaces the archive of the previous attempt.
+          overwrite: true
+
+  publish:
+    name: Publish pre-release "latest"
+    needs: build
+    # Commits on main only, not pull requests or other branches started by hand.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write # move the tag, update the release
+      id-token: write # sign the attestations
+      attestations: write # store the attestations
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: latest
+    steps:
+      # For the version and the date of the commit.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download archives
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: portredirect-linux-*
+          merge-multiple: true
+          path: dist
+      - name: Write checksums
+        working-directory: dist
+        run: sha256sum portredirect-linux-*.tar.gz | tee SHA256SUMS
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/portredirect-linux-*.tar.gz
+      - name: Publish
+        run: |
+          # A re-run of an older run must not replace the binaries of a newer commit.
+          head=$(gh api "repos/$GH_REPO/commits/main" --jq .sha)
+          if [ "$head" != "$GITHUB_SHA" ]; then
+            echo "::notice::Not published: main is at $head now, its run publishes it."
+            exit 0
+          fi
+
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          date=$(git log -1 --format=%cs)
+          short=${GITHUB_SHA::7}
+          url="https://github.com/$GH_REPO"
+          title="Latest build of main ($short, $date)"
+          cat > notes.md <<EOF
+          Static Linux binaries of the latest commit on \`main\`, [$short]($url/commit/$GITHUB_SHA) of $date: version $version and the [changes since then]($url/blob/$GITHUB_SHA/CHANGELOG.md#unreleased).
+          Each new commit on \`main\` replaces them.
+
+          | Archive | Architecture | For example |
+          |---|---|---|
+          | \`portredirect-linux-amd64.tar.gz\` | x86_64 | PCs and most servers |
+          | \`portredirect-linux-arm64.tar.gz\` | 64-bit ARM (AArch64) | Raspberry Pi 3 or newer with a 64-bit system |
+          | \`portredirect-linux-armv7.tar.gz\` | 32-bit ARM (ARMv7 or newer) | Raspberry Pi 2 or newer with a 32-bit system |
+
+          Each archive holds \`portredirect_server\` and \`portredirect_client\`, with the README, the changelog and the license.
+          The programs are linked statically, so they run on any distribution.
+          Update server and clients together: they must speak the same protocol version.
+
+          To check a download, compare its checksum, and verify with the [GitHub CLI](https://cli.github.com) that this repository's workflow built it:
+
+          \`\`\`sh
+          sha256sum --check --ignore-missing SHA256SUMS
+          gh attestation verify portredirect-linux-amd64.tar.gz --repo $GH_REPO
+          \`\`\`
+          EOF
+
+          # Move the tag to this commit, or create it.
+          if gh api "repos/$GH_REPO/git/ref/tags/$TAG" --silent 2>/dev/null; then
+            gh api --method PATCH "repos/$GH_REPO/git/refs/tags/$TAG" -f sha="$GITHUB_SHA" -F force=true --silent
+          else
+            gh api --method POST "repos/$GH_REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$GITHUB_SHA" --silent
+          fi
+          # Replace the release's files and notes, or create it.
+          if gh release view "$TAG" --json name >/dev/null 2>&1; then
+            # Delete files that this build doesn't have, e.g. after an archive was renamed.
+            for asset in $(gh release view "$TAG" --json assets --jq '.assets[].name'); do
+              [ -e "dist/$asset" ] || gh release delete-asset "$TAG" "$asset" --yes
+            done
+            gh release upload "$TAG" dist/* --clobber
+            gh release edit "$TAG" --prerelease --title "$title" --notes-file notes.md
+          else
+            gh release create "$TAG" dist/* --prerelease --verify-tag --title "$title" --notes-file notes.md
+          fi
