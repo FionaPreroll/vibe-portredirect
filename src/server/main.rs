@@ -7,6 +7,8 @@ use std::net::{SocketAddr, ToSocketAddrs};
 use tracing::{error, info, span, Level};
 
 use crate::app_data::ServerAppData;
+use crate::get_config_dir;
+use crate::logging::init_logging;
 use crate::metrics::{print_metrics_loop, serve_metrics};
 use crate::quic::server::{
     ensure_server_certificate, run_quic_server, server_fingerprint, ServerConfig,
@@ -15,7 +17,6 @@ use crate::server::client_handler::handle_quic_client_connection;
 use crate::server::config::{CertificateConfig, Command};
 use crate::server::metrics::{METRICS, PREFIX};
 use crate::shutdown::Shutdown;
-use crate::{get_config_dir, init_logging};
 
 /// Runs the server program, `portredirect_server`, until a shutdown signal arrives.
 #[tokio::main]
@@ -26,7 +27,7 @@ pub async fn main() -> Result<()> {
         Command::PrintFingerprint(settings) => return print_fingerprint(settings),
     };
 
-    init_logging(config.log_level);
+    init_logging(config.log_level, config.log_format, false);
 
     // Create a root span for logging.
     let _root_span = span!(Level::INFO, "prserver_main").entered();
@@ -96,7 +97,7 @@ pub async fn main() -> Result<()> {
 /// Prints the fingerprint of the server's certificate, generating the certificate first if there
 /// is none.
 fn print_fingerprint(config: CertificateConfig) -> Result<()> {
-    init_logging(config.log_level);
+    init_logging(config.log_level, config.log_format, false);
     let config_dir =
         get_config_dir(config.config_dir).context("Failed to get configuration directory")?;
     ensure_server_certificate(&config_dir, config.quic_cert_hostname)?;

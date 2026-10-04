@@ -9,6 +9,7 @@ use quinn::crypto::rustls::QuicServerConfig;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use std::{
+    collections::HashMap,
     fs,
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -29,8 +30,8 @@ use crate::server::metrics::{RefusalReason, METRICS};
 use crate::shutdown::Shutdown;
 use crate::PortRedirectProtocol;
 
-/// Minimum time between two warnings about the connection limit.
-const LIMIT_WARNING_INTERVAL: Duration = Duration::from_secs(60);
+/// Minimum time between two warnings about refused connections for the same reason.
+const REFUSAL_WARNING_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Time to wait for clients to be notified when the server closes all connections.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -353,7 +354,7 @@ where
     let start = Instant::now();
     let config = Arc::from(config);
     let handle_incoming_client = Arc::new(handle_incoming_client);
-    let mut last_limit_warning: Option<Instant> = None;
+    let mut refusal_warnings = RefusalWarnings::default();
     let shutdown = config.shutdown.clone();
     info!("QUIC server is ready and accepting connections");
     loop {
@@ -366,29 +367,22 @@ where
         };
         let remote = incoming.remote_address();
 
-        if config.admission.is_blocked(remote.ip()) {
-            // Refusing is cheap, it happens before the TLS handshake.
-            debug!("Refusing connection from {}: address is blocked", remote);
-            METRICS.refused(RefusalReason::Blocked);
-            incoming.refuse();
-        } else if config
-            .connection_limit
-            .is_some_and(|n| endpoint.open_connections() >= n)
-        {
-            // Warn at most once a minute, so floods don't flood the log.
-            if last_limit_warning.is_none_or(|last| last.elapsed() >= LIMIT_WARNING_INTERVAL) {
-                warn!(
-                    "Refusing connections: open connection limit ({}) reached",
-                    config.connection_limit.unwrap_or_default()
-                );
-                last_limit_warning = Some(Instant::now());
-            }
-            debug!(
-                "Refusing connection from {}: connection limit reached",
-                remote
+        // Refusing is cheap, it happens before the TLS handshake.
+        if let Some(remaining) = config.admission.blocked_for(remote.ip()) {
+            let why = format!(
+                "the address is blocked for another {} after failed handshakes or authentication attempts",
+                minutes_and_seconds(remaining)
             );
-            METRICS.refused(RefusalReason::ConnectionLimit);
-            incoming.refuse();
+            refusal_warnings.refuse(incoming, RefusalReason::Blocked, &why);
+        } else if let Some(limit) = config
+            .connection_limit
+            .filter(|&limit| endpoint.open_connections() >= limit)
+        {
+            let why = format!(
+                "the server has {} QUIC connections, the most it accepts (--max-quic-connections)",
+                limit
+            );
+            refusal_warnings.refuse(incoming, RefusalReason::ConnectionLimit, &why);
         } else if config.stateless_retry && !incoming.remote_address_validated() {
             debug!(
                 "Requiring connection from {} to validate its address",
@@ -398,12 +392,11 @@ where
         } else {
             // Limit the connections per address. The address is validated at this point.
             let Some(address_slot) = config.admission.try_acquire(remote.ip()) else {
-                debug!(
-                    "Refusing connection from {}: too many connections from this address",
-                    remote
+                let why = format!(
+                    "the address has {} QUIC connections, the most per address",
+                    config.admission.max_connections_per_ip()
                 );
-                METRICS.refused(RefusalReason::AddressLimit);
-                incoming.refuse();
+                refusal_warnings.refuse(incoming, RefusalReason::AddressLimit, &why);
                 continue;
             };
 
@@ -461,6 +454,71 @@ where
     Ok(())
 }
 
+/// Refuses connections, and warns about them at most once per [`REFUSAL_WARNING_INTERVAL`] for
+/// each reason, so a flood of connections doesn't flood the log. The others are logged at the
+/// debug level.
+#[derive(Default)]
+struct RefusalWarnings {
+    /// For each reason, when the server last warned about it, and how many connections it
+    /// refused for it since.
+    last: HashMap<RefusalReason, (Instant, u64)>,
+}
+
+impl RefusalWarnings {
+    /// Refuses `incoming` for `reason`, which `why` explains.
+    fn refuse(&mut self, incoming: quinn::Incoming, reason: RefusalReason, why: &str) {
+        let remote = incoming.remote_address();
+        match self.record(reason, Instant::now()) {
+            Some(more) => warn!("{}", refusal_warning(remote, why, more)),
+            None => debug!("Refusing connection from {}: {}", remote, why),
+        }
+        METRICS.refused(reason);
+        incoming.refuse();
+    }
+
+    /// Records a connection refused for `reason` at `now`. Returns how many more connections
+    /// were refused for it since the last warning, if it is time to warn again.
+    fn record(&mut self, reason: RefusalReason, now: Instant) -> Option<u64> {
+        match self.last.get_mut(&reason) {
+            Some((warned, refused)) if now.duration_since(*warned) < REFUSAL_WARNING_INTERVAL => {
+                *refused += 1;
+                None
+            }
+            Some((warned, refused)) => {
+                let more = *refused;
+                (*warned, *refused) = (now, 0);
+                Some(more)
+            }
+            None => {
+                self.last.insert(reason, (now, 0));
+                Some(0)
+            }
+        }
+    }
+}
+
+/// Returns the warning about a connection from `remote` refused because of `why`, after `more`
+/// connections refused for the same reason since the last warning.
+fn refusal_warning(remote: SocketAddr, why: &str, more: u64) -> String {
+    let warning = format!("Refusing connection from {}: {}", remote, why);
+    match more {
+        0 => warning,
+        more => format!(
+            "{}. Refused {} more for this reason since the last warning",
+            warning, more
+        ),
+    }
+}
+
+/// Writes `duration` in whole minutes and seconds, rounded up, e.g. `9m 12s`.
+fn minutes_and_seconds(duration: Duration) -> String {
+    let seconds = duration.as_secs() + u64::from(duration.subsec_nanos() > 0);
+    match (seconds / 60, seconds % 60) {
+        (0, seconds) => format!("{}s", seconds),
+        (minutes, seconds) => format!("{}m {}s", minutes, seconds),
+    }
+}
+
 /// Refuses all new connections, e.g. while the server shuts down.
 async fn refuse_connections(endpoint: quinn::Endpoint) {
     while let Some(incoming) = endpoint.accept().await {
@@ -474,6 +532,55 @@ async fn refuse_connections(endpoint: quinn::Endpoint) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_refusals_are_warned_about_once_a_minute_for_each_reason() {
+        let mut warnings = RefusalWarnings::default();
+        let start = Instant::now();
+        let at = |seconds| start + Duration::from_secs(seconds);
+        // The first refusal for a reason gets a warning, ...
+        assert_eq!(warnings.record(RefusalReason::Blocked, at(0)), Some(0));
+        // ... the next ones within a minute don't, ...
+        assert_eq!(warnings.record(RefusalReason::Blocked, at(1)), None);
+        assert_eq!(warnings.record(RefusalReason::Blocked, at(59)), None);
+        // ... unless they are for another reason.
+        assert_eq!(
+            warnings.record(RefusalReason::AddressLimit, at(30)),
+            Some(0)
+        );
+        // A minute after a warning, the next one counts the refusals in between.
+        assert_eq!(warnings.record(RefusalReason::Blocked, at(60)), Some(2));
+        assert_eq!(warnings.record(RefusalReason::Blocked, at(61)), None);
+        assert_eq!(warnings.record(RefusalReason::Blocked, at(300)), Some(1));
+        assert_eq!(
+            warnings.record(RefusalReason::AddressLimit, at(300)),
+            Some(0)
+        );
+
+        let remote = "198.51.100.7:50710".parse().unwrap();
+        assert_eq!(
+            refusal_warning(remote, "the address is blocked", 0),
+            "Refusing connection from 198.51.100.7:50710: the address is blocked"
+        );
+        assert_eq!(
+            refusal_warning(remote, "the address is blocked", 14),
+            "Refusing connection from 198.51.100.7:50710: the address is blocked. Refused 14 more for this reason since the last warning"
+        );
+    }
+
+    #[test]
+    fn test_durations_in_minutes_and_seconds() {
+        for (duration, written) in [
+            (Duration::ZERO, "0s"),
+            (Duration::from_millis(1), "1s"),
+            (Duration::from_secs(59), "59s"),
+            (Duration::from_millis(59_001), "1m 0s"),
+            (Duration::from_secs(552), "9m 12s"),
+            (Duration::from_secs(600), "10m 0s"),
+        ] {
+            assert_eq!(minutes_and_seconds(duration), written, "{:?}", duration);
+        }
+    }
 
     #[test]
     fn test_load_pem_encoded_cert_and_key() -> Result<()> {

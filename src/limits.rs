@@ -275,12 +275,20 @@ impl QuicAdmission {
         }
     }
 
-    /// Returns whether connections from `ip` are refused because of failed attempts.
-    pub fn is_blocked(&self, ip: IpAddr) -> bool {
+    /// Returns how much longer connections from `ip` are refused because of failed attempts,
+    /// if they are.
+    pub fn blocked_for(&self, ip: IpAddr) -> Option<Duration> {
         let now = Instant::now();
         self.lock_failures()
             .get(&address_key(ip))
-            .is_some_and(|record| record.is_blocked(now))
+            .and_then(|record| record.blocked_until)
+            .filter(|&until| now < until)
+            .map(|until| until - now)
+    }
+
+    /// Returns the maximum number of connections per address, 0 for no limit.
+    pub fn max_connections_per_ip(&self) -> usize {
+        self.connections.max_per_address
     }
 
     /// Registers a connection from `ip`, unless its address already has the maximum number of
@@ -435,22 +443,23 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn test_blocking_after_failures() {
         let admission = QuicAdmission::new(8, test_policy());
+        assert_eq!(admission.max_connections_per_ip(), 8);
         let host = ip("192.0.2.1");
 
         admission.record_failure(host);
         admission.record_failure(host);
-        assert!(!admission.is_blocked(host));
+        assert!(admission.blocked_for(host).is_none());
 
         admission.record_failure(host);
-        assert!(admission.is_blocked(host));
+        assert_eq!(admission.blocked_for(host), Some(Duration::from_secs(300)));
         // Other addresses are not affected.
-        assert!(!admission.is_blocked(ip("192.0.2.2")));
+        assert!(admission.blocked_for(ip("192.0.2.2")).is_none());
 
         // The block ends after its duration.
         tokio::time::advance(Duration::from_secs(299)).await;
-        assert!(admission.is_blocked(host));
+        assert_eq!(admission.blocked_for(host), Some(Duration::from_secs(1)));
         tokio::time::advance(Duration::from_secs(2)).await;
-        assert!(!admission.is_blocked(host));
+        assert!(admission.blocked_for(host).is_none());
     }
 
     #[tokio::test(start_paused = true)]
@@ -459,8 +468,8 @@ mod tests {
         for host in ["2001:db8::1", "2001:db8::2", "2001:db8::3"] {
             admission.record_failure(ip(host));
         }
-        assert!(admission.is_blocked(ip("2001:db8::4")));
-        assert!(!admission.is_blocked(ip("2001:db8:0:1::1")));
+        assert!(admission.blocked_for(ip("2001:db8::4")).is_some());
+        assert!(admission.blocked_for(ip("2001:db8:0:1::1")).is_none());
     }
 
     #[tokio::test(start_paused = true)]
@@ -473,7 +482,7 @@ mod tests {
         tokio::time::advance(Duration::from_secs(61)).await;
         admission.record_failure(host);
 
-        assert!(!admission.is_blocked(host));
+        assert!(admission.blocked_for(host).is_none());
     }
 
     #[tokio::test(start_paused = true)]
@@ -487,7 +496,7 @@ mod tests {
         admission.record_failure(host);
         admission.record_failure(host);
 
-        assert!(!admission.is_blocked(host));
+        assert!(admission.blocked_for(host).is_none());
     }
 
     #[tokio::test(start_paused = true)]
@@ -500,7 +509,7 @@ mod tests {
 
         admission.record_success(host);
 
-        assert!(admission.is_blocked(host));
+        assert!(admission.blocked_for(host).is_some());
     }
 
     #[test]

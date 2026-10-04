@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use tracing::subscriber::DefaultGuard;
 use tracing_subscriber::fmt::MakeWriter;
+use tracing_subscriber::EnvFilter;
 
 /// Sends the log messages of the current thread to the test's output, which is shown if the test
 /// fails, until the returned guard is dropped.
@@ -31,6 +32,53 @@ fn capture_logs() -> DefaultGuard {
             .with_test_writer()
             .finish(),
     )
+}
+
+/// Collects the log messages of the current thread that `filter`, e.g. `info`, lets through,
+/// until the returned guard is dropped. Like [`capture_logs`], this includes the tasks of a
+/// `#[tokio::test]`.
+fn collect_logs(filter: &str) -> (CollectedLogs, DefaultGuard) {
+    let logs = CollectedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::new(filter))
+        .with_writer(logs.clone())
+        .with_ansi(false)
+        .finish();
+    (logs, tracing::subscriber::set_default(subscriber))
+}
+
+/// Log messages collected by [`collect_logs`].
+#[derive(Clone, Default)]
+struct CollectedLogs(Arc<Mutex<Vec<u8>>>);
+
+impl CollectedLogs {
+    /// Returns the messages collected so far, one per line.
+    fn lines(&self) -> Vec<String> {
+        let logs = self.0.lock().unwrap();
+        String::from_utf8_lossy(&logs)
+            .lines()
+            .map(String::from)
+            .collect()
+    }
+}
+
+impl io::Write for CollectedLogs {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> MakeWriter<'a> for CollectedLogs {
+    type Writer = CollectedLogs;
+
+    fn make_writer(&'a self) -> CollectedLogs {
+        self.clone()
+    }
 }
 
 /// Ports for the tests' servers and listeners, handed out one at a time.
@@ -63,53 +111,4 @@ fn free_tcp_port() -> u16 {
 /// Returns a UDP port on localhost for a test alone, see [`TEST_PORTS`].
 fn free_udp_port() -> u16 {
     unused_port(|addr| std::net::UdpSocket::bind(addr).is_ok())
-}
-
-#[test]
-fn test_log_messages_escape_control_characters() {
-    /// Collects what is logged.
-    #[derive(Clone, Default)]
-    struct Output(Arc<Mutex<Vec<u8>>>);
-
-    impl io::Write for Output {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'a> MakeWriter<'a> for Output {
-        type Writer = Output;
-
-        fn make_writer(&'a self) -> Output {
-            self.clone()
-        }
-    }
-
-    let output = Output::default();
-    let subscriber = tracing_subscriber::fmt()
-        .fmt_fields(crate::escaping_fields())
-        .with_writer(output.clone())
-        .with_ansi(false)
-        .finish();
-    tracing::subscriber::with_default(subscriber, || {
-        // E.g. the reason a peer gave for closing the connection, which is part of the error.
-        let reason = "bye\n2026-10-04T06:00:00Z  INFO fake message\u{1b}[2J";
-        tracing::warn!(peer = %reason, "Connection dropped: closed by peer: {}", reason);
-    });
-
-    let output = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
-    assert_eq!(output.lines().count(), 1, "{}", output);
-    let escaped = r"bye\n2026-10-04T06:00:00Z  INFO fake message\u{1b}[2J";
-    assert!(
-        output.contains(&format!("closed by peer: {} peer={}", escaped, escaped)),
-        "{}",
-        output
-    );
-    let separators = format!("{}", crate::Escaped("\t\r\u{85}\u{2028}\u{2029} ok"));
-    assert_eq!(separators, r"\t\r\u{85}\u{2028}\u{2029} ok");
 }

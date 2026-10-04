@@ -67,6 +67,9 @@ quic-listen-host = "0.0.0.0"
 # environment variable, if set, takes precedence.
 # log-level = "info"
 
+# Format of log messages: text, or json, one JSON object per line, e.g. for log collectors.
+# log-format = "text"
+
 # Serve Prometheus metrics at /metrics on metrics-listen. The endpoint has no authentication,
 # only make it reachable from trusted networks.
 # provide-metrics = false

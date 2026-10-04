@@ -22,7 +22,7 @@ use tracing::subscriber::DefaultGuard;
 
 use crate::app_data::{ClientAppData, ServerAppData};
 use crate::bi_stream::BiStream;
-use crate::client::reconnect::Backoff;
+use crate::client::reconnect::{Backoff, REFUSED_HINT};
 use crate::client::run_client::{run_client, ClientSettings};
 use crate::client::server_handler::handle_quic_server_connection;
 use crate::forward::forward_tcp_and_quic;
@@ -45,7 +45,7 @@ use crate::server::clients::{ClientEntry, ClientList};
 use crate::server::metrics::{ClientMetrics, METRICS};
 use crate::server::{ForwardingLimits, PortSpec};
 use crate::shutdown::Shutdown;
-use crate::tests::{capture_logs, free_tcp_port, free_udp_port};
+use crate::tests::{capture_logs, collect_logs, free_tcp_port, free_udp_port};
 use crate::PortRedirectProtocol;
 
 const TEST_PSK: &str = "integration-test-psk";
@@ -1951,6 +1951,83 @@ async fn unreachable_destination_resets_the_external_connection() -> Result<()> 
 }
 
 #[tokio::test]
+async fn client_logs_forwarded_connections() -> Result<()> {
+    let (config_dir, _logs) = setup();
+    // The connection log, which --log-connections switches on.
+    let (connection_log, _connection_log) = collect_logs("portredirect::connections=info");
+    let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
+    // Nothing listens on the destination port yet, see the test above.
+    let destination_socket = tokio::net::TcpSocket::new_v4()?;
+    destination_socket.bind(localhost(0))?;
+    let destination = destination_socket.local_addr()?;
+
+    let _server = start_server(
+        config_dir.path(),
+        quic_port,
+        vec![PortSpec::Single(listen_port)],
+    );
+    let _client = start_client(
+        config_dir.path(),
+        quic_port,
+        TEST_PSK,
+        destination,
+        listen_port,
+    );
+
+    /// Waits until the connection log has `count` lines.
+    async fn lines(log: &crate::tests::CollectedLogs, count: usize) -> Vec<String> {
+        loop {
+            let lines = log.lines();
+            if lines.len() >= count {
+                return lines;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    with_timeout(async {
+        // A connection the client can't forward.
+        let mut stream = connect_through_tunnel(listen_port).await?;
+        let external = stream.local_addr()?;
+        assert_eq!(
+            tcp_end(&mut stream, Duration::from_secs(5)).await,
+            TcpEnd::Reset
+        );
+        let aborted = lines(&connection_log, 2).await;
+        let connection = format!("external_client={} destination={}", external, destination);
+        assert!(
+            aborted[0].ends_with(&format!("Connection opened {}", connection)),
+            "{}",
+            aborted[0]
+        );
+        assert!(
+            aborted[1].contains(&format!("Connection aborted {} duration_ms=", connection))
+                && aborted[1].contains("bytes_to_destination=0 bytes_from_destination=0")
+                && aborted[1].contains("error=failed to connect to destination"),
+            "{}",
+            aborted[1]
+        );
+
+        // A connection it forwards.
+        tokio::spawn(serve_echo(destination_socket.listen(16)?));
+        let stream = connect_through_tunnel(listen_port).await?;
+        let external = stream.local_addr()?;
+        assert_eq!(echo_roundtrip(stream, b"hello".to_vec()).await?, b"hello");
+        let closed = lines(&connection_log, 4).await;
+        let connection = format!("external_client={} destination={}", external, destination);
+        assert!(closed[2].ends_with(&format!("Connection opened {}", connection)));
+        assert!(
+            closed[3].contains(&format!("Connection closed {} duration_ms=", connection))
+                && closed[3].ends_with("bytes_to_destination=5 bytes_from_destination=5"),
+            "{}",
+            closed[3]
+        );
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
 async fn connections_beyond_the_clients_limit_wait_for_a_free_slot() -> Result<()> {
     let (config_dir, _logs) = setup();
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
@@ -3182,6 +3259,58 @@ async fn quic_connections_are_limited_in_total() -> Result<()> {
                 Err(e) => return Err(e),
             }
         }
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn refusals_are_explained_once_on_both_sides() -> Result<()> {
+    let (config_dir, _logs) = setup();
+    let (warnings, _warnings) = collect_logs("warn");
+    let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
+    let mut config = server_config(
+        config_dir.path(),
+        quic_port,
+        vec![PortSpec::Single(listen_port)],
+        ForwardingLimits::default(),
+    );
+    config.connection_limit = Some(1);
+    let _server = spawn_server_with_handler(config, hold_connection);
+
+    with_timeout(async {
+        // The only connection the server accepts.
+        let (_first_client, _first) = connect_raw(config_dir.path(), quic_port).await?;
+        let mut settings = client_settings(
+            config_dir.path(),
+            quic_port,
+            TEST_PSK,
+            localhost(9),
+            listen_port,
+        );
+        settings.reconnect_backoff =
+            Backoff::new(Duration::from_millis(10), Duration::from_millis(20));
+        let client = spawn_client(settings);
+
+        // The client keeps trying, ...
+        let refused = |lines: &[String]| {
+            lines
+                .iter()
+                .filter(|line| line.contains("the server refused to accept a new connection"))
+                .count()
+        };
+        while refused(&warnings.lines()) < 3 {
+            sleep(Duration::from_millis(10)).await;
+        }
+        client.stop().await?;
+
+        // ... but explains the refusals only once, and the server warns about them once.
+        let lines = warnings.lines();
+        let count = |text: &str| lines.iter().filter(|line| line.contains(text)).count();
+        assert_eq!(count(REFUSED_HINT), 1, "{:#?}", lines);
+        let warning =
+            "the server has 1 QUIC connections, the most it accepts (--max-quic-connections)";
+        assert_eq!(count(warning), 1, "{:#?}", lines);
         Ok(())
     })
     .await

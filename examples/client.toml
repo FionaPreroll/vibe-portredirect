@@ -74,6 +74,14 @@ quic-cert-fingerprint = "sha256:000000000000000000000000000000000000000000000000
 # environment variable, if set, takes precedence.
 # log-level = "info"
 
+# Format of log messages: text, or json, one JSON object per line, e.g. for log collectors.
+# log-format = "text"
+
+# Log each forwarded connection, independently of log-level: the external client's address,
+# the destination, how long the connection lasted and how much data it transferred. Off by
+# default, as it logs the addresses of the external clients.
+# log-connections = false
+
 # Serve Prometheus metrics at /metrics on metrics-listen. The endpoint has no authentication,
 # only make it reachable from trusted networks.
 # provide-metrics = false

@@ -18,6 +18,7 @@ use crate::config::{
     self, check_renamed_environment, check_renamed_options, merge, merge_option, read_config_file,
     required, resolve_path,
 };
+use crate::logging::LogFormat;
 use crate::protocol::auth::ClientName;
 use crate::psk::{PskArgs, PskSource, PSK_ENV_VAR};
 use crate::quic::fingerprint::CertFingerprint;
@@ -188,6 +189,25 @@ pub struct Args {
     /// environment variable, if set, takes precedence and can set levels per module.
     #[clap(long, default_value = "info", env = "PORTREDIRECT_LOG_LEVEL")]
     pub log_level: LevelFilter,
+
+    /// Format of log messages: text, or json, one JSON object per line, e.g. for log collectors.
+    #[clap(
+        long,
+        value_enum,
+        default_value_t = LogFormat::Text,
+        env = "PORTREDIRECT_LOG_FORMAT"
+    )]
+    pub log_format: LogFormat,
+
+    /// Log each forwarded connection, independently of --log-level: the external client's
+    /// address, the destination, how long the connection lasted and how much data it
+    /// transferred. Off by default, as it logs the addresses of the external clients.
+    #[clap(
+        long,
+        env = "PORTREDIRECT_LOG_CONNECTIONS",
+        value_parser = BoolishValueParser::new()
+    )]
+    pub log_connections: bool,
 }
 
 /// The client's configuration file. Its keys are the names of the options.
@@ -215,6 +235,8 @@ pub struct ConfigFile {
     pub shutdown_timeout: Option<u64>,
     #[serde(default, deserialize_with = "config::optional_parsed")]
     pub log_level: Option<LevelFilter>,
+    pub log_format: Option<LogFormat>,
+    pub log_connections: Option<bool>,
 }
 
 impl ConfigFile {
@@ -254,6 +276,8 @@ pub struct Config {
     /// How long running forwarded connections may take to finish when shutting down.
     pub shutdown_timeout: Duration,
     pub log_level: LevelFilter,
+    pub log_format: LogFormat,
+    pub log_connections: bool,
 }
 
 impl Config {
@@ -390,6 +414,13 @@ impl Config {
                 file.shutdown_timeout,
             )),
             log_level: merge(matches, "log_level", args.log_level, file.log_level),
+            log_format: merge(matches, "log_format", args.log_format, file.log_format),
+            log_connections: merge(
+                matches,
+                "log_connections",
+                args.log_connections,
+                file.log_connections,
+            ),
             config_file: args.config_file,
         })
     }
@@ -468,6 +499,8 @@ mod tests {
         psk-file = "psk"
         shutdown-timeout = 30
         log-level = "debug"
+        log-format = "json"
+        log-connections = true
     "#;
 
     /// The fingerprint in [`FILE`], of "abc".
@@ -515,6 +548,8 @@ mod tests {
         );
         assert_eq!(config.shutdown_timeout, DEFAULT_SHUTDOWN_TIMEOUT);
         assert_eq!(config.log_level, LevelFilter::INFO);
+        assert_eq!(config.log_format, LogFormat::Text);
+        assert!(!config.log_connections);
         Ok(())
     }
 
@@ -542,6 +577,8 @@ mod tests {
         assert!(matches!(&config.psk, PskSource::File(path) if path == &dir.path().join("psk")));
         assert_eq!(config.shutdown_timeout, Duration::from_secs(30));
         assert_eq!(config.log_level, LevelFilter::DEBUG);
+        assert_eq!(config.log_format, LogFormat::Json);
+        assert!(config.log_connections);
         Ok(())
     }
 
@@ -588,6 +625,8 @@ mod tests {
                 "0",
                 "--log-level",
                 "warn",
+                "--log-format",
+                "text",
             ],
         )?;
 
@@ -614,12 +653,15 @@ mod tests {
         assert_eq!(config.psk.load()?.expose_secret(), "secret");
         assert_eq!(config.shutdown_timeout, Duration::ZERO);
         assert_eq!(config.log_level, LevelFilter::WARN);
+        assert_eq!(config.log_format, LogFormat::Text);
 
         // A flag can only switch a setting on.
         let mut args = REQUIRED_ARGS.to_vec();
-        args.push("--provide-metrics");
-        let config = config_with_file(dir.path(), "provide-metrics = false", &args)?;
+        args.extend(["--provide-metrics", "--log-connections"]);
+        let file = "provide-metrics = false\nlog-connections = false";
+        let config = config_with_file(dir.path(), file, &args)?;
         assert!(config.metrics_addr.is_some());
+        assert!(config.log_connections);
         Ok(())
     }
 

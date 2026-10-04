@@ -3,7 +3,7 @@
 // License: GPL-3.0-only
 
 use super::metrics::METRICS;
-use super::reconnect::{is_permanent_error, Backoff};
+use super::reconnect::{is_permanent_error, is_refused, Backoff, REFUSED_HINT};
 use super::server_handler::handle_quic_server_connection;
 
 use crate::app_data::ClientAppData;
@@ -83,6 +83,8 @@ pub async fn run_client(settings: ClientSettings) -> Result<()> {
     let client = QuicClient::new(quic_client_config)?;
 
     let mut backoff = settings.reconnect_backoff;
+    // Whether the server's refusals were explained since the last connection.
+    let mut explained_refusal = false;
     loop {
         // Ends after the connection finished shutting down, if the client shuts down.
         let attempt = run_connection(&client).await;
@@ -111,6 +113,12 @@ pub async fn run_client(settings: ClientSettings) -> Result<()> {
             "Disconnected from the server: {:#}. Reconnecting in {:.1?}",
             error, delay
         );
+        if attempt.connected_for.is_some() {
+            explained_refusal = false;
+        } else if is_refused(&error) && !explained_refusal {
+            warn!("{}", REFUSED_HINT);
+            explained_refusal = true;
+        }
 
         tokio::select! {
             () = tokio::time::sleep(delay) => {}

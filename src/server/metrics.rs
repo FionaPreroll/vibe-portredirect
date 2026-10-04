@@ -20,7 +20,7 @@ pub static METRICS: LazyLock<ServerMetrics> = LazyLock::new(ServerMetrics::new);
 
 /// Why the server refused a QUIC connection, the label `reason` of
 /// [`ServerMetrics::quic_connections_refused`].
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RefusalReason {
     /// The address is blocked after failed attempts.
     Blocked,
