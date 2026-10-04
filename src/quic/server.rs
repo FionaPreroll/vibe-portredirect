@@ -19,12 +19,14 @@ use std::{
 use tokio::time::timeout;
 use tracing::{debug, info, instrument, warn};
 
+use crate::host_port::unbracketed;
 use crate::limits::QuicAdmission;
+use crate::net::canonical;
 use crate::private_files::{warn_if_accessible_by_others, write_private_file};
 use crate::protocol::close::CloseCode;
 use crate::quic::fingerprint::CertFingerprint;
 use crate::quic::{
-    bind_endpoint, configure_transport_config, CongestionControl, ALPN_QUIC_PORTREDIRECT,
+    bind_server_endpoint, configure_transport_config, CongestionControl, ALPN_QUIC_PORTREDIRECT,
 };
 use crate::server::metrics::{RefusalReason, METRICS};
 use crate::shutdown::Shutdown;
@@ -257,7 +259,9 @@ pub fn generate_quic_cert(
     cert_path: PathBuf,
 ) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
     info!("generating self-signed certificate");
-    let cert = rcgen::generate_simple_self_signed(vec![cert_alt_name.clone()])
+    // An IPv6 address in brackets would be taken for a name.
+    let cert_alt_name = unbracketed(&cert_alt_name);
+    let cert = rcgen::generate_simple_self_signed(vec![cert_alt_name.to_string()])
         .with_context(|| format!("failed to generate a certificate for {:?}", cert_alt_name))?;
     let key = PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der());
     let cert = CertificateDer::from(cert.cert);
@@ -347,7 +351,7 @@ where
 
     // Start QUIC server listener.
     info!(listen_addr = %config.listen, "Binding QUIC endpoint");
-    let endpoint = bind_endpoint(config.listen, Some(server_config))?;
+    let endpoint = bind_server_endpoint(config.listen, server_config)?;
 
     // PR QUIC server side loop:
     // Handle incoming QUIC connections forever.
@@ -365,7 +369,7 @@ where
             },
             () = shutdown.draining() => break,
         };
-        let remote = incoming.remote_address();
+        let remote = canonical(incoming.remote_address());
 
         // Refusing is cheap, it happens before the TLS handshake.
         if let Some(remaining) = config.admission.blocked_for(remote.ip()) {
@@ -467,7 +471,7 @@ struct RefusalWarnings {
 impl RefusalWarnings {
     /// Refuses `incoming` for `reason`, which `why` explains.
     fn refuse(&mut self, incoming: quinn::Incoming, reason: RefusalReason, why: &str) {
-        let remote = incoming.remote_address();
+        let remote = canonical(incoming.remote_address());
         match self.record(reason, Instant::now()) {
             Some(more) => warn!("{}", refusal_warning(remote, why, more)),
             None => debug!("Refusing connection from {}: {}", remote, why),
@@ -522,7 +526,7 @@ fn minutes_and_seconds(duration: Duration) -> String {
 /// Refuses all new connections, e.g. while the server shuts down.
 async fn refuse_connections(endpoint: quinn::Endpoint) {
     while let Some(incoming) = endpoint.accept().await {
-        let remote = incoming.remote_address();
+        let remote = canonical(incoming.remote_address());
         debug!("Refusing connection from {}: shutting down", remote);
         METRICS.refused(RefusalReason::ShuttingDown);
         incoming.refuse();

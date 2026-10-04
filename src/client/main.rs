@@ -2,8 +2,7 @@
 //
 // License: GPL-3.0-only
 
-use anyhow::{anyhow, Context, Result};
-use std::net::{SocketAddr, ToSocketAddrs};
+use anyhow::{Context, Result};
 use std::process::ExitCode;
 use tracing::{error, info, span, warn, Level};
 
@@ -14,6 +13,7 @@ use crate::client::run_client::{run_client, ClientSettings};
 use crate::get_config_dir;
 use crate::host_port::HostPort;
 use crate::logging::init_logging;
+use crate::quic::client::LocalAddress;
 use crate::shutdown::Shutdown;
 
 /// Runs the client program, `portredirect_client`, until a shutdown signal arrives.
@@ -46,9 +46,17 @@ async fn run(config: Config) -> Result<()> {
         get_config_dir(config.config_dir).context("Failed to get configuration directory")?;
     info!("Configuration directory: {:?}", config_dir);
 
-    // Resolve local UDP bind address.
-    let quic_local_addr = resolve_socket_addr(&config.quic_local_host, config.quic_local_port)
-        .context("resolving QUIC local address")?;
+    // The address to send to the server from: any address, unless one is given.
+    let quic_local = match &config.quic_local_host {
+        None => LocalAddress::Any {
+            port: config.quic_local_port,
+        },
+        Some(host) => HostPort::new(host, config.quic_local_port)
+            .first_address()
+            .await
+            .map(LocalAddress::Address)
+            .with_context(|| format!("failed to resolve the QUIC local address {}", host))?,
+    };
 
     // The server and the destination: names are looked up each time they are used, see
     // HostPort. So a connection attempt fails while the server's name has no address, and a
@@ -64,7 +72,7 @@ async fn run(config: Config) -> Result<()> {
 
     info!(
         destination = %forward_destination,
-        local = %quic_local_addr,
+        local = %quic_local,
         remote = %quic_remote,
         "Initializing QUIC Client"
     );
@@ -79,7 +87,7 @@ async fn run(config: Config) -> Result<()> {
         app_data: ClientAppData::new(psk, forward_destination, config.remote_listen_port)
             .with_client_name(config.client_name),
         config_dir,
-        quic_local_addr,
+        quic_local,
         quic_remote,
         quic_cert_hostname: config.quic_cert_hostname,
         cert_fingerprints: config.quic_cert_fingerprints,
@@ -90,12 +98,4 @@ async fn run(config: Config) -> Result<()> {
         shutdown: Shutdown::on_signals(config.shutdown_timeout),
     };
     run_client(settings).await
-}
-
-/// Resolves `host` and `port` to a socket address.
-fn resolve_socket_addr(host: &str, port: u16) -> Result<SocketAddr> {
-    (host, port)
-        .to_socket_addrs()?
-        .next()
-        .ok_or_else(|| anyhow!("{} has no address", host))
 }

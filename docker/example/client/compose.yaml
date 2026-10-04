@@ -37,7 +37,9 @@ services:
       # PORTREDIRECT_LOG_CONNECTIONS: "false"  # "true" logs each forwarded connection
       # PORTREDIRECT_PROVIDE_METRICS: "false"
       # PORTREDIRECT_METRICS_LISTEN: 127.0.0.1:9898  # 0.0.0.0:9898 for other containers
-      # PORTREDIRECT_QUIC_LOCAL_HOST: 0.0.0.0
+      # Unset, the client sends from any address, of IPv6 and IPv4, and prefers the server's
+      # IPv4 addresses; with :: it prefers IPv6 ones, with 0.0.0.0 it only uses IPv4.
+      # PORTREDIRECT_QUIC_LOCAL_HOST: "::"
       # PORTREDIRECT_QUIC_LOCAL_PORT: 0
       # With a copy of the server's cert.der instead of PORTREDIRECT_QUIC_CERT_FINGERPRINT:
       # PORTREDIRECT_CONFIG_DIR: /etc/portredirect

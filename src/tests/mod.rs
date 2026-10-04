@@ -12,7 +12,7 @@ mod tunnel_end_to_end;
 use std::collections::hash_map::RandomState;
 use std::hash::BuildHasher;
 use std::io;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::ops::Range;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -37,7 +37,7 @@ fn capture_logs() -> DefaultGuard {
 /// Collects the log messages of the current thread that `filter`, e.g. `info`, lets through,
 /// until the returned guard is dropped. Like [`capture_logs`], this includes the tasks of a
 /// `#[tokio::test]`.
-fn collect_logs(filter: &str) -> (CollectedLogs, DefaultGuard) {
+pub(crate) fn collect_logs(filter: &str) -> (CollectedLogs, DefaultGuard) {
     let logs = CollectedLogs::default();
     let subscriber = tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::new(filter))
@@ -49,11 +49,11 @@ fn collect_logs(filter: &str) -> (CollectedLogs, DefaultGuard) {
 
 /// Log messages collected by [`collect_logs`].
 #[derive(Clone, Default)]
-struct CollectedLogs(Arc<Mutex<Vec<u8>>>);
+pub(crate) struct CollectedLogs(Arc<Mutex<Vec<u8>>>);
 
 impl CollectedLogs {
     /// Returns the messages collected so far, one per line.
-    fn lines(&self) -> Vec<String> {
+    pub(crate) fn lines(&self) -> Vec<String> {
         let logs = self.0.lock().unwrap();
         String::from_utf8_lossy(&logs)
             .lines()
@@ -79,6 +79,22 @@ impl<'a> MakeWriter<'a> for CollectedLogs {
     fn make_writer(&'a self) -> CollectedLogs {
         self.clone()
     }
+}
+
+/// Returns whether this machine has IPv6, at least on its loopback interface, `::1`. Tests of
+/// IPv6 skip their checks without it, unless the environment variable `PORTREDIRECT_TEST_IPV6`
+/// is `required`, as in CI: then they fail, so they can't be skipped unnoticed.
+pub(crate) fn ipv6_available() -> bool {
+    let available = std::net::UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).is_ok();
+    let required = std::env::var("PORTREDIRECT_TEST_IPV6").is_ok_and(|value| value == "required");
+    assert!(
+        available || !required,
+        "PORTREDIRECT_TEST_IPV6 requires IPv6, but there is no ::1"
+    );
+    if !available {
+        eprintln!("No IPv6 on this machine, skipping the checks of IPv6");
+    }
+    available
 }
 
 /// Ports for the tests' servers and listeners, handed out one at a time.

@@ -16,13 +16,13 @@
 # --- External connections ---
 
 # Address to listen on for external TCP connections, on the ports the clients ask for. 0.0.0.0
-# is every IPv4 address. Required.
+# is every IPv4 address, :: every IPv6 and IPv4 address. Required.
 listen-host = "0.0.0.0"
 
 # --- QUIC connections of the clients ---
 
 # Address and UDP port to listen on for the clients. The default only accepts clients on the
-# same host; 0.0.0.0 is every IPv4 address.
+# same host; 0.0.0.0 is every IPv4 address, :: every IPv6 and IPv4 address.
 quic-listen-host = "0.0.0.0"
 # quic-listen-port = 4433
 

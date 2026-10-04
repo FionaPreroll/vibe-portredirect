@@ -10,6 +10,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CARGO_TERM_COLOR: always
+      # The runners have IPv6, so its tests must not be skipped.
+      PORTREDIRECT_TEST_IPV6: required
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

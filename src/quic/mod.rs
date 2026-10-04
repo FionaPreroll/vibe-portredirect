@@ -5,11 +5,13 @@
 use quinn::congestion::{BbrConfig, ControllerFactory, CubicConfig};
 use quinn::{TransportConfig, VarInt};
 use serde::Deserialize;
-use socket2::{Domain, Protocol, Socket, Type};
+use socket2::{Domain, Protocol, SockRef, Socket, Type};
+use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::{debug, info};
 
+use crate::net::receive_ipv4_on_any_ipv6;
 use crate::PortRedirectProtocol;
 
 pub(crate) mod client;
@@ -157,17 +159,24 @@ pub fn client_transport_config(
     transport_config
 }
 
-/// Binds a QUIC endpoint to `addr`: a server endpoint with `server_config`, else a client
-/// endpoint. Its UDP socket has buffers of [`PortRedirectProtocol::UDP_SOCKET_BUFFER_SIZE`]
-/// bytes, as far as the operating system allows.
-pub fn bind_endpoint(
+/// Binds a QUIC server endpoint with `server_config` to `addr`. On `::`, it receives IPv4, too.
+/// Its UDP socket has buffers of [`PortRedirectProtocol::UDP_SOCKET_BUFFER_SIZE`] bytes, as far
+/// as the operating system allows.
+pub fn bind_server_endpoint(
     addr: SocketAddr,
-    server_config: Option<quinn::ServerConfig>,
-) -> std::io::Result<quinn::Endpoint> {
-    // Like quinn's own client endpoints, an IPv6 client endpoint also reaches IPv4 addresses.
-    let dual_stack = server_config.is_none();
+    server_config: quinn::ServerConfig,
+) -> io::Result<quinn::Endpoint> {
     let buffer_size = PortRedirectProtocol::UDP_SOCKET_BUFFER_SIZE;
-    let socket = bind_udp_socket(addr, dual_stack, buffer_size)?;
+    let socket = bind_udp_socket(udp_socket(addr)?, addr, buffer_size)?;
+    new_endpoint(socket, Some(server_config))
+}
+
+/// Returns a QUIC endpoint on `socket`: a server endpoint with `server_config`, else a client
+/// endpoint.
+fn new_endpoint(
+    socket: std::net::UdpSocket,
+    server_config: Option<quinn::ServerConfig>,
+) -> io::Result<quinn::Endpoint> {
     let runtime = Arc::new(quinn::TokioRuntime);
     quinn::Endpoint::new(
         quinn::EndpointConfig::default(),
@@ -177,19 +186,20 @@ pub fn bind_endpoint(
     )
 }
 
-/// Binds a UDP socket to `addr` and asks for buffers of `buffer_size` bytes. With `dual_stack`,
-/// an IPv6 socket also sends to and receives from IPv4 addresses.
-fn bind_udp_socket(
-    addr: SocketAddr,
-    dual_stack: bool,
-    buffer_size: usize,
-) -> std::io::Result<std::net::UdpSocket> {
+/// Returns a UDP socket to bind to `addr`. On `::`, it receives IPv4, too, see
+/// [`receive_ipv4_on_any_ipv6`].
+fn udp_socket(addr: SocketAddr) -> io::Result<Socket> {
     let socket = Socket::new(Domain::for_address(addr), Type::DGRAM, Some(Protocol::UDP))?;
-    if dual_stack && addr.is_ipv6() {
-        if let Err(e) = socket.set_only_v6(false) {
-            debug!("Can't make the UDP socket dual-stack: {}", e);
-        }
-    }
+    receive_ipv4_on_any_ipv6(SockRef::from(&socket), addr);
+    Ok(socket)
+}
+
+/// Binds `socket` to `addr`, after asking for buffers of `buffer_size` bytes.
+fn bind_udp_socket(
+    socket: Socket,
+    addr: SocketAddr,
+    buffer_size: usize,
+) -> io::Result<std::net::UdpSocket> {
     // Smaller buffers only make losing datagrams likelier.
     let _ = socket.set_recv_buffer_size(buffer_size);
     let _ = socket.set_send_buffer_size(buffer_size);
@@ -240,29 +250,41 @@ mod tests {
         assert!(hint.contains("net.core.rmem_max"), "{}", hint);
     }
 
+    /// Binds a UDP socket to `addr`, after asking for buffers of `buffer_size` bytes.
+    fn bind(addr: &str, buffer_size: usize) -> io::Result<std::net::UdpSocket> {
+        let addr = addr.parse().unwrap();
+        bind_udp_socket(udp_socket(addr)?, addr, buffer_size)
+    }
+
     #[test]
-    fn test_udp_sockets_get_larger_buffers() -> std::io::Result<()> {
+    fn test_udp_sockets_get_larger_buffers() -> io::Result<()> {
         let default = std::net::UdpSocket::bind("127.0.0.1:0")?;
-        let default = socket2::SockRef::from(&default).recv_buffer_size()?;
+        let default = SockRef::from(&default).recv_buffer_size()?;
         let requested = PortRedirectProtocol::UDP_SOCKET_BUFFER_SIZE;
-        let socket = bind_udp_socket("127.0.0.1:0".parse().unwrap(), false, requested)?;
-        let size = socket2::SockRef::from(&socket).recv_buffer_size()?;
+        let socket = bind("127.0.0.1:0", requested)?;
+        let size = SockRef::from(&socket).recv_buffer_size()?;
         assert!(size >= default, "{} < {}", size, default);
         assert_ne!(socket.local_addr()?.port(), 0);
 
         // More than any operating system allows, which only gets a hint in the log.
-        bind_udp_socket("127.0.0.1:0".parse().unwrap(), false, 1 << 30)?;
+        bind("127.0.0.1:0", 1 << 30)?;
         Ok(())
     }
 
     #[test]
-    fn test_ipv6_client_sockets_are_dual_stack() -> std::io::Result<()> {
-        // Not every test machine has IPv6.
-        let unspecified = "[::]:0".parse().unwrap();
-        let Ok(socket) = bind_udp_socket(unspecified, true, 1 << 20) else {
-            return Ok(());
-        };
-        assert!(!socket2::SockRef::from(&socket).only_v6()?);
+    fn test_udp_sockets_on_any_ipv6_address_receive_ipv4_too() -> io::Result<()> {
+        if crate::tests::ipv6_available() {
+            let socket = bind("[::]:0", 1 << 20)?;
+            assert!(!SockRef::from(&socket).only_v6()?);
+            // Sent to its IPv4 loopback address, which it receives.
+            let port = socket.local_addr()?.port();
+            let sender = std::net::UdpSocket::bind("127.0.0.1:0")?;
+            sender.send_to(b"over IPv4", ("127.0.0.1", port))?;
+            let mut received = [0; 16];
+            let (len, from) = socket.recv_from(&mut received)?;
+            assert_eq!(&received[..len], b"over IPv4");
+            assert_eq!(crate::net::canonical(from), sender.local_addr()?);
+        }
         Ok(())
     }
 }

@@ -49,9 +49,11 @@ quic-cert-fingerprint = "sha256:000000000000000000000000000000000000000000000000
 # a fingerprint.
 # quic-cert-hostname = "tunnel.example.com"
 
-# Address and UDP port to send to the server from. 0.0.0.0 is any IPv4 address, port 0 any free
-# port.
-# quic-local-host = "0.0.0.0"
+# Address and UDP port to send to the server from. By default any address, of IPv6 and IPv4, or
+# only of IPv4 on a system without IPv6, and any free port; the client then connects to the
+# server's IPv4 address, if it has one. With an IPv6 address, e.g. ::, the client prefers the
+# server's IPv6 addresses, with an IPv4 address, e.g. 0.0.0.0, it only connects over IPv4.
+# quic-local-host = "::"
 # quic-local-port = 0
 
 # --- Limits and performance ---

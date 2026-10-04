@@ -111,9 +111,12 @@ pub struct Args {
     )]
     pub quic_remote_port: Option<u16>,
 
-    /// QUIC connection local host to bind to (client).
-    #[clap(long, default_value = "0.0.0.0", env = "PORTREDIRECT_QUIC_LOCAL_HOST")]
-    pub quic_local_host: String,
+    /// Address to send to the server from. By default any address, of IPv6 and IPv4, or only of
+    /// IPv4 on a system without IPv6; the client then connects to the server's IPv4 address, if
+    /// it has one. With an IPv6 address, e.g. ::, the client prefers the server's IPv6
+    /// addresses, with an IPv4 address, e.g. 0.0.0.0, it only connects over IPv4.
+    #[clap(long, env = "PORTREDIRECT_QUIC_LOCAL_HOST")]
+    pub quic_local_host: Option<String>,
 
     /// QUIC connection local port to bind to (client).
     #[clap(long, default_value = "0", env = "PORTREDIRECT_QUIC_LOCAL_PORT")]
@@ -263,7 +266,8 @@ pub struct Config {
     pub client_name: ClientName,
     pub quic_remote_host: String,
     pub quic_remote_port: u16,
-    pub quic_local_host: String,
+    /// Address to send to the server from, if not any address.
+    pub quic_local_host: Option<String>,
     pub quic_local_port: u16,
     /// Address to serve Prometheus metrics on, if any.
     pub metrics_addr: Option<SocketAddr>,
@@ -374,7 +378,7 @@ impl Config {
             client_name: merge(matches, "client_name", args.client_name, file.client_name),
             quic_remote_host: required(quic_remote_host, "quic-remote-host")?,
             quic_remote_port: required(quic_remote_port, "quic-remote-port")?,
-            quic_local_host: merge(
+            quic_local_host: merge_option(
                 matches,
                 "quic_local_host",
                 args.quic_local_host,
@@ -533,7 +537,7 @@ mod tests {
         assert_eq!(config.client_name, ClientName::default());
         assert_eq!(config.quic_remote_host, "127.0.0.1");
         assert_eq!(config.quic_remote_port, 4433);
-        assert_eq!(config.quic_local_host, "0.0.0.0");
+        assert_eq!(config.quic_local_host, None);
         assert_eq!(config.quic_local_port, 0);
         assert_eq!(config.metrics_addr, None);
         assert_eq!(
@@ -567,7 +571,7 @@ mod tests {
         assert_eq!(config.client_name.as_str(), "home");
         assert_eq!(config.quic_remote_host, "tunnel.example.com");
         assert_eq!(config.quic_remote_port, 4434);
-        assert_eq!(config.quic_local_host, "::");
+        assert_eq!(config.quic_local_host.as_deref(), Some("::"));
         assert_eq!(config.quic_local_port, 5000);
         assert_eq!(config.metrics_addr, Some("127.0.0.1:9999".parse()?));
         assert_eq!(config.max_connections, 20);
@@ -637,8 +641,8 @@ mod tests {
         assert_eq!(config.client_name.as_str(), "office");
         assert_eq!(config.quic_remote_host, "127.0.0.1");
         assert_eq!(config.quic_remote_port, 4433);
-        // Override the file, though they are the defaults.
-        assert_eq!(config.quic_local_host, "0.0.0.0");
+        // Override the file, the port though it is the default.
+        assert_eq!(config.quic_local_host.as_deref(), Some("0.0.0.0"));
         assert_eq!(config.quic_local_port, 0);
         assert_eq!(config.metrics_addr, Some("127.0.0.1:9898".parse()?));
         assert_eq!(config.max_connections, 30);

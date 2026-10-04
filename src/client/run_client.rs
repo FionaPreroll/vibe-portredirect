@@ -11,7 +11,7 @@ use crate::host_port::HostPort;
 use crate::metrics::serve_metrics;
 use crate::protocol::close::CloseCode;
 use crate::protocol::message::ProtocolViolation;
-use crate::quic::client::{ClientConfig, QuicClient};
+use crate::quic::client::{ClientConfig, LocalAddress, QuicClient};
 use crate::quic::fingerprint::CertFingerprint;
 use crate::quic::CongestionControl;
 use crate::shutdown::Shutdown;
@@ -32,7 +32,8 @@ pub struct ClientSettings {
     pub app_data: ClientAppData,
     /// Directory with the server's certificate `cert.der`, unless `cert_fingerprints` are given.
     pub config_dir: PathBuf,
-    pub quic_local_addr: SocketAddr,
+    /// Where to send to the server from.
+    pub quic_local: LocalAddress,
     /// The server. A name is looked up for each connection attempt.
     pub quic_remote: HostPort,
     /// Name the server's certificate must be issued for, defaults to the remote IP address.
@@ -71,7 +72,7 @@ pub async fn run_client(settings: ClientSettings) -> Result<()> {
     let shutdown = settings.shutdown;
     let mut quic_client_config = ClientConfig::create_default_config(
         settings.config_dir,
-        settings.quic_local_addr,
+        settings.quic_local,
         settings.quic_remote,
         settings.quic_cert_hostname,
         Some(settings.max_connections),

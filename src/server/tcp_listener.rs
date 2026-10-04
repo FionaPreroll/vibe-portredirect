@@ -3,8 +3,10 @@
 // License: GPL-3.0-only
 
 use crate::forward::reset_tcp;
+use crate::host_port::HostPort;
 use crate::limits::{AddressConnectionLimit, AddressRateLimit};
 use crate::metrics::Active;
+use crate::net::{canonical, receive_ipv4_on_any_ipv6};
 use crate::protocol::data_stream::send_connection_header;
 use crate::server::metrics::ClientMetrics;
 use crate::server::port_registry::PortLease;
@@ -12,10 +14,12 @@ use crate::server::tcp_forwarder::forward_tcp_to_quic_stream;
 use crate::{app_data::ServerAppData, quic::server::ServerConfig};
 
 use anyhow::Result;
+use socket2::SockRef;
+use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::sync::Semaphore;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
@@ -26,6 +30,35 @@ const STREAM_OPEN_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Pause after a failure to accept a connection, e.g. when running out of file descriptors.
 const ACCEPT_ERROR_DELAY: Duration = Duration::from_secs(1);
+
+/// Listens for external TCP connections on `address`, on the first of a name's addresses that
+/// works. On `::`, it accepts IPv4 connections, too.
+pub async fn bind_tcp_listener(address: &HostPort) -> io::Result<TcpListener> {
+    let mut error = None;
+    for address in address.lookup().await? {
+        match listen(address) {
+            Ok(listener) => return Ok(listener),
+            Err(e) => error = Some(e),
+        }
+    }
+    Err(error.unwrap_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no address")))
+}
+
+/// Listens on `address`, like `TcpListener::bind`, but on `::` for IPv4 connections, too, see
+/// [`receive_ipv4_on_any_ipv6`].
+fn listen(address: SocketAddr) -> io::Result<TcpListener> {
+    let socket = match address {
+        SocketAddr::V4(_) => TcpSocket::new_v4()?,
+        SocketAddr::V6(_) => TcpSocket::new_v6()?,
+    };
+    receive_ipv4_on_any_ipv6(SockRef::from(&socket), address);
+    // As TcpListener::bind does, so the port can be bound again right after a listener ended,
+    // while its connections linger. On Windows, this would let others take the port, though.
+    #[cfg(not(windows))]
+    socket.set_reuseaddr(true)?;
+    socket.bind(address)?;
+    socket.listen(1024)
+}
 
 /// Accepts external TCP connections on `listener` and forwards each through a new QUIC stream,
 /// until `cancel_token` is cancelled. Then closes the listener and releases the port's `lease`.
@@ -89,7 +122,8 @@ async fn accept_connections(
             accept_result = listener.accept() => accept_result,
         };
         let (tcp_stream, peer_addr) = match accept_result {
-            Ok(connection) => connection,
+            // A listener on :: sees IPv4 clients at IPv4-mapped IPv6 addresses.
+            Ok((tcp_stream, peer_addr)) => (tcp_stream, canonical(peer_addr)),
             Err(e) => {
                 metrics.accept_errors.inc();
                 warn!("Failed to accept TCP connection: {}", e);
