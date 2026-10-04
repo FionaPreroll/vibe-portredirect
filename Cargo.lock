@@ -839,6 +839,7 @@ dependencies = [
  "rustls",
  "secrecy",
  "serde",
+ "socket2",
  "tempfile",
  "tokio",
  "tokio-test",

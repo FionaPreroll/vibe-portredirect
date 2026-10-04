@@ -32,7 +32,8 @@ The `missing_docs` lint fails the lint check if a module becomes public by accid
 | `tests/cli.rs`         | Tests of the programs: command line, configuration files, exit codes, signals and error messages.            |
 | `tests/*.bats`         | End-to-end tests and benchmarks of the release binaries with external tools.                                 |
 | `fuzz/`                | Fuzz targets for cargo-fuzz, see [fuzz/README.md](fuzz/README.md).                                           |
-| `utils/`               | Benchmark, plotting and documentation tools.                                                                 |
+| `examples/`            | `link_emulator.rs`: emulates a network link with delay and loss for benchmarks, see [docs/PERFORMANCE.md](docs/PERFORMANCE.md). |
+| `utils/`               | Benchmark, plotting and documentation tools. `link_benchmark.py` measures tunnels over emulated links.       |
 
 ## Call Hierarchy
 

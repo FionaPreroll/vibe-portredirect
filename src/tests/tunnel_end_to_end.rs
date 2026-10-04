@@ -10,7 +10,7 @@ use std::io::ErrorKind;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -33,7 +33,10 @@ use crate::protocol::control::{request_listen_port, Greeting, CLIENT_SOFTWARE};
 use crate::protocol::message::{read_message, write_message, Message, MessageType};
 use crate::quic::client::{run_quic_client, ClientConfig, QuicClient};
 use crate::quic::fingerprint::CertFingerprint;
-use crate::quic::server::{load_or_generate_quic_cert, run_quic_server, ServerConfig};
+use crate::quic::server::{
+    load_or_generate_quic_cert, raise_receive_window, run_quic_server, ServerConfig,
+};
+use crate::quic::CongestionControl;
 use crate::server::auth::authenticate_quic_client;
 use crate::server::client_handler::handle_quic_client_connection;
 use crate::server::clients::{ClientEntry, ClientList};
@@ -263,6 +266,7 @@ fn client_settings(
         quic_cert_hostname: Some(CERT_HOSTNAME.into()),
         cert_fingerprints: Vec::new(),
         max_connections: PortRedirectProtocol::DEFAULT_MAX_FORWARDED_CONNECTIONS,
+        congestion_control: CongestionControl::default(),
         metrics_addr: None,
         reconnect_backoff: Backoff::new(Duration::from_millis(100), Duration::from_secs(1)),
         shutdown: Shutdown::default(),
@@ -560,6 +564,118 @@ async fn tunnel_forwards_data_in_both_directions() -> Result<()> {
 
         assert_eq!(received.len(), payload.len(), "received length differs");
         assert!(received == payload, "received data differs from sent data");
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn tunnel_forwards_data_with_bbr_on_both_sides() -> Result<()> {
+    let (config_dir, _logs) = setup();
+    let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
+    let echo_addr = start_echo_server().await;
+
+    let mut config = server_config(
+        config_dir.path(),
+        quic_port,
+        vec![PortSpec::Single(listen_port)],
+        ForwardingLimits::default(),
+    );
+    config.congestion_control = CongestionControl::Bbr;
+    let _server = spawn_server_with_handler(config, handle_quic_client_connection);
+    let mut settings = client_settings(
+        config_dir.path(),
+        quic_port,
+        TEST_PSK,
+        echo_addr,
+        listen_port,
+    );
+    settings.congestion_control = CongestionControl::Bbr;
+    let _client = spawn_client(settings);
+
+    with_timeout(async {
+        let payload = test_pattern(4 * 1024 * 1024, 2);
+        let stream = connect_through_tunnel(listen_port).await?;
+        let received = echo_roundtrip(stream, payload.clone()).await?;
+        assert!(received == payload, "received data differs from sent data");
+        Ok(())
+    })
+    .await
+}
+
+/// Writes to `send` until a write doesn't go through within a moment, or `limit` bytes are
+/// written. Returns how many bytes were written.
+async fn write_until_blocked<W: AsyncWrite + Unpin>(send: &mut W, limit: usize) -> Result<usize> {
+    let chunk = [0u8; 4096];
+    let mut written = 0;
+    while written < limit {
+        let end = chunk.len().min(limit - written);
+        match timeout(Duration::from_millis(300), send.write(&chunk[..end])).await {
+            Ok(result) => written += result?,
+            Err(_) => break,
+        }
+    }
+    Ok(written)
+}
+
+#[tokio::test]
+async fn unauthenticated_clients_can_only_send_a_little() -> Result<()> {
+    let (config_dir, _logs) = setup();
+    let quic_port = free_udp_port();
+
+    // Like the server's handler before the authentication: opens a stream, and doesn't read
+    // what the client sends, until the test raises the receive window, like after it.
+    let (raise, raised) = mpsc::channel::<()>(1);
+    let raised = Arc::new(tokio::sync::Mutex::new(raised));
+    let config = server_config(config_dir.path(), quic_port, vec![], Default::default());
+    let _server = spawn_server_with_handler(config, move |_, connection| {
+        let raised = Arc::clone(&raised);
+        async move {
+            let (mut send, _recv) = connection.open_bi().await?;
+            // The client learns about the stream with its first data.
+            send.write_all(b"!").await?;
+            raised.lock().await.recv().await;
+            raise_receive_window(&connection);
+            connection.closed().await;
+            Ok(())
+        }
+    });
+
+    with_timeout(async {
+        let (_client, connection) = connect_raw(config_dir.path(), quic_port).await?;
+        let (mut send, mut recv) = connection.accept_bi().await?;
+        recv.read_exact(&mut [0u8; 1]).await?;
+        let window = PortRedirectProtocol::QUIC_UNAUTHENTICATED_RECEIVE_WINDOW as usize;
+
+        let before = write_until_blocked(&mut send, 1 << 20).await?;
+        assert_eq!(before, window);
+
+        raise.send(()).await?;
+        let after = write_until_blocked(&mut send, 1 << 20).await?;
+        assert_eq!(after, 1 << 20);
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn authenticated_clients_may_send_more() -> Result<()> {
+    let (config_dir, _logs) = setup();
+    let quic_port = free_udp_port();
+
+    // Authenticates the client like the server, then reads nothing more.
+    let config = server_config(config_dir.path(), quic_port, vec![], Default::default());
+    let _server = spawn_server_with_handler(config, |config, connection| async move {
+        let _authenticated = authenticate_quic_client(config, connection.clone()).await?;
+        connection.closed().await;
+        Ok(())
+    });
+
+    with_timeout(async {
+        let (_client, connection) = connect_raw(config_dir.path(), quic_port).await?;
+        let mut control_stream = authenticated_control_stream(&connection).await?;
+        let written = write_until_blocked(&mut control_stream, 1 << 20).await?;
+        assert_eq!(written, 1 << 20);
         Ok(())
     })
     .await

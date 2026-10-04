@@ -22,9 +22,12 @@ use crate::limits::QuicAdmission;
 use crate::private_files::{warn_if_accessible_by_others, write_private_file};
 use crate::protocol::close::CloseCode;
 use crate::quic::fingerprint::CertFingerprint;
-use crate::quic::{configure_transport_config, ALPN_QUIC_PORTREDIRECT};
+use crate::quic::{
+    bind_endpoint, configure_transport_config, CongestionControl, ALPN_QUIC_PORTREDIRECT,
+};
 use crate::server::metrics::{RefusalReason, METRICS};
 use crate::shutdown::Shutdown;
+use crate::PortRedirectProtocol;
 
 /// Minimum time between two warnings about the connection limit.
 const LIMIT_WARNING_INTERVAL: Duration = Duration::from_secs(60);
@@ -57,6 +60,7 @@ const KEY_FILE: &str = "key.der";
 /// * `admission` - Limits per client address and blocking after failed authentication attempts.
 /// * `handshake_timeout` - Time a client has to complete the TLS handshake. Longer handshakes,
 ///   e.g. stalled on purpose, are aborted and count as failed attempts.
+/// * `congestion_control` - How fast the server sends.
 /// * `app_data` - Application-specific data.
 #[derive(Debug)]
 pub struct ServerConfig<AppDataType> {
@@ -68,6 +72,7 @@ pub struct ServerConfig<AppDataType> {
     pub connection_limit: Option<usize>,
     pub admission: QuicAdmission,
     pub handshake_timeout: Duration,
+    pub congestion_control: CongestionControl,
     /// When to shut down, and the forwarded connections that may finish meanwhile.
     pub shutdown: Shutdown,
     pub app_data: AppDataType,
@@ -105,6 +110,7 @@ impl<AppDataType> ServerConfig<AppDataType> {
             connection_limit,
             admission: QuicAdmission::default(),
             handshake_timeout: HANDSHAKE_TIMEOUT,
+            congestion_control: CongestionControl::default(),
             shutdown: Shutdown::default(),
             app_data,
         }
@@ -270,6 +276,15 @@ pub fn generate_quic_cert(
     Ok((vec![cert], key.into()))
 }
 
+/// Lets the client of `connection` send as much as an authenticated client may. Until then, it
+/// can only send [`PortRedirectProtocol::QUIC_UNAUTHENTICATED_RECEIVE_WINDOW`] that the server
+/// hasn't read yet.
+pub fn raise_receive_window(connection: &quinn::Connection) {
+    connection.set_receive_window(quinn::VarInt::from_u32(
+        PortRedirectProtocol::QUIC_CONNECTION_RECEIVE_WINDOW,
+    ));
+}
+
 /// Runs the QUIC server with the specified configuration and client handler.
 ///
 /// The server accepts connections and runs `handle_incoming_client` for each in its own task,
@@ -327,11 +342,11 @@ where
     let mut server_config =
         quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server_crypto)?));
     let transport_config = Arc::get_mut(&mut server_config.transport).unwrap();
-    configure_transport_config(transport_config);
+    configure_transport_config(transport_config, config.congestion_control);
 
     // Start QUIC server listener.
     info!(listen_addr = %config.listen, "Binding QUIC endpoint");
-    let endpoint = quinn::Endpoint::server(server_config, config.listen)?;
+    let endpoint = bind_endpoint(config.listen, Some(server_config))?;
 
     // PR QUIC server side loop:
     // Handle incoming QUIC connections forever.

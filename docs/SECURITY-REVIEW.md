@@ -38,7 +38,7 @@ It doesn't replace a review by someone outside the project, which #29 asks for, 
 | 2 | Each connection could buffer 1.25 MB of datagrams before authentication | Low | Fixed |
 | 3 | 23 unused crates through a default feature of quinn | Informational | Fixed |
 | 4 | Nothing ruled out unsafe code | Informational | Fixed |
-| 5 | Before authentication, a client can fill the control stream's receive window | Low | Accepted for now |
+| 5 | Before authentication, a client can fill the control stream's receive window | Low | Fixed by #27 |
 
 ### 1. Peers could add lines to the other side's log
 
@@ -68,7 +68,7 @@ It doesn't replace a review by someone outside the project, which #29 asks for, 
 
 - **What:** the server reads only the authentication messages from the control stream until the client is authenticated. A client may send more, which quinn keeps until it is read, up to the stream's receive window of 1.25 MB.
 - **Impact:** up to 1.25 MB per connection before authentication, 80 MB with the default limit of 64 QUIC connections. The limits per address (8 QUIC connections by default) and the timeouts (10 seconds each for the TLS handshake and the authentication) keep it short and spread out.
-- **Status:** accepted for now. The receive windows will be tuned for throughput in [#27](https://github.com/FionaPreroll/vibe-portredirect/issues/27), which should also consider a smaller window for the control stream.
+- **Status:** fixed by [#27](https://github.com/FionaPreroll/vibe-portredirect/issues/27), which made the stream windows larger for throughput: 8 MiB, which would have made this worse. Until the client has authenticated, the server's receive window for the whole connection is now 64 KiB; then it grows to the full 32 MiB. Tests check both, with the server's authentication.
 
 ## Checked without Findings
 

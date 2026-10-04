@@ -148,7 +148,30 @@ impl PortRedirectProtocol {
     /// Default maximum number of concurrently forwarded connections per tunnel.
     pub const DEFAULT_MAX_FORWARDED_CONNECTIONS: usize = 512;
 
-    // TODO choose these values non-arbitrarily
-    pub const QUIC_STREAM_READ_BUFFER_SIZE: usize = 64 * 1024; // 64 KiB
-    pub const QUIC_CRYPTO_BUFFER_SIZE: usize = 64 * 1024;
+    // The following values are based on measurements over links with delay and loss, see
+    // docs/PERFORMANCE.md.
+
+    /// How much the peer may send on a QUIC stream, i.e. a forwarded connection, before the
+    /// receiver reads it. A forwarded connection moves at most this much per round-trip time:
+    /// about 1 Gbit/s at 50 ms and 400 Mbit/s at 150 ms.
+    pub const QUIC_STREAM_RECEIVE_WINDOW: u32 = 8 << 20;
+    /// How much the peer may send on all streams of a QUIC connection together before the
+    /// receiver reads it. This bounds the memory a tunnel's receive buffers take.
+    pub const QUIC_CONNECTION_RECEIVE_WINDOW: u32 = 32 << 20;
+    /// How much a side may send on a QUIC connection before the peer acknowledges it.
+    pub const QUIC_SEND_WINDOW: u64 = 32 << 20;
+    /// The server's receive window for a connection until the client has authenticated: enough
+    /// for the authentication, while an unauthenticated client can't make the server keep more.
+    /// The server raises it to [`Self::QUIC_CONNECTION_RECEIVE_WINDOW`] afterwards.
+    pub const QUIC_UNAUTHENTICATED_RECEIVE_WINDOW: u32 = 64 << 10;
+    /// Size of the buffers of the UDP sockets. Datagrams often arrive in bursts, and a full
+    /// buffer drops them, which QUIC takes for congestion, and slows down. Operating systems may
+    /// limit it, Linux to `net.core.rmem_max` and `net.core.wmem_max`.
+    pub const UDP_SOCKET_BUFFER_SIZE: usize = 4 << 20;
+    /// Size of the buffer for each direction of a forwarded connection, for copying between the
+    /// TCP connection and the QUIC stream. Larger buffers hardly make forwarding faster.
+    pub const COPY_BUFFER_SIZE: usize = 64 << 10;
+    /// How much of the TLS handshake QUIC buffers, e.g. data that arrives out of order. Far
+    /// more than the server's certificate takes.
+    pub const QUIC_CRYPTO_BUFFER_SIZE: usize = 64 << 10;
 }

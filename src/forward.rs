@@ -228,7 +228,7 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let mut buf = vec![0u8; crate::PortRedirectProtocol::QUIC_STREAM_READ_BUFFER_SIZE];
+    let mut buf = vec![0u8; crate::PortRedirectProtocol::COPY_BUFFER_SIZE];
     loop {
         let n = reader.read(&mut buf).await.map_err(DirectionError::Read)?;
         if n == 0 {

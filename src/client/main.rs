@@ -79,6 +79,7 @@ async fn run(config: Config) -> Result<()> {
         quic_cert_hostname: config.quic_cert_hostname,
         cert_fingerprints: config.quic_cert_fingerprints,
         max_connections: config.max_connections,
+        congestion_control: config.congestion_control,
         metrics_addr: config.metrics_addr,
         reconnect_backoff: Backoff::default(),
         shutdown: Shutdown::on_signals(config.shutdown_timeout),

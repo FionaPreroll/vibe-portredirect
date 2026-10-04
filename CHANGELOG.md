@@ -21,6 +21,8 @@ Versions 0.4.0 to 0.7.0 were not published on crates.io; the latest published ve
 - Fuzz targets for the parsers of the protocol, for cargo-fuzz in `fuzz/`: the authentication on both sides, `HELLO`, `WELCOME`, the control messages and the header of data streams. CI runs each for 30 seconds on pull requests and for 15 minutes once a week, and `cargo test` runs a short smoke test of them on stable Rust.
 - CI checks the dependencies with cargo-deny: known vulnerabilities, licenses that don't go with the GPL, and sources other than crates.io (`deny.toml`, `make deny`).
 - [docs/SECURITY-REVIEW.md](docs/SECURITY-REVIEW.md): the internal security review before 1.0, with what was looked at, how, and what was found.
+- `--congestion-control bbr`, for both programs and in their configuration files: BBR instead of CUBIC decides how fast a side sends. On links that lose packets for other reasons than congestion, it is much faster: with 1 % loss, the tunnel kept 176 to 1300 Mbit/s instead of less than 4. Set it on both sides; quinn marks BBR experimental.
+- [docs/PERFORMANCE.md](docs/PERFORMANCE.md): measurements over links with 50 and 150 ms round-trip time and 1 % loss, and the chosen values. `examples/link_emulator.rs` emulates such links without privileges, `utils/link_benchmark.py` runs the measurements, and a BATS test checks that data crosses such a link unchanged.
 
 ### Changed
 
@@ -34,6 +36,9 @@ Versions 0.4.0 to 0.7.0 were not published on crates.io; the latest published ve
 - Log messages of the programs' main functions, e.g. the client's fatal errors, have the target `portredirect::client::main` or `portredirect::server::main` instead of `portredirect_client` or `portredirect_server`. Update `RUST_LOG` filters that name the programs.
 - Neither side accepts QUIC datagrams any more, which PortRedirect doesn't use: a client could make the server keep up to 1.25 MB of them per connection, even before it authenticated.
 - quinn is built without its platform verifier, which PortRedirect doesn't use, as clients trust exactly the server's certificate: 23 fewer dependencies.
+- Larger QUIC flow-control windows: a single forwarded connection reaches about 1 Gbit/s at 50 ms round-trip time and 390 Mbit/s at 150 ms, instead of 116 and 61 Mbit/s. Each side keeps at most 32 MiB of received data per tunnel.
+- Both programs ask for 4 MiB UDP socket buffers, so datagrams that arrive in bursts aren't lost, which slowed down fast connections. They log a hint if the operating system allows less; on Linux, raise `net.core.rmem_max` and `net.core.wmem_max`, see the README.
+- Until a client has authenticated, the server lets it send only 64 KiB that it hasn't read yet.
 
 ### Removed
 

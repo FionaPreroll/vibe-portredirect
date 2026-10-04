@@ -12,7 +12,7 @@ use std::{fs, net::SocketAddr, path::PathBuf, sync::Arc, time::Instant};
 use tracing::info;
 
 use super::fingerprint::{CertFingerprint, FingerprintVerifier};
-use super::{client_transport_config, ALPN_QUIC_PORTREDIRECT};
+use super::{bind_endpoint, client_transport_config, CongestionControl, ALPN_QUIC_PORTREDIRECT};
 use crate::protocol::close::CloseCode;
 use crate::shutdown::Shutdown;
 use crate::PortRedirectProtocol;
@@ -34,6 +34,8 @@ pub struct ClientConfig<AppDataType> {
     /// Maximum number of concurrently forwarded connections, i.e. streams the server may open.
     /// Defaults to `PortRedirectProtocol::DEFAULT_MAX_FORWARDED_CONNECTIONS`.
     pub connection_limit: Option<usize>,
+    /// How fast the client sends.
+    pub congestion_control: CongestionControl,
 
     /// When to shut down, and the forwarded connections that may finish meanwhile.
     pub shutdown: Shutdown,
@@ -57,6 +59,7 @@ impl<AppDataType> ClientConfig<AppDataType> {
             local_socket,
             remote_socket,
             connection_limit,
+            congestion_control: CongestionControl::default(),
             shutdown: Shutdown::default(),
             app_data,
         }
@@ -117,9 +120,10 @@ impl<AppDataType> QuicClient<AppDataType> {
             config
                 .connection_limit
                 .unwrap_or(PortRedirectProtocol::DEFAULT_MAX_FORWARDED_CONNECTIONS),
+            config.congestion_control,
         )));
 
-        let mut endpoint = quinn::Endpoint::client(config.local_socket)
+        let mut endpoint = bind_endpoint(config.local_socket, None)
             .with_context(|| format!("failed to bind {}", config.local_socket))?;
         endpoint.set_default_client_config(client_config);
 
