@@ -70,6 +70,21 @@ pub fn is_permanent_error(error: &anyhow::Error, close_reason: Option<&Connectio
         })
 }
 
+/// Returns whether the server refused the connection before its handshake, see
+/// [`REFUSED_HINT`].
+pub fn is_refused(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<ConnectionError>(),
+            Some(ConnectionError::ConnectionClosed(close))
+                if close.error_code == TransportErrorCode::CONNECTION_REFUSED
+        )
+    })
+}
+
+/// Why the server refuses connections, logged when it starts doing so.
+pub const REFUSED_HINT: &str = "The server refuses new connections: while it blocks this address after failed handshakes or authentication attempts, e.g. of a client with a name it doesn't know or a wrong PSK from the same address, while this address or the server has too many connections, or while it shuts down. Its log says which, see Troubleshooting in PortRedirect's README";
+
 fn is_permanent_connection_error(error: &ConnectionError) -> bool {
     match error {
         ConnectionError::ApplicationClosed(_) => {
@@ -253,6 +268,21 @@ mod tests {
             ));
         }
         assert!(!is_permanent_error(&anyhow!("unknown error"), None));
+    }
+
+    #[test]
+    fn test_refusals_are_recognized() {
+        let refused = ConnectionError::ConnectionClosed(ConnectionClose {
+            error_code: TransportErrorCode::CONNECTION_REFUSED,
+            frame_type: None,
+            reason: Default::default(),
+        });
+        assert!(is_refused(
+            &anyhow::Error::new(refused).context("failed to connect")
+        ));
+        assert!(!is_refused(&anyhow::Error::new(ConnectionError::TimedOut)));
+        let closed = closed_by_server(CloseCode::AuthenticationFailed);
+        assert!(!is_refused(&anyhow::Error::new(closed)));
     }
 
     #[test]

@@ -2,7 +2,7 @@
 """Measures the throughput of a PortRedirect tunnel over an emulated network link.
 
 For each case, it starts an iperf3 server as the destination, portredirect_server,
-the link emulator (examples/link_emulator.rs) between client and server, and
+the link emulator (utils/link_emulator.rs) between client and server, and
 portredirect_client, then runs an iperf3 client through the tunnel and prints a
 Markdown table of the results. See docs/PERFORMANCE.md.
 

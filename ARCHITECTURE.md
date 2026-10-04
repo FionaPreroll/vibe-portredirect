@@ -26,7 +26,8 @@ The `missing_docs` lint fails the lint check if a module becomes public by accid
 | `src/psk.rs`           | Command-line options for the pre-shared key and loading it, shared by both binaries.                         |
 | `src/private_files.rs` | Creates and checks files and directories holding secrets.                                                    |
 | `src/shutdown.rs`      | Graceful shutdown on signals: draining, waiting for running forwarded connections, shared by both binaries. |
-| `src/lib.rs`           | Protocol constants and logging setup, shared by both binaries, and the programs' entry points. Log messages escape control characters, as they may contain text from the peer. |
+| `src/lib.rs`           | Protocol constants, shared by both binaries, and the programs' entry points.                                 |
+| `src/logging.rs`       | Logging setup, shared by both binaries: text or JSON, and the client's connection log. Log messages escape control characters, as they may contain text from the peer. |
 | `src/fuzz.rs`          | Entry points for the fuzz targets in `fuzz/`, which feed input to the protocol's parsers, with a smoke test on stable Rust. Only compiled for tests and fuzzing. |
 | `src/bin/`             | The binaries, `portredirect_server` and `portredirect_client`. Each only calls its program's `main` in the library. |
 | `src/tests/`           | In-process end-to-end tests, which use the crate's internals. `tunnel_end_to_end.rs` runs complete tunnels, including the limits and reconnecting. |
@@ -34,8 +35,8 @@ The `missing_docs` lint fails the lint check if a module becomes public by accid
 | `tests/*.bats`         | End-to-end tests and benchmarks of the release binaries with external tools.                                 |
 | `fuzz/`                | Fuzz targets for cargo-fuzz, see [fuzz/README.md](fuzz/README.md).                                           |
 | `docker/`              | Dockerfile of the images, the Docker Compose examples and their test, see the README.                       |
-| `examples/`            | `link_emulator.rs`: emulates a network link with delay and loss for benchmarks, see [docs/PERFORMANCE.md](docs/PERFORMANCE.md). |
-| `utils/`               | Benchmark, plotting and documentation tools. `link_benchmark.py` measures tunnels over emulated links.       |
+| `examples/`            | Configuration files of both programs with every setting, `server.toml` and `client.toml`. Tests check that they are valid and complete. |
+| `utils/`               | Benchmark, plotting and documentation tools. `link_benchmark.py` measures tunnels over links that `link_emulator.rs` emulates with delay and loss, see [docs/PERFORMANCE.md](docs/PERFORMANCE.md); cargo builds the emulator as an example. |
 
 ## Call Hierarchy
 

@@ -60,7 +60,7 @@ pub async fn handle_quic_client_connection(
         };
 
     // From now on, all log messages of this connection name the client.
-    let span = info_span!("client", name = client.name.as_str());
+    let span = info_span!("tunnel", client = client.name.as_str());
     serve_client(config, quic_conn, control_stream, client.name)
         .instrument(span)
         .await

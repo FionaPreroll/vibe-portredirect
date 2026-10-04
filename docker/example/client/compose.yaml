@@ -33,6 +33,8 @@ services:
       # PORTREDIRECT_CONGESTION_CONTROL: cubic
       # PORTREDIRECT_SHUTDOWN_TIMEOUT: 5
       # PORTREDIRECT_LOG_LEVEL: info
+      # PORTREDIRECT_LOG_FORMAT: text  # or json, e.g. for log collectors
+      # PORTREDIRECT_LOG_CONNECTIONS: "false"  # "true" logs each forwarded connection
       # PORTREDIRECT_PROVIDE_METRICS: "false"
       # PORTREDIRECT_METRICS_LISTEN: 127.0.0.1:9898  # 0.0.0.0:9898 for other containers
       # PORTREDIRECT_QUIC_LOCAL_HOST: 0.0.0.0

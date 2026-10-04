@@ -266,6 +266,75 @@ impl<'de> Visitor<'de> for PortsVisitor {
     }
 }
 
+/// The example configuration files in `examples/`, for the tests of both programs, which check
+/// that the files are valid and have every setting.
+#[cfg(test)]
+pub(crate) mod examples {
+    use clap::Command;
+    use std::path::{Path, PathBuf};
+
+    /// Returns the path of the example configuration file `name`, e.g. `server.toml`.
+    pub fn path(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("examples")
+            .join(name)
+    }
+
+    /// Returns the key of the setting in `line`, also if it is commented out, e.g. `log-level`
+    /// for `# log-level = "info"`.
+    fn setting(line: &str) -> Option<&str> {
+        let line = line
+            .strip_prefix('#')
+            .map_or(line, |rest| rest.strip_prefix(' ').unwrap_or(rest));
+        let (key, _) = line.split_once(" = ")?;
+        let mut chars = key.chars();
+        let valid = chars.next()?.is_ascii_lowercase()
+            && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+        valid.then_some(key)
+    }
+
+    /// Returns `text` with the settings that are commented out active, too.
+    pub fn uncommented(text: &str) -> String {
+        text.lines()
+            .map(|line| match line.strip_prefix('#') {
+                Some(rest) if setting(line).is_some() => rest.trim_start(),
+                _ => line,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Returns the options of `command` that aren't settings in `text`, apart from the ones
+    /// in `not_in_files`, which configuration files can't have.
+    pub fn missing_options(command: &Command, text: &str, not_in_files: &[&str]) -> Vec<String> {
+        let keys: Vec<&str> = text.lines().filter_map(setting).collect();
+        command
+            .get_arguments()
+            .filter_map(|arg| arg.get_long())
+            .filter(|long| !not_in_files.contains(long) && !keys.contains(long))
+            .map(String::from)
+            .collect()
+    }
+
+    #[test]
+    fn test_settings_also_when_commented_out() {
+        let text = "# Comment = not a setting\n# log-level = \"info\"\nmax-connections = 5\n";
+        assert_eq!(
+            uncommented(text),
+            "# Comment = not a setting\nlog-level = \"info\"\nmax-connections = 5"
+        );
+        let command = Command::new("test")
+            .arg(clap::Arg::new("log_level").long("log-level"))
+            .arg(clap::Arg::new("max_connections").long("max-connections"))
+            .arg(clap::Arg::new("psk").long("psk"))
+            .arg(clap::Arg::new("shutdown_timeout").long("shutdown-timeout"));
+        assert_eq!(
+            missing_options(&command, text, &["psk"]),
+            ["shutdown-timeout"]
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

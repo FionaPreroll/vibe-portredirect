@@ -75,7 +75,7 @@ In `PortRedirectProtocol` (`src/lib.rs`), for both sides:
 ## How It Was Measured
 
 - **Machine:** 4 virtual CPUs, Linux 6.18, all programs on the same machine over localhost, release builds. `net.core.rmem_max` and `net.core.wmem_max` were 4 MiB, the 0.7.0 values used the default buffers.
-- **Link:** `examples/link_emulator.rs` forwards the QUIC datagrams between client and server with half the round-trip time in each direction and drops each with the given probability, independently. It needs no privileges, unlike `tc netem`. It can also limit the bandwidth, which these measurements didn't. Its timers have a resolution of 1 ms, so it releases datagrams in bursts of up to 1 ms. Without delay and loss, the tunnel ran without it.
+- **Link:** `utils/link_emulator.rs` forwards the QUIC datagrams between client and server with half the round-trip time in each direction and drops each with the given probability, independently. It needs no privileges, unlike `tc netem`. It can also limit the bandwidth, which these measurements didn't. Its timers have a resolution of 1 ms, so it releases datagrams in bursts of up to 1 ms. Without delay and loss, the tunnel ran without it.
 - **Traffic:** iperf3 for 12 seconds, the first 2 left out, with one and with ten parallel connections. Each value is a single run; repeated runs differed by up to about 10 %.
 
 ### Reproducing

@@ -1,0 +1,88 @@
+# Configuration of portredirect_client with every setting, for --config-file:
+#
+#   portredirect_client --config-file /etc/portredirect/client.toml
+#
+# The keys are the names of the options without the leading dashes, see
+# portredirect_client --help. Settings that are commented out show their defaults. Options on
+# the command line or in the environment (PORTREDIRECT_...) take precedence over this file.
+# Relative paths are relative to this file's directory. The file has no key for the PSK itself,
+# only for the file that holds it.
+
+# Holds a copy of the server's certificate, cert.der, if the client trusts it that way instead of
+# by its fingerprint. Default: portredirect in the user's configuration directory, e.g.
+# ~/.config/portredirect.
+# config-dir = "/etc/portredirect"
+
+# --- Destination ---
+
+# Where the client forwards the connections that the server accepts for it, e.g. a local web
+# server. A name is looked up for each connection. Required.
+destination-host = "127.0.0.1"
+destination-port = 8080
+
+# --- Server ---
+
+# The server's name or address, and the UDP port it listens on for clients. Required.
+quic-remote-host = "tunnel.example.com"
+quic-remote-port = 4433
+
+# The port the server listens on for external connections, for this client. The server must
+# allow it for this client. Required.
+remote-listen-port = 80
+
+# The name to authenticate with. The server must know it: a client in its configuration file,
+# or default for a server with a single PSK. Otherwise the server rejects the client, and blocks
+# its address after 5 attempts, see the README's Troubleshooting.
+# client-name = "default"
+
+# The file with the client's PSK, which the server has for the client, too. Alternatively, the
+# PSK comes from the environment variable PORTREDIRECT_PSK. Required.
+psk-file = "psk"
+
+# The fingerprint of the server's certificate, which the server logs when it starts. Replace this
+# placeholder. An array of several, e.g. ["sha256:…", "sha256:…"], while the server's
+# certificate changes.
+quic-cert-fingerprint = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+
+# Or, without a fingerprint, the client trusts a copy of the server's cert.der in config-dir. It
+# must be issued for this name, by default for the address of quic-remote-host. Not checked with
+# a fingerprint.
+# quic-cert-hostname = "tunnel.example.com"
+
+# Address and UDP port to send to the server from. 0.0.0.0 is any IPv4 address, port 0 any free
+# port.
+# quic-local-host = "0.0.0.0"
+# quic-local-port = 0
+
+# --- Limits and performance ---
+
+# Forwarded connections at the same time, i.e. connections to the destination. Further ones
+# wait until one ends.
+# max-connections = 512
+
+# How fast to send to the server: cubic, or bbr, which is much faster on links that lose packets
+# for other reasons than congestion, e.g. wireless ones. See docs/PERFORMANCE.md.
+# congestion-control = "cubic"
+
+# --- Operation ---
+
+# Seconds that running forwarded connections may take to finish when the client shuts down on
+# SIGINT or SIGTERM, 0 to close them right away.
+# shutdown-timeout = 5
+
+# Log messages up to this level: off, error, warn, info, debug or trace. The RUST_LOG
+# environment variable, if set, takes precedence.
+# log-level = "info"
+
+# Format of log messages: text, or json, one JSON object per line, e.g. for log collectors.
+# log-format = "text"
+
+# Log each forwarded connection, independently of log-level: the external client's address,
+# the destination, how long the connection lasted and how much data it transferred. Off by
+# default, as it logs the addresses of the external clients.
+# log-connections = false
+
+# Serve Prometheus metrics at /metrics on metrics-listen. The endpoint has no authentication,
+# only make it reachable from trusted networks.
+# provide-metrics = false
+# metrics-listen = "127.0.0.1:9898"

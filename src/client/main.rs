@@ -11,9 +11,10 @@ use crate::app_data::ClientAppData;
 use crate::client::config::Config;
 use crate::client::reconnect::Backoff;
 use crate::client::run_client::{run_client, ClientSettings};
+use crate::get_config_dir;
 use crate::host_port::HostPort;
+use crate::logging::init_logging;
 use crate::shutdown::Shutdown;
-use crate::{get_config_dir, init_logging};
 
 /// Runs the client program, `portredirect_client`, until a shutdown signal arrives.
 #[tokio::main]
@@ -21,7 +22,7 @@ pub async fn main() -> ExitCode {
     // Read the command line, the environment and the configuration file.
     let config = Config::from_command_line();
 
-    init_logging(config.log_level);
+    init_logging(config.log_level, config.log_format, config.log_connections);
     let _enter = span!(Level::INFO, "prclient_main").entered();
 
     // Exit code 0 after a shutdown signal, 1 if the client can't work as configured.

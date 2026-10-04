@@ -121,6 +121,7 @@ portredirect_server \
 - **`--print-metrics`:** Print the metrics to stderr when they change, each summed over all clients.
 - **`--shutdown-timeout`:** Seconds that running forwarded connections may take to finish when the server shuts down (default 5), see [Shutting Down](#shutting-down).
 - **`--log-level`:** `off`, `error`, `warn`, `info` (default), `debug` or `trace`. Logs go to stderr. The `RUST_LOG` environment variable, if set, takes precedence and can set levels per module, e.g. `RUST_LOG=info,portredirect::forward=debug`.
+- **`--log-format`:** `text` (default) or `json`: one JSON object per line, with the fields of each message, e.g. for log collectors.
 - **`--congestion-control`:** How fast the server sends: `cubic` (default) or `bbr`, which is much faster on links that lose packets, e.g. wireless ones, see [Performance](#performance).
 
 **Limits** for the resources a single host can use:
@@ -159,7 +160,12 @@ portredirect_client \
 - **`--config-dir`:** Where the server's certificate `cert.der` is read from, unless `--quic-cert-fingerprint` is given (default `~/.config/portredirect`).
 - **`--max-connections`:** Maximum number of concurrently forwarded connections (default 512).
 - **`--provide-metrics`:** Serve Prometheus metrics at `http://127.0.0.1:9898/metrics`, or at the address given with `--metrics-listen`, see [Metrics](#metrics). The endpoint has no authentication, only make it reachable from trusted networks.
-- **`--shutdown-timeout`**, **`--log-level`** and **`--congestion-control`:** As for the server. `--congestion-control` decides how fast each side sends, so set it on both.
+- **`--shutdown-timeout`**, **`--log-level`**, **`--log-format`** and **`--congestion-control`:** As for the server. `--congestion-control` decides how fast each side sends, so set it on both.
+- **`--log-connections`:** Log each forwarded connection, independently of `--log-level`: the external client's address, which the server passes on, the destination, how long the connection lasted and how much data it transferred. Off by default, as it logs the addresses of the external clients. A connection that fails is logged as `Connection aborted`, with the error.
+  ```
+  INFO portredirect::connections: Connection opened external_client=198.51.100.7:56360 destination=127.0.0.1:4433
+  INFO portredirect::connections: Connection closed external_client=198.51.100.7:56360 destination=127.0.0.1:4433 duration_ms=1520 bytes_to_destination=517 bytes_from_destination=10342
+  ```
 
 > **Important:** The client must trust the server's certificate. Start the server first to generate it, then give the client the certificate's fingerprint with `--quic-cert-fingerprint`, see [Server Certificate](#server-certificate).
 > Or copy **only the certificate** `~/.config/portredirect/cert.der` from the server to the client's configuration directory (by default the same path).
@@ -185,6 +191,8 @@ log-level = "warn"
 ```sh
 portredirect_client --config-file /etc/portredirect/client.toml
 ```
+
+[examples/server.toml](examples/server.toml) and [examples/client.toml](examples/client.toml) have every setting, with explanations and the defaults.
 
 - **Precedence:** Options on the command line or in the [environment](#environment-variables) take precedence over the file, and the file over the defaults. So `--log-level debug` overrides the file for a single run. On the command line, flags like `--print-metrics` can only switch a setting on.
 - **No secrets:** The file only names the files that hold the PSKs; it has no key for a PSK itself.
@@ -383,7 +391,7 @@ A PSK given on the command line or in the environment takes precedence over the 
 
 ## Troubleshooting
 
-Both programs log at the `info` level by default. `--log-level debug`, or `RUST_LOG=debug`, logs more details, e.g. why the server refused a connection, and the [metrics](#metrics) count most problems, too.
+Both programs log at the `info` level by default. `--log-level debug`, or `RUST_LOG=debug`, logs more details, e.g. each connection the server refuses, and the [metrics](#metrics) count most problems, too.
 
 ### The Server Refuses New Connections
 
@@ -421,10 +429,17 @@ To find the reason:
   WARN … Incoming connection dropped: failed to authenticate PR QUIC client from 198.51.100.7:50710: authentication rejected: unknown client name "office"
   WARN … Blocking 198.51.100.7 for 600s after 5 failed handshakes or authentication attempts
   ```
-  It also warns when it reaches `--max-quic-connections`, at most once a minute. The refusals themselves, with their reasons, are only logged at the `debug` level.
+  It also warns when it refuses connections, with the reason, at most once a minute for each reason; the next warning counts the refusals in between, and the `debug` level logs each one:
+  ```
+  WARN … Refusing connection from 198.51.100.7:59494: the address is blocked for another 9m 12s after failed handshakes or authentication attempts
+  ```
 - **Client log:** The rejected client only learns that its authentication failed, not whether its name or its PSK is wrong; the server's log says which:
   ```
   ERROR … connecting again would fail the same way, giving up: tunnel failed: failed to authenticate against PR QUIC server: failed to receive acceptance: connection lost: closed by peer: authentication failed (code 1)
+  ```
+  A client that the server refuses names the possible reasons, once until it connects again:
+  ```
+  WARN … The server refuses new connections: while it blocks this address after failed handshakes or authentication attempts, e.g. of a client with a name it doesn't know or a wrong PSK from the same address, while this address or the server has too many connections, or while it shuts down. Its log says which, see Troubleshooting in PortRedirect's README
   ```
 - **Metrics:** `portredirect_server_quic_connections_refused_total` counts the refused connections by the reasons above, `portredirect_server_authentication_failures_total` the failed attempts.
 

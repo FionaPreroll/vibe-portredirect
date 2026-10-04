@@ -16,15 +16,7 @@
 #![forbid(unsafe_code)]
 
 use anyhow::{Context, Result};
-use std::fmt::{self, Write as _};
-use std::io::IsTerminal;
 use std::{path::PathBuf, time::Duration};
-use tracing::field::Field;
-use tracing::level_filters::LevelFilter;
-use tracing_subscriber::field::MakeExt;
-use tracing_subscriber::fmt::format::{debug_fn, Writer};
-use tracing_subscriber::fmt::FormatFields;
-use tracing_subscriber::EnvFilter;
 
 mod app_data;
 mod bi_stream;
@@ -36,6 +28,7 @@ mod forward;
 pub mod fuzz;
 mod host_port;
 mod limits;
+mod logging;
 mod metrics;
 mod private_files;
 mod protocol;
@@ -67,74 +60,6 @@ pub(crate) fn get_config_dir(override_config_dir: Option<PathBuf>) -> Result<Pat
     private_files::create_private_dir_all(&config_dir).context("create config dir")?;
 
     Ok(config_dir)
-}
-
-/// Sets up logging to stderr for messages up to `max_level`, with colors only on a terminal.
-///
-/// The `RUST_LOG` environment variable, if set, takes precedence and can set levels per module,
-/// e.g. `RUST_LOG=info,portredirect::forward=debug`.
-pub(crate) fn init_logging(max_level: LevelFilter) {
-    let filter = match std::env::var("RUST_LOG") {
-        Ok(directives) if !directives.trim().is_empty() => EnvFilter::try_new(&directives)
-            .unwrap_or_else(|e| {
-                // Logging isn't set up yet.
-                eprintln!("Ignoring invalid RUST_LOG {:?}: {}", directives, e);
-                EnvFilter::default().add_directive(max_level.into())
-            }),
-        _ => EnvFilter::default().add_directive(max_level.into()),
-    };
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .fmt_fields(escaping_fields())
-        .with_writer(std::io::stderr)
-        .with_ansi(std::io::stderr().is_terminal())
-        .with_target(true)
-        .with_line_number(true)
-        .init();
-}
-
-/// Formats the fields of log messages, including the message itself, with control characters
-/// escaped, see [`Escaped`].
-///
-/// Log messages may contain text from the peer, e.g. the reason it gave for closing the
-/// connection, which is part of the error. Escaped, the peer can't start a new line with it, and
-/// make it look like another log message.
-fn escaping_fields() -> impl for<'writer> FormatFields<'writer> + 'static {
-    debug_fn(
-        |writer: &mut Writer<'_>, field: &Field, value: &dyn fmt::Debug| {
-            if field.name() == "message" {
-                write!(writer, "{}", Escaped(format_args!("{:?}", value)))
-            } else {
-                write!(writer, "{}={}", field, Escaped(format_args!("{:?}", value)))
-            }
-        },
-    )
-    .delimited(" ")
-}
-
-/// Displays its value with control characters escaped like in Rust strings, e.g. a line break
-/// as `\n`, as well as Unicode line and paragraph separators.
-struct Escaped<T>(T);
-
-impl<T: fmt::Display> fmt::Display for Escaped<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        struct Escaping<'a, 'b>(&'a mut fmt::Formatter<'b>);
-
-        impl fmt::Write for Escaping<'_, '_> {
-            fn write_str(&mut self, text: &str) -> fmt::Result {
-                for c in text.chars() {
-                    if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') {
-                        write!(self.0, "{}", c.escape_default())?;
-                    } else {
-                        self.0.write_char(c)?;
-                    }
-                }
-                Ok(())
-            }
-        }
-
-        write!(Escaping(f), "{}", self.0)
-    }
 }
 
 pub(crate) struct PortRedirectProtocol;

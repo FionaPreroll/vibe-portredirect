@@ -22,7 +22,6 @@ use prometheus::{
 use std::convert::Infallible;
 use std::future::Future;
 use std::net::SocketAddr;
-#[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::net::TcpListener;
@@ -115,6 +114,33 @@ impl MetricsCounter for IntCounter {
 impl<T: MetricsCounter> MetricsCounter for &T {
     fn inc_by(&self, amount: u64) {
         (**self).inc_by(amount)
+    }
+}
+
+/// A counter that also adds up what it is incremented by, e.g. the bytes of one connection.
+pub struct CounterWithTotal<C> {
+    counter: C,
+    total: AtomicU64,
+}
+
+impl<C> CounterWithTotal<C> {
+    pub fn new(counter: C) -> Self {
+        Self {
+            counter,
+            total: AtomicU64::new(0),
+        }
+    }
+
+    /// Returns the sum of the increments.
+    pub fn total(&self) -> u64 {
+        self.total.load(Ordering::Relaxed)
+    }
+}
+
+impl<C: MetricsCounter> MetricsCounter for CounterWithTotal<C> {
+    fn inc_by(&self, amount: u64) {
+        self.counter.inc_by(amount);
+        self.total.fetch_add(amount, Ordering::Relaxed);
     }
 }
 

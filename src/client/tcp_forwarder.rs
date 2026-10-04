@@ -7,14 +7,17 @@ use super::metrics::METRICS;
 
 use crate::app_data::ClientAppData;
 use crate::forward::{abort_quic_stream, forward_tcp_and_quic};
+use crate::host_port::HostPort;
+use crate::logging::CONNECTION_LOG;
+use crate::metrics::{CounterWithTotal, MetricsCounter};
 use crate::protocol::data_stream::{receive_connection_header, StreamErrorCode};
 use crate::quic::client::ClientConfig;
 
 use anyhow::{anyhow, Error, Result};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::timeout;
-use tracing::debug;
+use tokio::time::{timeout, Instant};
+use tracing::{debug, info};
 
 /// Time to look up the destination and wait for it to accept a connection.
 const DESTINATION_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -54,10 +57,61 @@ pub async fn forward_tcp_to_quic_stream(
         }
     };
 
-    // Connect to the destination. A name is looked up each time, and each of its addresses is
-    // tried in turn, e.g. IPv6 and IPv4 for localhost.
+    // With --log-connections, each connection is logged, see CONNECTION_LOG.
     let destination = &config.app_data.forward_destination;
     debug!("Forwarding connection from {} to {}", peer, destination);
+    info!(
+        target: CONNECTION_LOG,
+        external_client = %peer,
+        destination = %destination,
+        "Connection opened"
+    );
+    let start = Instant::now();
+    let to_destination = CounterWithTotal::new(&METRICS.bytes_to_destination);
+    let from_destination = CounterWithTotal::new(&METRICS.bytes_from_destination);
+    let result =
+        forward_to_destination(destination, send, recv, &to_destination, &from_destination).await;
+    let duration_ms = start.elapsed().as_millis() as u64;
+    let (bytes_to_destination, bytes_from_destination) =
+        (to_destination.total(), from_destination.total());
+    match &result {
+        Ok(()) => info!(
+            target: CONNECTION_LOG,
+            external_client = %peer,
+            destination = %destination,
+            duration_ms,
+            bytes_to_destination,
+            bytes_from_destination,
+            "Connection closed"
+        ),
+        Err(e) => {
+            let error = format!("{:#}", e);
+            info!(
+                target: CONNECTION_LOG,
+                external_client = %peer,
+                destination = %destination,
+                duration_ms,
+                bytes_to_destination,
+                bytes_from_destination,
+                error = %error,
+                "Connection aborted"
+            )
+        }
+    }
+    result
+}
+
+/// Connects to `destination` and forwards the connection between it and the QUIC stream,
+/// counting the bytes it forwards in each direction.
+async fn forward_to_destination(
+    destination: &HostPort,
+    mut send: quinn::SendStream,
+    mut recv: quinn::RecvStream,
+    to_destination: &impl MetricsCounter,
+    from_destination: &impl MetricsCounter,
+) -> Result<()> {
+    // A name is looked up each time, and each of its addresses is tried in turn, e.g. IPv6 and
+    // IPv4 for localhost.
     let connected = timeout(
         DESTINATION_CONNECT_TIMEOUT,
         tokio::net::TcpStream::connect(destination.as_tuple()),
@@ -97,8 +151,8 @@ pub async fn forward_tcp_to_quic_stream(
         send,
         recv,
         &stream_name,
-        &METRICS.bytes_from_destination,
-        &METRICS.bytes_to_destination,
+        from_destination,
+        to_destination,
         // The server closes idle connections.
         None,
     )
