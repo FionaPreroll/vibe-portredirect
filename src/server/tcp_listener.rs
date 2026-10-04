@@ -90,7 +90,8 @@ async fn accept_connections(
     metrics: &ClientMetrics,
     cancel_token: &CancellationToken,
 ) -> Result<()> {
-    let limits = config.app_data.forwarding_limits;
+    // A reload of the configuration changes the limits of tunnels set up afterwards.
+    let limits = config.app_data.settings().forwarding_limits;
     info!(
         "TCP listening on {} (at most {} connections, {} per address, {} new ones per second and address after {} at once)",
         listener.local_addr()?,

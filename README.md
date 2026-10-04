@@ -79,6 +79,7 @@ The client fits into a Docker Compose stack: it forwards the connections that th
 
 - **Ports:** The server's container publishes the ports clients may ask for, e.g. 80, and the QUIC port, 4433/udp. Docker passes on the external clients' IPv4 addresses, which the server's limits per address need. IPv6 clients arrive from Docker's own address unless IPv6 is enabled in Docker; then let the server listen on `::`, for IPv6 and IPv4.
 - **UDP buffers:** Containers get the host's limits, so set them on the hosts, see [Performance](#performance).
+- **Reloading:** With a configuration file, `docker compose kill -s HUP portredirect-server` makes the server read it again, see [Reloading the Configuration](#reloading-the-configuration). Environment variables only change when Compose creates the container again.
 
 ### From Source
 
@@ -114,7 +115,7 @@ portredirect_server \
 - **`--quic-listen-host` & `--quic-listen-port`:** Where to listen for the QUIC tunnel (UDP), by default `127.0.0.1` and `4433`. `::` is every IPv6 and IPv4 address, as for `--listen-host`.
 - **`--quic-cert-hostname`:** IP address or DNS name the generated certificate is issued for, the client verifies it. Only used when the certificate is generated on first start (default `127.0.0.1`).
 - **`--psk-file`:** File containing the pre-shared key, see [PSK Best Practices](#psk-best-practices).
-- **`--config-file`:** TOML file with settings, e.g. a list of clients, see [Configuration File](#configuration-file).
+- **`--config-file`:** TOML file with settings, e.g. a list of clients, see [Configuration File](#configuration-file). `SIGHUP` makes the server read it again, see [Reloading the Configuration](#reloading-the-configuration).
 - **`--config-dir`:** Where the certificate and private key are stored (default `~/.config/portredirect`). If only one of them is there, the server doesn't start, instead of generating a new pair that clients wouldn't trust.
 - **`--print-quic-cert-fingerprint`:** Print the fingerprint of the certificate, for the clients' `--quic-cert-fingerprint`, and exit, see [Server Certificate](#server-certificate). If there is no certificate yet, generates it first.
 - **`--provide-metrics`:** Serve Prometheus metrics at `http://127.0.0.1:9899/metrics`, or at the address given with `--metrics-listen`, see [Metrics](#metrics). The endpoint has no authentication, only make it reachable from trusted networks.
@@ -253,8 +254,8 @@ Each client names itself with `--client-name`, or `client-name` in its configura
 A client can only use its own ports, so it can't take over another client's port, e.g. while that client reconnects.
 
 - **Standby:** Clients may share ports on purpose, like `web` and `web-standby` above, e.g. for a second machine that takes over when the first one fails. Whichever client connects first gets a port; the other one keeps trying to connect (see [Reconnects and Exit Codes](#reconnects-and-exit-codes)) and gets the port once it is free. The server logs which clients share which ports when it starts, so an overlap by mistake doesn't go unnoticed.
-- **Adding a client:** Add it to the server's configuration file and restart the server, which reads the file only when it starts. Until then, the server doesn't know the client's name and rejects it, and repeated attempts get the client's address blocked, see [Troubleshooting](#the-server-refuses-new-connections).
-- **Changing a PSK:** A client can have two PSK files while its PSK changes, like `mail` above. Add the new PSK file on the server and restart it, switch the client to the new PSK, then remove the old file from the server's configuration.
+- **Adding a client:** Add it to the server's configuration file, and make the server read the file again, see [Reloading the Configuration](#reloading-the-configuration). Until then, the server doesn't know the client's name and rejects it, and repeated attempts get the client's address blocked, see [Troubleshooting](#the-server-refuses-new-connections).
+- **Changing a PSK:** A client can have two PSK files while its PSK changes, like `mail` above. Add the new PSK file to the server's configuration and reload it, switch the client to the new PSK and restart the client, then remove the old file from the server's configuration and reload it again. The other tunnels go on meanwhile.
 - **Logs:** The server's log messages name the client of each connection.
 
 ### Server Certificate
@@ -325,6 +326,23 @@ On `SIGINT` or `SIGTERM`, both programs shut down gracefully, e.g. for an update
 
 A second `SIGINT` or `SIGTERM` closes the running connections right away.
 Keep the timeout shorter than the time a service manager waits before it kills the program, e.g. `TimeoutStopSec` of systemd (90 seconds by default) or the stop timeout of Docker (10 seconds by default).
+
+### Reloading the Configuration
+
+On `SIGHUP`, the server reads its configuration file and the PSK files again, e.g. with `systemctl reload` and `ExecReload=/bin/kill -HUP $MAINPID` in its systemd unit, or with `docker compose kill -s HUP portredirect-server`.
+It applies what can change while it runs, without touching the tunnels that the change doesn't affect:
+
+- **Clients:** added, removed and changed clients, with their PSKs and ports. A tunnel ends if its client was removed, if the PSK it authenticated with was removed, or if it may no longer use its port. Its client learns why and exits with code 1, as it would be rejected again, see [Reconnects and Exit Codes](#reconnects-and-exit-codes).
+- **Limits:** `--max-quic-connections` for new QUIC connections, and the limits of forwarded connections, e.g. `--max-connections-per-ip` or `--idle-timeout`, for the tunnels set up from then on. Lower limits don't end running connections.
+- **Log level,** unless `RUST_LOG` sets the levels.
+- **Blocked addresses:** The server lifts the blocks of addresses after failed attempts, see [Troubleshooting](#the-server-refuses-new-connections), as the new configuration may fix their cause, e.g. a client the server didn't know yet.
+
+The other settings, e.g. the listen addresses and the configuration directory, take effect when the server restarts; the server warns about those that changed.
+So does a new certificate, see [Changing the Server Certificate](#changing-the-server-certificate).
+If the new configuration is invalid, e.g. a PSK file is missing, the server logs why and goes on with the current one: nothing of the new one applies.
+Options on the command line or in the environment still take precedence over the file.
+
+The client reads its configuration only when it starts, so restart it after a change.
 
 ### Metrics
 
@@ -404,19 +422,19 @@ WARN … Disconnected from the server: failed to connect: aborted by peer: the s
 
 The server refuses a connection before the TLS handshake, for one of these reasons:
 
-| Reason                                | When                                                                              | Until                                          | Metric label                |
-| ------------------------------------- | --------------------------------------------------------------------------------- | ---------------------------------------------- | --------------------------- |
-| The address is blocked                | 5 failed handshakes or authentication attempts from the address within 10 minutes | 10 minutes have passed, or the server restarts | `reason="blocked"`          |
-| Too many connections from the address | 8 QUIC connections from the address, including ones that aren't authenticated yet | one of them ends                               | `reason="address_limit"`    |
-| Too many connections                  | `--max-quic-connections`, 64 by default                                           | one of them ends                               | `reason="connection_limit"` |
-| The server shuts down                 | e.g. for an update                                                                | it is back                                     | `reason="shutting_down"`    |
+| Reason                                | When                                                                              | Until                                                                       | Metric label                |
+| ------------------------------------- | --------------------------------------------------------------------------------- | --------------------------------------------------------------------------- | --------------------------- |
+| The address is blocked                | 5 failed handshakes or authentication attempts from the address within 10 minutes | 10 minutes have passed, or the server reloads its configuration or restarts | `reason="blocked"`          |
+| Too many connections from the address | 8 QUIC connections from the address, including ones that aren't authenticated yet | one of them ends                                                            | `reason="address_limit"`    |
+| Too many connections                  | `--max-quic-connections`, 64 by default                                           | one of them ends                                                            | `reason="connection_limit"` |
+| The server shuts down                 | e.g. for an update                                                                | it is back                                                                  | `reason="shutting_down"`    |
 
 Addresses count per IPv4 address and per IPv6 /64 network, so clients behind the same NAT share them: a single client that fails to authenticate gets the address blocked for all of them.
 A client that crashed keeps its connection until the server notices, after 30 seconds without a sign of life.
 
 These count as failed attempts:
 
-- **A client name the server doesn't know**, e.g. of a new client that isn't in the server's configuration file yet. The server reads its configuration only when it starts, so restart it after adding a client.
+- **A client name the server doesn't know**, e.g. of a new client that isn't in the server's configuration file yet, or that the server didn't [read again](#reloading-the-configuration) after adding the client.
 - **A wrong PSK.**
 - **A failed TLS handshake**, e.g. because the client doesn't trust the server's certificate, or speaks another protocol version.
 - **A handshake or authentication that doesn't finish**, within 10 seconds or because the client breaks it off.
@@ -444,8 +462,8 @@ To find the reason:
   ```
 - **Metrics:** `portredirect_server_quic_connections_refused_total` counts the refused connections by the reasons above, `portredirect_server_authentication_failures_total` the failed attempts.
 
-To recover, correct the setting, e.g. add the client to the server's configuration file and restart the server.
-A restart also lifts all blocks, as the server keeps them only in memory, and its clients connect again. Otherwise, a block ends after 10 minutes.
+To recover, correct the setting, e.g. add the client to the server's configuration file, and make the server read it again with `SIGHUP`, which also lifts all blocks, see [Reloading the Configuration](#reloading-the-configuration).
+A restart lifts them, too, as the server keeps them only in memory. Otherwise, a block ends after 10 minutes.
 [docs/PROTOCOL.md](docs/PROTOCOL.md#limits) lists all limits.
 
 ## Authentication & Certificate Verification

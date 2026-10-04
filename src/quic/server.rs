@@ -13,6 +13,7 @@ use std::{
     fs,
     net::SocketAddr,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicUsize, Ordering},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -47,6 +48,31 @@ const CERT_FILE: &str = "cert.der";
 /// The private key of the server's certificate in its configuration directory.
 const KEY_FILE: &str = "key.der";
 
+/// A limit on the number of concurrent QUIC connections, if any, which can change while the
+/// server runs. Clones share the limit.
+#[derive(Clone, Debug, Default)]
+pub struct ConnectionLimit(Arc<AtomicUsize>);
+
+impl ConnectionLimit {
+    /// Returns a limit of `limit` connections, or none.
+    pub fn new(limit: Option<usize>) -> Self {
+        let connection_limit = Self::default();
+        connection_limit.set(limit);
+        connection_limit
+    }
+
+    /// Returns the limit, if any.
+    pub fn get(&self) -> Option<usize> {
+        // 0 stands for none: --max-quic-connections can't be 0, which would accept no connection.
+        Some(self.0.load(Ordering::Relaxed)).filter(|&limit| limit > 0)
+    }
+
+    /// Changes the limit, for new connections.
+    pub fn set(&self, limit: Option<usize>) {
+        self.0.store(limit.unwrap_or(0), Ordering::Relaxed);
+    }
+}
+
 /// Configuration for the QUIC server.
 ///
 /// This struct holds the necessary configuration parameters for setting up a QUIC server.
@@ -59,7 +85,7 @@ const KEY_FILE: &str = "key.der";
 /// * `listen` - Bind address for the QUIC server.
 /// * `stateless_retry` - Whether to enable stateless retry.
 /// * `connection_limit` - Optional limit on the number of concurrent QUIC connections, including
-///   connections that are not authenticated yet.
+///   connections that are not authenticated yet, which a reload of the configuration can change.
 /// * `admission` - Limits per client address and blocking after failed authentication attempts.
 /// * `handshake_timeout` - Time a client has to complete the TLS handshake. Longer handshakes,
 ///   e.g. stalled on purpose, are aborted and count as failed attempts.
@@ -72,8 +98,8 @@ pub struct ServerConfig<AppDataType> {
     pub key_file: PathBuf,
     pub listen: SocketAddr,
     pub stateless_retry: bool,
-    pub connection_limit: Option<usize>,
-    pub admission: QuicAdmission,
+    pub connection_limit: ConnectionLimit,
+    pub admission: Arc<QuicAdmission>,
     pub handshake_timeout: Duration,
     pub congestion_control: CongestionControl,
     /// When to shut down, and the forwarded connections that may finish meanwhile.
@@ -110,8 +136,8 @@ impl<AppDataType> ServerConfig<AppDataType> {
             key_file: config_dir.join(KEY_FILE),
             listen: bind_socket,
             stateless_retry: true, // Be more secure by default
-            connection_limit,
-            admission: QuicAdmission::default(),
+            connection_limit: ConnectionLimit::new(connection_limit),
+            admission: Arc::new(QuicAdmission::default()),
             handshake_timeout: HANDSHAKE_TIMEOUT,
             congestion_control: CongestionControl::default(),
             shutdown: Shutdown::default(),
@@ -380,6 +406,7 @@ where
             refusal_warnings.refuse(incoming, RefusalReason::Blocked, &why);
         } else if let Some(limit) = config
             .connection_limit
+            .get()
             .filter(|&limit| endpoint.open_connections() >= limit)
         {
             let why = format!(

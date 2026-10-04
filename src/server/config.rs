@@ -359,8 +359,9 @@ pub struct CertificateConfig {
 
 impl Command {
     /// Returns what the program's command line, the environment and the configuration file ask
-    /// for. Exits with code 2 if they are invalid, like for invalid arguments.
-    pub fn from_command_line() -> Self {
+    /// for, and the parsed command line, e.g. to read the configuration file again. Exits with
+    /// code 2 if they are invalid, like for invalid arguments.
+    pub fn from_command_line() -> (Self, ArgMatches) {
         let renamed = check_renamed_options(std::env::args_os().skip(1), RENAMED_OPTIONS)
             .and_then(|()| check_renamed_environment());
         if let Err(e) = renamed {
@@ -369,11 +370,12 @@ impl Command {
                 .exit()
         }
         let matches = Args::command().get_matches();
-        Self::from_matches(&matches).unwrap_or_else(|e| {
+        let command = Self::from_matches(&matches).unwrap_or_else(|e| {
             Args::command()
                 .error(ErrorKind::InvalidValue, format!("{:#}", e).trim_end())
                 .exit()
-        })
+        });
+        (command, matches)
     }
 
     /// Returns what the command-line `matches`, the environment and the configuration file ask

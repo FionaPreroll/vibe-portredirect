@@ -283,11 +283,11 @@ Both sides close the QUIC connection with one of these application error codes a
 | Code | Meaning                                                                                   | Sent by | Client connects again |
 | ---: | ----------------------------------------------------------------------------------------- | ------- | --------------------- |
 |    0 | Normal end: shutdown of server or client, or end of the control stream.                   | both    | yes                   |
-|    1 | Authentication failed: the peer did not prove that it knows the PSK, or the server has no client with that name. | both    | no                    |
+|    1 | Authentication failed: the peer did not prove that it knows the PSK, or the server has no client with that name. Also when a reload of the server's configuration removes the client or the PSK it authenticated with. | both    | no                    |
 |    2 | Authentication timed out.                                                                 | server  | yes                   |
 |    3 | Protocol violation: a malformed or unexpected message.                                    | both    | no                    |
 |    4 | Configuration timed out: no `HELLO` within 10 seconds.                                    | server  | yes                   |
-|    5 | Port not allowed for this client.                                                         | server  | no                    |
+|    5 | Port not allowed for this client, also when a reload of the server's configuration no longer allows it. | server  | no                    |
 |    6 | Port unavailable: another client holds it, or the server could not listen on it, e.g. because another program uses it. | server  | yes                   |
 |    7 | Keepalive failed.                                                                         | both    | yes                   |
 |    8 | Internal error, e.g. a failure to send a message.                                        | both    | yes                   |

@@ -6,7 +6,9 @@
 # portredirect_server --help. Settings that are commented out show their defaults. Options on
 # the command line or in the environment (PORTREDIRECT_...) take precedence over this file.
 # Relative paths are relative to this file's directory. The file has no key for a PSK itself,
-# only for the files that hold the PSKs.
+# only for the files that hold the PSKs. On SIGHUP, the server reads this file and the PSK files
+# again, and applies the clients, the limits and the log level, see the README's Reloading the
+# Configuration; the other settings need a restart.
 
 # Holds the server's certificate and its private key, cert.der and key.der, which the server
 # generates when it first starts. Keep them: clients trust the certificate. Default: portredirect
@@ -85,9 +87,9 @@ quic-listen-host = "0.0.0.0"
 # allowed-client-ports = "80,443"
 
 # Or several clients, each with its own name, PSKs and ports. A client authenticates with its
-# name, its client-name, and its PSK, and may only ask for its own ports. The server reads this
-# file only when it starts, so restart it after adding a client: until then, the server doesn't
-# know the client, and blocks its address after 5 attempts, see the README's Troubleshooting.
+# name, its client-name, and its PSK, and may only ask for its own ports. After adding a client,
+# reload the configuration with SIGHUP: until then, the server doesn't know the client, and
+# blocks its address after 5 attempts, see the README's Troubleshooting.
 #
 # These tables come last, as the settings above don't belong to a client.
 [[clients]]
