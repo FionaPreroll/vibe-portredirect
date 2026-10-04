@@ -1,8 +1,9 @@
 name: Release binaries (Linux)
-# Static binaries of the programs for Linux on amd64, arm64 and armv7, each tested on its
-# architecture, the ARM ones in qemu. For each commit on main, they replace the files of the
-# pre-release "latest", whose tag moves to that commit. Pull requests only build and test them,
-# so a change that breaks them shows before it is merged.
+# Binaries of the programs for Linux on amd64, arm64 and armv7, each tested on its architecture,
+# the ARM ones in qemu: by default for glibc, and linked statically with musl for distributions
+# without glibc. For each commit on main, they replace the files of the pre-release "latest",
+# whose tag moves to that commit. Pull requests only build and test them, so a change that breaks
+# them shows before it is merged.
 #
 # The release changes, so release immutability must stay off (Settings, General, Releases).
 # As the tag moves, `git fetch --tags` refuses to update a local copy of it ("would clobber
@@ -26,9 +27,11 @@ defaults:
     shell: bash
 env:
   CARGO_TERM_COLOR: always
+  # The glibc builds run with this version of glibc or a newer one.
+  GLIBC_VERSION: "2.17"
 jobs:
   build:
-    name: Build and test (${{ matrix.arch }})
+    name: Build and test (${{ matrix.name }})
     # The setup below is tested on this version. The binaries don't depend on it.
     runs-on: ubuntu-24.04
     # A test that hangs in qemu mustn't hold up the runs of newer commits on main for hours.
@@ -37,22 +40,41 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - arch: amd64
+          # glibc, the default: faster than musl where the CPU limits the throughput.
+          - name: amd64
+            target: x86_64-unknown-linux-gnu
+            zig: true
+          - name: arm64
+            target: aarch64-unknown-linux-gnu
+            zig: true
+            # qemu loads the ARM version of glibc from here.
+            packages: qemu-user-static libc6-arm64-cross
+            qemu-ld-prefix: /usr/aarch64-linux-gnu
+          - name: armv7
+            target: armv7-unknown-linux-gnueabihf
+            zig: true
+            packages: qemu-user-static libc6-armhf-cross
+            qemu-ld-prefix: /usr/arm-linux-gnueabihf
+          # musl: linked statically, with the C library that Rust brings for these targets, so
+          # the binaries run on any distribution. cargo zigbuild would link zig's own build of
+          # musl instead, which was slower.
+          - name: amd64-musl
             target: x86_64-unknown-linux-musl
             packages: musl-tools
-          - arch: arm64
+          - name: arm64-musl
             target: aarch64-unknown-linux-musl
             packages: clang qemu-user-static
-          - arch: armv7
+          - name: armv7-musl
             target: armv7-unknown-linux-musleabihf
             packages: clang qemu-user-static
     env:
       TARGET: ${{ matrix.target }}
-      ARCHIVE: portredirect-linux-${{ matrix.arch }}
-      # Rust brings musl's C library for these targets, so the binaries are linked statically
-      # and run on any distribution. ring compiles C code: for x86_64 with musl-tools, for ARM
-      # with clang, as ring needs no C headers of the target then, and rust-lld links. So no
-      # cross toolchain is needed.
+      ZIG: ${{ matrix.zig }}
+      ARCHIVE: portredirect-linux-${{ matrix.name }}
+      QEMU_LD_PREFIX: ${{ matrix.qemu-ld-prefix }}
+      # ring compiles C code. For musl, on x86_64 with musl-tools, and on ARM with clang, as ring
+      # needs no C headers of the target then, and rust-lld links. So no cross toolchain is
+      # needed.
       CC_aarch64_unknown_linux_musl: clang
       CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
       CC_armv7_unknown_linux_musleabihf: clang
@@ -66,23 +88,45 @@ jobs:
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
+      - name: Install cargo-zigbuild
+        if: matrix.zig
+        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+        with:
+          tool: cargo-zigbuild
+      - name: Install zig
+        if: matrix.zig
+        # For glibc, zig compiles ring's C code and links against the given version of glibc,
+        # which cargo zigbuild takes as a suffix of the target, also for ARM without a cross
+        # toolchain. It also strips the symbols. cargo zigbuild runs it with python3 -m ziglang.
+        run: python3 -m pip install ziglang==0.16.0
       - name: Install Ubuntu packages
+        if: matrix.packages
         env:
           PACKAGES: ${{ matrix.packages }}
         run: |
           sudo apt-get update
           xargs sudo apt-get install -y <<< "$PACKAGES"
       - name: Run ARM binaries in qemu
-        if: matrix.arch != 'amd64'
+        if: ${{ !startsWith(matrix.target, 'x86_64') }}
         # The kernel starts ARM binaries with qemu, also those that the tests start.
         run: |
           sudo systemctl restart systemd-binfmt
           cat /proc/sys/fs/binfmt_misc/qemu-arm /proc/sys/fs/binfmt_misc/qemu-aarch64
       - name: Run tests
         # In release mode, like the binaries below, which reuses most of the compiled code.
-        run: cargo test --release --locked --target "$TARGET"
+        run: |
+          if [ "$ZIG" = true ]; then
+            cargo-zigbuild test --release --locked --target "$TARGET.$GLIBC_VERSION"
+          else
+            cargo test --release --locked --target "$TARGET"
+          fi
       - name: Build binaries
-        run: cargo build --release --locked --target "$TARGET" --bins
+        run: |
+          if [ "$ZIG" = true ]; then
+            cargo zigbuild --release --locked --target "$TARGET.$GLIBC_VERSION" --bins
+          else
+            cargo build --release --locked --target "$TARGET" --bins
+          fi
       - name: Pack binaries
         run: |
           mkdir "$ARCHIVE"
@@ -148,17 +192,19 @@ jobs:
           url="https://github.com/$GH_REPO"
           title="Latest build of main ($short, $date)"
           cat > notes.md <<EOF
-          Static Linux binaries of the latest commit on \`main\`, [$short]($url/commit/$GITHUB_SHA) of $date: version $version and the [changes since then]($url/blob/$GITHUB_SHA/CHANGELOG.md#unreleased).
+          Linux binaries of the latest commit on \`main\`, [$short]($url/commit/$GITHUB_SHA) of $date: version $version and the [changes since then]($url/blob/$GITHUB_SHA/CHANGELOG.md#unreleased).
           Each new commit on \`main\` replaces them.
 
-          | Archive | Architecture | For example |
+          | Architecture | glibc (default) | musl |
           |---|---|---|
-          | \`portredirect-linux-amd64.tar.gz\` | x86_64 | PCs and most servers |
-          | \`portredirect-linux-arm64.tar.gz\` | 64-bit ARM (AArch64) | Raspberry Pi 3 or newer with a 64-bit system |
-          | \`portredirect-linux-armv7.tar.gz\` | 32-bit ARM (ARMv7 or newer) | Raspberry Pi 2 or newer with a 32-bit system |
+          | x86_64: PCs and most servers | \`portredirect-linux-amd64.tar.gz\` | \`portredirect-linux-amd64-musl.tar.gz\` |
+          | 64-bit ARM (AArch64), e.g. Raspberry Pi 3 or newer with a 64-bit system | \`portredirect-linux-arm64.tar.gz\` | \`portredirect-linux-arm64-musl.tar.gz\` |
+          | 32-bit ARM (ARMv7 or newer), e.g. Raspberry Pi 2 or newer with a 32-bit system | \`portredirect-linux-armv7.tar.gz\` | \`portredirect-linux-armv7-musl.tar.gz\` |
+
+          - **glibc:** for distributions with glibc $GLIBC_VERSION or newer, i.e. practically all but those with musl, like Alpine. Faster than musl where the CPU limits the throughput.
+          - **musl:** linked statically, so they run on any distribution.
 
           Each archive holds \`portredirect_server\` and \`portredirect_client\`, with the README, the changelog and the license.
-          The programs are linked statically, so they run on any distribution.
           Update server and clients together: they must speak the same protocol version.
 
           To check a download, compare its checksum, and verify with the [GitHub CLI](https://cli.github.com) that this repository's workflow built it:
