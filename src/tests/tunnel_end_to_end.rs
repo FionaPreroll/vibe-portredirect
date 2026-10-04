@@ -3034,6 +3034,45 @@ async fn server_closes_stalled_connections() -> Result<()> {
 }
 
 #[tokio::test]
+async fn server_ends_tunnels_whose_keepalive_fails() -> Result<()> {
+    let (config_dir, _logs) = setup();
+    let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
+    // The name keeps the client's metrics apart from other tests.
+    let (name, psk) = ("keepalive-silent", "keepalive-psk-0123456789");
+    let mut config =
+        server_config_with_clients(config_dir.path(), quic_port, &[(name, &[psk], listen_port)]);
+    // Instead of a minute.
+    config.keepalive_timeout = Duration::from_millis(500);
+    let _server = spawn_server_with_handler(config, handle_quic_client_connection);
+    let metrics = METRICS.client(&name.parse().unwrap());
+    let failures = metrics.keepalive_failures.get();
+
+    with_timeout(async {
+        // The client sets up the tunnel, but never sends a PING.
+        let (_client, connection) = connect_raw(config_dir.path(), quic_port).await?;
+        let mut control_stream = authenticated_control_stream_as(&connection, name, psk).await?;
+        assert_eq!(
+            request_port(&mut control_stream, listen_port).await?,
+            listen_port
+        );
+        let end = connection.closed().await;
+        assert_eq!(
+            CloseCode::of(&end),
+            Some(CloseCode::KeepaliveFailed),
+            "{}",
+            end
+        );
+        assert!(end.to_string().contains("keepalive timed out"), "{}", end);
+
+        // The server releases the port and counts the failure.
+        wait_until_closed(listen_port).await?;
+        assert_eq!(metrics.keepalive_failures.get(), failures + 1);
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
 async fn server_closes_connections_with_protocol_violations() -> Result<()> {
     let (config_dir, _logs) = setup();
     let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());

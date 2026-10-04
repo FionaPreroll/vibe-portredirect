@@ -29,7 +29,9 @@ use crate::protocol::control::{
     receive_hello, request_listen_port, send_welcome, Greeting, CLIENT_SOFTWARE,
 };
 use crate::protocol::data_stream::{receive_connection_header, send_connection_header};
-use crate::protocol::keepalive::{run_control_channel_loop, ControlChannelEnd};
+use crate::protocol::keepalive::{
+    run_control_channel_loop, ControlChannelEnd, CONTROL_CHANNEL_TIMEOUT,
+};
 use crate::protocol::message::{
     param, read_message, write_message, Message, MessageStream, MessageType, Parameters,
     ProtocolViolation,
@@ -147,6 +149,7 @@ pub fn control_messages(data: &[u8]) -> bool {
         &mut stream,
         listener.clone(),
         Shutdown::default(),
+        CONTROL_CHANNEL_TIMEOUT,
     ));
     assert_eq!(stream.output, [MessageType::Pong as u8, 0, 0].repeat(pings));
     assert!(listener.is_cancelled());

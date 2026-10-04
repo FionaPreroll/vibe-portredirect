@@ -195,6 +195,7 @@ where
         &mut control_stream,
         listener_token.clone(),
         config.shutdown.clone(),
+        config.keepalive_timeout,
     );
     let end = tokio::select! {
         end = control_loop => Ok(end),
