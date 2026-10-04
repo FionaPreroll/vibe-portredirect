@@ -1,0 +1,22 @@
+# Tokens of the protocol for libFuzzer's -dict option, see docs/PROTOCOL.md.
+
+# Headers of the authentication messages.
+"CHALLENGE"
+"RESPONSE"
+"ACCEPTED"
+
+# A client name, with its length.
+"\x07default"
+
+# Message types and lengths on the control stream: HELLO, WELCOME, PING, PONG and DRAIN.
+"\x01\x00"
+"\x02\x00"
+"\x03\x00\x00"
+"\x04\x00\x00"
+"\x05\x00\x00"
+
+# Parameters: software, listen port, peer address (IPv4 and IPv6).
+"\x00\x01\x00"
+"\x00\x02\x00\x02"
+"\x00\x03\x00\x07\x04"
+"\x00\x03\x00\x13\x06"

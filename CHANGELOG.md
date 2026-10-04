@@ -18,6 +18,9 @@ Versions 0.4.0 to 0.7.0 were not published on crates.io; the latest published ve
 - A rate limit for new forwarded connections per external address (IPv6: per /64 network): after `--max-connection-burst-per-ip` at once (default 64), at most `--max-connection-rate-per-ip` per second (default 20). Further connections are closed right away and counted in `portredirect_server_forwarded_connections_refused_total` with the label `reason="rate_limit"`; the address limit counts as `reason="address_limit"`. Each forwarded connection makes the client connect to the destination, so this limits the load a single host can put on it.
 - Clients can trust the server's certificate by its SHA-256 fingerprint, `--quic-cert-fingerprint`, instead of a copy of `cert.der`, and by several fingerprints while the server's certificate changes. The server logs its certificate's fingerprint when it starts, and `--print-quic-cert-fingerprint` prints it, generating the certificate first if there is none. The README describes how to change the server's certificate.
 - The server's configuration file can list several clients, each with its own name, one or two PSK files (two while changing the PSK) and ports. A client can only use its own ports. Clients may share ports on purpose, e.g. an active and a standby client; the server logs which clients share which ports when it starts.
+- Fuzz targets for the parsers of the protocol, for cargo-fuzz in `fuzz/`: the authentication on both sides, `HELLO`, `WELCOME`, the control messages and the header of data streams. CI runs each for 30 seconds on pull requests and for 15 minutes once a week, and `cargo test` runs a short smoke test of them on stable Rust.
+- CI checks the dependencies with cargo-deny: known vulnerabilities, licenses that don't go with the GPL, and sources other than crates.io (`deny.toml`, `make deny`).
+- [docs/SECURITY-REVIEW.md](docs/SECURITY-REVIEW.md): the internal security review before 1.0, with what was looked at, how, and what was found.
 
 ### Changed
 
@@ -29,6 +32,8 @@ Versions 0.4.0 to 0.7.0 were not published on crates.io; the latest published ve
 - Metric names are consistent before 1.0: they start with `portredirect_client_` or `portredirect_server_` and say what they count, e.g. `portredirect_client_bytes_to_destination_total` instead of `bytes_transmitted_b_total`. All metrics are listed from the start, with 0, and each program only serves its own. Update dashboards and alerts, see the README for the new names.
 - `--print-metrics` prints the server's metrics under their new names, each summed over all clients.
 - Log messages of the programs' main functions, e.g. the client's fatal errors, have the target `portredirect::client::main` or `portredirect::server::main` instead of `portredirect_client` or `portredirect_server`. Update `RUST_LOG` filters that name the programs.
+- Neither side accepts QUIC datagrams any more, which PortRedirect doesn't use: a client could make the server keep up to 1.25 MB of them per connection, even before it authenticated.
+- quinn is built without its platform verifier, which PortRedirect doesn't use, as clients trust exactly the server's certificate: 23 fewer dependencies.
 
 ### Removed
 
@@ -38,6 +43,7 @@ Versions 0.4.0 to 0.7.0 were not published on crates.io; the latest published ve
 
 - A client with a wrong PSK could take the server's rejection for a temporary failure and keep reconnecting, if the end of its control stream arrived before the reason. The server now closes the connection with the reason first, also after an authentication timeout.
 - A client that stalled the TLS handshake, e.g. on purpose, held up all new connections to the server as long as the handshake lasted, 30 seconds for a client that stopped responding, because the server completed each handshake before accepting the next connection. Handshakes now run independently and are aborted after 10 seconds, which counts as a failed attempt for blocking the address.
+- Text from the peer could add lines to the other side's log: e.g. a client, even before authenticating, could close its connection with a reason that contains line breaks, which the server logged as part of the error, and make the lines look like the server's own. Log messages now escape control characters, e.g. a line break as `\n`.
 
 ## [0.7.0] - 2026-10-03
 

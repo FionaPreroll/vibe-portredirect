@@ -3,6 +3,7 @@
 use anyhow::Error;
 use secrecy::SecretString;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::Notify;
 use tokio::time::{timeout, Duration};
@@ -62,12 +63,17 @@ async fn test_quic_end_to_end_minimal() {
     // Create a Notify instance to signal when a connection is established.
     let notify = Arc::new(Notify::new());
     let notify_clone = Arc::clone(&notify);
+    // Whether the client accepts datagrams, which neither side reads.
+    let client_accepts_datagrams = Arc::new(AtomicBool::new(true));
+    let client_accepts_datagrams_clone = Arc::clone(&client_accepts_datagrams);
 
     info!("Starting server task");
     let server_handle = tokio::spawn(async move {
         info!("Server: Starting server");
-        match server::run_quic_server(server_config, move |_, _conn| {
+        match server::run_quic_server(server_config, move |_, conn| {
             let notify_inner = Arc::clone(&notify_clone);
+            let accepts_datagrams = conn.max_datagram_size().is_some();
+            client_accepts_datagrams_clone.store(accepts_datagrams, Ordering::Relaxed);
             async move {
                 info!("Server: New connection established");
                 notify_inner.notify_one();
@@ -84,8 +90,11 @@ async fn test_quic_end_to_end_minimal() {
     info!("Starting client task");
     let client_handle: tokio::task::JoinHandle<Result<(), Error>> = tokio::spawn(async move {
         info!("Client: Starting client");
-        match client::run_quic_client(client_config, |_, _conn| async move {
+        match client::run_quic_client(client_config, |_, conn| async move {
             info!("Client: Connection established");
+            if conn.max_datagram_size().is_some() {
+                return Err(anyhow::anyhow!("the server accepts datagrams"));
+            }
             Ok(())
         })
         .await
@@ -102,6 +111,7 @@ async fn test_quic_end_to_end_minimal() {
         "Server did not signal within timeout"
     );
     info!("Server and client signaled connection!");
+    assert!(!client_accepts_datagrams.load(Ordering::Relaxed));
 
     // Await the client result with a timeout.
     info!("Waiting for client to finish (5s timeout)");

@@ -17,7 +17,7 @@ Bugs without security impact can be reported as normal issues.
 ## Security Model
 
 What PortRedirect is designed to protect, and under which assumptions.
-The wire protocol is described in [docs/PROTOCOL.md](docs/PROTOCOL.md).
+The wire protocol is described in [docs/PROTOCOL.md](docs/PROTOCOL.md), and [docs/SECURITY-REVIEW.md](docs/SECURITY-REVIEW.md) describes the internal security review before 1.0.
 
 **Assets:** the forwarded data, the destination service behind the client, and the server's TCP ports.
 

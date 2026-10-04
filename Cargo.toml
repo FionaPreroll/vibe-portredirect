@@ -24,7 +24,9 @@ http-body-util = "0.1.5"
 hyper = { version = "1.9.0", features = ["server", "http1"] }
 hyper-util = { version = "0.1.21", features = ["tokio"] }
 prometheus = { version = "0.14.0", default-features = false }
-quinn = { version = "0.11.12", features = ["futures-io"] }
+# The default features without platform-verifier: clients trust exactly the server's certificate,
+# not the operating system's trust store.
+quinn = { version = "0.11.12", default-features = false, features = ["bloom", "futures-io", "log", "runtime-tokio", "rustls-ring"] }
 rcgen = { version = "0.14.10", features = ["pem", "crypto"] }
 ring = "0.17.14"
 rustls = { version = "0.23.45", default-features = false, features = ["logging", "ring", "std"] }
@@ -39,7 +41,8 @@ tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 [lints.rust]
 # cargo-llvm-cov sets cfg(coverage). Code coverage can't see into async functions with
 # #[instrument], so they use #[cfg_attr(not(coverage), tracing::instrument(...))] instead.
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(coverage)"] }
+# cargo fuzz sets cfg(fuzzing), which makes the entry points for fuzzing public, see fuzz/.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(coverage)", "cfg(fuzzing)"] }
 
 [dev-dependencies]
 tempfile = "3.17.1"

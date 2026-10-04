@@ -1,0 +1,41 @@
+# Checks of the dependencies with cargo deny, run by .github/workflows/deny.yml:
+# - advisories: known vulnerabilities, unmaintained or unsound crates, yanked versions
+# - licenses: only licenses compatible with the GPL-3.0-only of PortRedirect
+# - bans: no wildcard version requirements
+# - sources: crates only from crates.io
+#
+# Documentation: https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+# All targets, as release builds exist for Linux, macOS and Windows.
+all-features = true
+
+[advisories]
+# An exception needs an entry here, with the reason, e.g.
+# { id = "RUSTSEC-0000-0000", reason = "..." }
+ignore = []
+
+[licenses]
+# Each license must allow combining the crate with GPL-3.0-only code.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "GPL-3.0-only",
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.9
+
+[bans]
+# Several versions of a crate cost build time and size, but aren't a risk on their own.
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
