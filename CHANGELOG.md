@@ -51,6 +51,7 @@ Versions 0.4.0 to 0.7.0 were not published on crates.io; the latest published ve
 ### Fixed
 
 - A client with a wrong PSK could take the server's rejection for a temporary failure and keep reconnecting, if the end of its control stream arrived before the reason. The server now closes the connection with the reason first, also after an authentication timeout.
+- The same could happen, rarely, when the server ended a tunnel, e.g. after an unexpected control message: the client took the end of the control stream for a failed keepalive and connected again, although a protocol violation is permanent. The server now closes the connection first there, too.
 - A client that stalled the TLS handshake, e.g. on purpose, held up all new connections to the server as long as the handshake lasted, 30 seconds for a client that stopped responding, because the server completed each handshake before accepting the next connection. Handshakes now run independently and are aborted after 10 seconds, which counts as a failed attempt for blocking the address.
 - Text from the peer could add lines to the other side's log: e.g. a client, even before authenticating, could close its connection with a reason that contains line breaks, which the server logged as part of the error, and make the lines look like the server's own. Log messages now escape control characters, e.g. a line break as `\n`.
 
