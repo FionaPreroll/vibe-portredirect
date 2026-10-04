@@ -9,8 +9,10 @@ use std::future::Future;
 use std::io::ErrorKind;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use std::task::{Context, Poll};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -38,7 +40,7 @@ use crate::quic::server::{
 };
 use crate::quic::CongestionControl;
 use crate::server::auth::authenticate_quic_client;
-use crate::server::client_handler::handle_quic_client_connection;
+use crate::server::client_handler::{handle_quic_client_connection, serve_client};
 use crate::server::clients::{ClientEntry, ClientList};
 use crate::server::metrics::{ClientMetrics, METRICS};
 use crate::server::{ForwardingLimits, PortSpec};
@@ -2701,6 +2703,90 @@ async fn server_closes_connections_with_protocol_violations() -> Result<()> {
 
         // The server no longer listens on the port.
         wait_until_closed(listen_port).await
+    })
+    .await
+}
+
+/// The reading half of a control stream, which reports, when the stream ends, whether its
+/// connection was closed before.
+struct EndWatch {
+    read: Compat<quinn::RecvStream>,
+    connection: quinn::Connection,
+    closed_before: mpsc::UnboundedSender<bool>,
+}
+
+impl AsyncRead for EndWatch {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.read).poll_read(cx, buf)
+    }
+}
+
+impl Drop for EndWatch {
+    fn drop(&mut self) {
+        let closed = self.connection.close_reason().is_some();
+        let _ = self.closed_before.send(closed);
+    }
+}
+
+#[tokio::test]
+async fn server_closes_connections_before_their_control_streams_end() -> Result<()> {
+    // Otherwise the client could read the end of the control stream before the reason, e.g. a
+    // protocol violation, and take it for a failed keepalive.
+    let (config_dir, _logs) = setup();
+    let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
+    let (closed_before, mut closed_before_end) = mpsc::unbounded_channel();
+    let config = server_config(
+        config_dir.path(),
+        quic_port,
+        vec![PortSpec::Single(listen_port)],
+        ForwardingLimits::default(),
+    );
+    let _server = spawn_server_with_handler(config, move |config, connection| {
+        let closed_before = closed_before.clone();
+        async move {
+            let (stream, client) =
+                authenticate_quic_client(Arc::clone(&config), connection.clone()).await?;
+            let read = EndWatch {
+                read: stream.read,
+                connection: connection.clone(),
+                closed_before,
+            };
+            let control_stream = BiStream::new(read, stream.write, stream.name);
+            serve_client(config, connection, control_stream, client.name).await
+        }
+    });
+
+    with_timeout(async {
+        // A malformed HELLO, and an unexpected message in an established tunnel.
+        for established in [false, true] {
+            let (_client, connection) = connect_raw(config_dir.path(), quic_port).await?;
+            let mut control_stream = authenticated_control_stream(&connection).await?;
+            if established {
+                request_port(&mut control_stream, listen_port).await?;
+                let hello_again = Message::new(MessageType::Hello, Vec::new());
+                write_message(&mut control_stream, &hello_again).await?;
+            } else {
+                control_stream.write_all(&[1, 0, 3, 0, 2, 0]).await?;
+                control_stream.flush().await?;
+            }
+            let end = connection.closed().await;
+            assert_eq!(
+                CloseCode::of(&end),
+                Some(CloseCode::ProtocolViolation),
+                "{}",
+                end
+            );
+            assert!(
+                closed_before_end.recv().await.unwrap(),
+                "the control stream ended before the connection was closed (established: {})",
+                established
+            );
+        }
+        Ok(())
     })
     .await
 }

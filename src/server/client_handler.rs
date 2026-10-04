@@ -67,7 +67,7 @@ pub async fn handle_quic_client_connection(
 }
 
 /// Sets up the tunnel for an authenticated client and keeps it up until the connection ends.
-async fn serve_client<S>(
+pub(crate) async fn serve_client<S>(
     config: Arc<ServerConfig<ServerAppData>>,
     quic_conn: quinn::Connection,
     mut control_stream: S,
@@ -186,9 +186,12 @@ where
 
     // 5. Run the control channel loop.
     let end =
-        run_control_channel_loop(control_stream, listener_token, config.shutdown.clone()).await;
+        run_control_channel_loop(&mut control_stream, listener_token, config.shutdown.clone())
+            .await;
 
-    // Close the QUIC connection after the control channel finishes.
+    // Close the QUIC connection after the control channel finishes, and only then end the
+    // control stream: the client could read its end before the reason, e.g. an unexpected
+    // message, and take it for a failed keepalive.
     debug!("Closing QUIC client connection from {}: {:?}", remote, end);
     let reason = match &end {
         ControlChannelEnd::Timeout => "keepalive timed out",
@@ -196,6 +199,7 @@ where
         ControlChannelEnd::StreamClosed(_) => "tunnel closed",
     };
     end.close_code().close(&quic_conn, reason);
+    drop(control_stream);
     if end.close_code() == CloseCode::KeepaliveFailed {
         metrics.keepalive_failures.inc();
     }
