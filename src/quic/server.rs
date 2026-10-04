@@ -155,15 +155,21 @@ pub fn load_or_generate_quic_cert(
     }
 }
 
+/// Generates the server's certificate in `config_dir`, issued for `cert_alt_name`, unless there
+/// is one, like the server when it starts.
+pub fn ensure_server_certificate(config_dir: &Path, cert_alt_name: String) -> Result<()> {
+    load_or_generate_quic_cert(
+        cert_alt_name,
+        config_dir.join(KEY_FILE),
+        config_dir.join(CERT_FILE),
+    )?;
+    Ok(())
+}
+
 /// Returns the fingerprint of the server's certificate in `config_dir`, i.e. of the file, as
-/// `sha256sum` prints it. Like the server when it starts, generates the certificate first if
-/// there is none, issued for `cert_alt_name`.
-pub fn server_fingerprint(config_dir: &Path, cert_alt_name: String) -> Result<CertFingerprint> {
+/// `sha256sum` prints it.
+pub fn server_fingerprint(config_dir: &Path) -> Result<CertFingerprint> {
     let file = config_dir.join(CERT_FILE);
-    load_or_generate_quic_cert(cert_alt_name, config_dir.join(KEY_FILE), file.clone())?;
-    // Read from the file rather than taken from the call above, which returns the same bytes:
-    // CodeQL takes what functions named after certificates return for secrets, and would report
-    // printing the fingerprint as logging them.
     let der = fs::read(&file).with_context(|| format!("failed to read {}", file.display()))?;
     Ok(CertFingerprint::of(&der))
 }
@@ -597,18 +603,19 @@ mod tests {
     fn test_fingerprint_of_the_certificate_in_the_configuration_directory() -> Result<()> {
         let temp_dir = tempfile::tempdir()?;
 
-        // Generated first, if there is no certificate yet, then loaded.
-        let generated = server_fingerprint(temp_dir.path(), "localhost".into())?;
+        assert!(server_fingerprint(temp_dir.path()).is_err());
+
+        // Generated first, if there is no certificate yet, then kept.
+        ensure_server_certificate(temp_dir.path(), "localhost".into())?;
+        let generated = server_fingerprint(temp_dir.path())?;
         let certificate = fs::read(temp_dir.path().join(CERT_FILE))?;
         assert_eq!(generated, CertFingerprint::of(&certificate));
-        assert_eq!(
-            server_fingerprint(temp_dir.path(), "other".into())?,
-            generated
-        );
+        ensure_server_certificate(temp_dir.path(), "other".into())?;
+        assert_eq!(server_fingerprint(temp_dir.path())?, generated);
 
         // Like the server, it doesn't replace a certificate whose key is missing.
         fs::remove_file(temp_dir.path().join(KEY_FILE))?;
-        assert!(server_fingerprint(temp_dir.path(), "localhost".into()).is_err());
+        assert!(ensure_server_certificate(temp_dir.path(), "localhost".into()).is_err());
         assert_eq!(fs::read(temp_dir.path().join(CERT_FILE))?, certificate);
         Ok(())
     }
