@@ -8,6 +8,7 @@ It doesn't replace a review by someone outside the project, which #29 asks for, 
 ## Scope
 
 - **Version:** 0.7.0 with the changes up to this review: the rate limit for new forwarded connections (#25) and certificate fingerprints (#30).
+  Later changes up to 1.0.0-rc.1 weren't reviewed this way. They include IPv6 (#26), JSON logs and the client's connection log (#28), and reloading the server's configuration on `SIGHUP` (#37). Their tests run in CI, and the fuzz targets still cover all parsers of input from the peer.
 - **Protocol:** authentication, setting up the tunnel, control messages, data streams, close codes and limits.
 - **Code:** everything in `src/` that handles input from the network, configuration files, PSKs, keys and certificates, logs and metrics.
 - **Dependencies:** their features, licenses, sources and known advisories.
@@ -45,7 +46,7 @@ It doesn't replace a review by someone outside the project, which #29 asks for, 
 - **What:** a peer can close a QUIC connection with a reason, any text. quinn makes the reason part of the error, and PortRedirect logs such errors, e.g. the server: `Incoming connection dropped: … closed by peer: <reason>`.
 - **Who:** any client, before it authenticates, as the TLS handshake needs no client certificate. Also the server, towards its clients.
 - **Impact:** tracing-subscriber escapes ANSI escape sequences, but not line breaks. So a client could add lines to the server's log that look like the server's own, e.g. that a client authenticated, and mislead whoever reads the log. The tunnel itself isn't affected.
-- **Fix:** both programs format all fields of their log messages, including the message itself, with control characters escaped, e.g. a line break as `\n` (`escaping_fields` in `src/lib.rs`). This also covers errors logged in the future. A test logs such a reason and checks that it stays on one line.
+- **Fix:** both programs format all fields of their log messages, including the message itself, with control characters escaped, e.g. a line break as `\n` (`escaping_fields`, now in `src/logging.rs`). This also covers errors logged in the future. A test logs such a reason and checks that it stays on one line.
 
 ### 2. Each connection could buffer 1.25 MB of datagrams before authentication
 
