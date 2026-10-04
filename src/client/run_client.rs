@@ -12,6 +12,7 @@ use crate::protocol::close::CloseCode;
 use crate::protocol::message::ProtocolViolation;
 use crate::quic::client::{ClientConfig, QuicClient};
 use crate::quic::fingerprint::CertFingerprint;
+use crate::quic::CongestionControl;
 use crate::shutdown::Shutdown;
 
 use anyhow::{Context, Result};
@@ -38,6 +39,8 @@ pub struct ClientSettings {
     pub cert_fingerprints: Vec<CertFingerprint>,
     /// Maximum number of concurrently forwarded connections.
     pub max_connections: usize,
+    /// How fast the client sends.
+    pub congestion_control: CongestionControl,
     /// Address to serve Prometheus metrics on, if any.
     pub metrics_addr: Option<SocketAddr>,
     /// Delays between reconnection attempts.
@@ -74,6 +77,7 @@ pub async fn run_client(settings: ClientSettings) -> Result<()> {
     );
     quic_client_config.shutdown = shutdown.clone();
     quic_client_config.cert_fingerprints = settings.cert_fingerprints;
+    quic_client_config.congestion_control = settings.congestion_control;
     let client = QuicClient::new(quic_client_config)?;
 
     let mut backoff = settings.reconnect_backoff;

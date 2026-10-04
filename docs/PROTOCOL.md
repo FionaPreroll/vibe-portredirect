@@ -264,6 +264,7 @@ Addresses are counted per IPv4 address and per IPv6 /64 network, because a singl
 | QUIC connections, including unauthenticated ones          | 64                  | `--max-quic-connections`   | New connections are refused.                                         |
 | QUIC connections per address                              | 8                   |                            | New connections are refused.                                         |
 | Time to complete the TLS handshake                        | 10 s                |                            | The connection is closed, which counts as a failed attempt.          |
+| Data a client may send before it has authenticated        | 64 KiB              |                            | QUIC's flow control holds back more until the server has read it.    |
 | Failed handshakes or authentication attempts per address  | 5 within 10 minutes |                            | The address is blocked for 10 minutes: its connections are refused.  |
 | Forwarded connections per client                          | 512                 | `--max-connections`        | New external connections wait in the listen backlog.                 |
 | Forwarded connections per external address                | 64                  | `--max-connections-per-ip` | New external connections are closed right away.                      |

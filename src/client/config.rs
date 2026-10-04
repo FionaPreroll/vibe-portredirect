@@ -20,6 +20,7 @@ use crate::config::{
 use crate::protocol::auth::ClientName;
 use crate::psk::{PskArgs, PskSource, PSK_ENV_VAR};
 use crate::quic::fingerprint::CertFingerprint;
+use crate::quic::CongestionControl;
 use crate::shutdown::DEFAULT_SHUTDOWN_TIMEOUT;
 use crate::PortRedirectProtocol;
 
@@ -115,6 +116,12 @@ pub struct Args {
     )]
     pub max_connections: u32,
 
+    /// How fast to send to the server. bbr is much faster on links that lose packets for other
+    /// reasons than congestion, e.g. wireless ones. Set the server's option, too, for the other
+    /// direction.
+    #[clap(long, value_enum, default_value_t = CongestionControl::Cubic)]
+    pub congestion_control: CongestionControl,
+
     /// Name the server's TLS certificate must be issued for (Subject Alt Name), if it differs
     /// from --quic-remote-host. Must match the server's --quic-cert-hostname. Not checked with
     /// --quic-cert-fingerprint.
@@ -158,6 +165,7 @@ pub struct ConfigFile {
     pub provide_metrics: Option<bool>,
     pub metrics_listen: Option<SocketAddr>,
     pub max_connections: Option<NonZeroU32>,
+    pub congestion_control: Option<CongestionControl>,
     pub quic_cert_hostname: Option<String>,
     #[serde(default, deserialize_with = "config::optional_parsed_list")]
     pub quic_cert_fingerprint: Option<Vec<CertFingerprint>>,
@@ -196,6 +204,7 @@ pub struct Config {
     /// Address to serve Prometheus metrics on, if any.
     pub metrics_addr: Option<SocketAddr>,
     pub max_connections: usize,
+    pub congestion_control: CongestionControl,
     pub quic_cert_hostname: Option<String>,
     /// Fingerprints of the server certificates to trust instead of cert.der, if any.
     pub quic_cert_fingerprints: Vec<CertFingerprint>,
@@ -313,6 +322,12 @@ impl Config {
             ),
             metrics_addr: provide_metrics.then_some(metrics_listen),
             max_connections: max_connections as usize,
+            congestion_control: merge(
+                matches,
+                "congestion_control",
+                args.congestion_control,
+                file.congestion_control,
+            ),
             quic_cert_hostname: merge_option(
                 matches,
                 "quic_cert_hostname",
@@ -380,6 +395,7 @@ mod tests {
         provide-metrics = true
         metrics-listen = "127.0.0.1:9999"
         max-connections = 20
+        congestion-control = "bbr"
         quic-cert-hostname = "tunnel"
         quic-cert-fingerprint = "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         psk-file = "psk"
@@ -424,6 +440,7 @@ mod tests {
             config.max_connections,
             PortRedirectProtocol::DEFAULT_MAX_FORWARDED_CONNECTIONS
         );
+        assert_eq!(config.congestion_control, CongestionControl::Cubic);
         assert_eq!(config.quic_cert_hostname, None);
         assert!(config.quic_cert_fingerprints.is_empty());
         assert!(
@@ -452,6 +469,7 @@ mod tests {
         assert_eq!(config.quic_local_port, 5000);
         assert_eq!(config.metrics_addr, Some("127.0.0.1:9999".parse()?));
         assert_eq!(config.max_connections, 20);
+        assert_eq!(config.congestion_control, CongestionControl::Bbr);
         assert_eq!(config.quic_cert_hostname.as_deref(), Some("tunnel"));
         assert_eq!(config.quic_cert_fingerprints, [abc()]);
         assert!(matches!(&config.psk, PskSource::File(path) if path == &dir.path().join("psk")));
@@ -489,6 +507,8 @@ mod tests {
                 "127.0.0.1:9898",
                 "--max-connections",
                 "30",
+                "--congestion-control",
+                "cubic",
                 "--quic-cert-hostname",
                 "localhost",
                 "--quic-cert-fingerprint",
@@ -516,6 +536,8 @@ mod tests {
         assert_eq!(config.quic_local_port, 0);
         assert_eq!(config.metrics_addr, Some("127.0.0.1:9898".parse()?));
         assert_eq!(config.max_connections, 30);
+        // Overrides the file, though it is the default.
+        assert_eq!(config.congestion_control, CongestionControl::Cubic);
         assert_eq!(config.quic_cert_hostname.as_deref(), Some("localhost"));
         assert_eq!(
             config.quic_cert_fingerprints,

@@ -4,7 +4,7 @@
 
 use crate::protocol::auth::{server_authenticate, session_binding, AuthenticatedClient};
 use crate::protocol::close::CloseCode;
-use crate::quic::server::ServerConfig;
+use crate::quic::server::{raise_receive_window, ServerConfig};
 use crate::PortRedirectProtocol;
 use crate::{app_data::ServerAppData, bi_stream::BiStream};
 
@@ -51,6 +51,8 @@ pub async fn authenticate_quic_client(
         }
     };
     let control_stream = control_stream.context("authenticated without a control stream")?;
+    // Until now, the client could only send a little.
+    raise_receive_window(&conn);
     let psk_count = config
         .app_data
         .clients

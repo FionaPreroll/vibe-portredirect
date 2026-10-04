@@ -70,6 +70,7 @@ pub async fn main() -> Result<()> {
         app_data.clone(),
     );
     quic_config.shutdown = Shutdown::on_signals(config.shutdown_timeout);
+    quic_config.congestion_control = config.congestion_control;
 
     // Spawn the metrics printer task.
     if config.print_metrics {

@@ -20,6 +20,7 @@ use crate::config::{
 };
 use crate::protocol::auth::{ClientName, MAX_PSKS_PER_CLIENT};
 use crate::psk::{PskArgs, PskSource, PSK_ENV_VAR};
+use crate::quic::CongestionControl;
 use crate::server::clients::{ClientEntry, ClientList};
 use crate::server::{ForwardingLimits, PortSpec};
 use crate::shutdown::DEFAULT_SHUTDOWN_TIMEOUT;
@@ -136,6 +137,12 @@ pub struct Args {
     #[clap(long, default_value_t = ForwardingLimits::DEFAULT_IDLE_TIMEOUT.as_secs())]
     pub idle_timeout: u64,
 
+    /// How fast to send to clients. bbr is much faster on links that lose packets for other
+    /// reasons than congestion, e.g. wireless ones. Set the clients' option, too, for the other
+    /// direction.
+    #[clap(long, value_enum, default_value_t = CongestionControl::Cubic)]
+    pub congestion_control: CongestionControl,
+
     /// Print metrics to stderr every second, if any value changes.
     #[clap(long)]
     pub print_metrics: bool,
@@ -179,6 +186,7 @@ pub struct ConfigFile {
     pub max_connection_rate_per_ip: Option<u32>,
     pub max_connection_burst_per_ip: Option<NonZeroU32>,
     pub idle_timeout: Option<u64>,
+    pub congestion_control: Option<CongestionControl>,
     pub print_metrics: Option<bool>,
     pub provide_metrics: Option<bool>,
     pub metrics_listen: Option<SocketAddr>,
@@ -237,6 +245,7 @@ pub struct Config {
     pub clients: Clients,
     pub max_quic_connections: usize,
     pub forwarding_limits: ForwardingLimits,
+    pub congestion_control: CongestionControl,
     pub print_metrics: bool,
     /// Address to serve Prometheus metrics on, if any.
     pub metrics_addr: Option<SocketAddr>,
@@ -473,6 +482,12 @@ impl Config {
                 max_connection_burst_per_ip,
                 idle_timeout: (idle_timeout > 0).then(|| Duration::from_secs(idle_timeout)),
             },
+            congestion_control: merge(
+                matches,
+                "congestion_control",
+                args.congestion_control,
+                file.congestion_control,
+            ),
             print_metrics: merge(
                 matches,
                 "print_metrics",
@@ -568,6 +583,7 @@ mod tests {
         max-connection-rate-per-ip = 0
         max-connection-burst-per-ip = 5
         idle-timeout = 0
+        congestion-control = "bbr"
         print-metrics = true
         provide-metrics = true
         metrics-listen = "127.0.0.1:9999"
@@ -602,6 +618,7 @@ mod tests {
         }
         assert_eq!(config.max_quic_connections, 64);
         assert_eq!(config.forwarding_limits, ForwardingLimits::default());
+        assert_eq!(config.congestion_control, CongestionControl::Cubic);
         assert!(!config.print_metrics);
         assert_eq!(config.metrics_addr, None);
         assert_eq!(config.shutdown_timeout, DEFAULT_SHUTDOWN_TIMEOUT);
@@ -642,6 +659,7 @@ mod tests {
                 idle_timeout: None,
             }
         );
+        assert_eq!(config.congestion_control, CongestionControl::Bbr);
         assert!(config.print_metrics);
         assert_eq!(config.metrics_addr, Some("127.0.0.1:9999".parse()?));
         assert_eq!(config.shutdown_timeout, Duration::from_secs(30));
@@ -682,6 +700,8 @@ mod tests {
                 "8",
                 "--idle-timeout",
                 "60",
+                "--congestion-control",
+                "cubic",
                 "--metrics-listen",
                 DEFAULT_METRICS_LISTEN,
                 "--shutdown-timeout",
@@ -718,6 +738,8 @@ mod tests {
                 idle_timeout: Some(Duration::from_secs(60)),
             }
         );
+        // Overrides the file, though it is the default.
+        assert_eq!(config.congestion_control, CongestionControl::Cubic);
         // A flag can only switch a setting on.
         assert!(config.print_metrics);
         // Overrides the file, though it is the default.
@@ -831,6 +853,27 @@ mod tests {
             let message = error_with_file(&text, args);
             assert!(message.contains(expected), "{:?}: {}", args, message);
         }
+    }
+
+    #[test]
+    fn test_congestion_control_must_be_known() {
+        let message = error_with_file("congestion-control = \"reno\"", &[]);
+        assert!(message.contains("unknown variant `reno`"), "{}", message);
+        let args = [
+            "--listen-host",
+            "::",
+            "--allowed-client-ports",
+            "443",
+            "--psk",
+            "secret",
+            "--congestion-control",
+            "reno",
+        ];
+        let err = config(&args)
+            .unwrap_err()
+            .downcast::<clap::Error>()
+            .unwrap();
+        assert_eq!(err.kind(), ErrorKind::InvalidValue);
     }
 
     #[test]

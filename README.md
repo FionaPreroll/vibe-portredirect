@@ -83,6 +83,7 @@ portredirect_server \
 - **`--print-metrics`:** Print the metrics to stderr when they change, each summed over all clients.
 - **`--shutdown-timeout`:** Seconds that running forwarded connections may take to finish when the server shuts down (default 5), see [Shutting Down](#shutting-down).
 - **`--log-level`:** `off`, `error`, `warn`, `info` (default), `debug` or `trace`. Logs go to stderr. The `RUST_LOG` environment variable, if set, takes precedence and can set levels per module, e.g. `RUST_LOG=info,portredirect::forward=debug`.
+- **`--congestion-control`:** How fast the server sends: `cubic` (default) or `bbr`, which is much faster on links that lose packets, e.g. wireless ones, see [Performance](#performance).
 
 **Limits** for the resources a single host can use:
 
@@ -120,7 +121,7 @@ portredirect_client \
 - **`--config-dir`:** Where the server's certificate `cert.der` is read from, unless `--quic-cert-fingerprint` is given (default `~/.config/portredirect`).
 - **`--max-connections`:** Maximum number of concurrently forwarded connections (default 512).
 - **`--provide-metrics`:** Serve Prometheus metrics at `http://127.0.0.1:9898/metrics`, or at the address given with `--metrics-listen`, see [Metrics](#metrics). The endpoint has no authentication, only make it reachable from trusted networks.
-- **`--shutdown-timeout`** and **`--log-level`:** As for the server.
+- **`--shutdown-timeout`**, **`--log-level`** and **`--congestion-control`:** As for the server. `--congestion-control` decides how fast each side sends, so set it on both.
 
 > **Important:** The client must trust the server's certificate. Start the server first to generate it, then give the client the certificate's fingerprint with `--quic-cert-fingerprint`, see [Server Certificate](#server-certificate).
 > Or copy **only the certificate** `~/.config/portredirect/cert.der` from the server to the client's configuration directory (by default the same path).
@@ -292,6 +293,18 @@ All metrics are listed from the start, with 0. Metrics of the server's clients h
 | `bytes_from_destination_total`                    | counter | Bytes received from the destination.                                                |
 
 From 1.0 on, the names and labels of the metrics only change with a new major version.
+
+### Performance
+
+A single forwarded connection reaches about 1 Gbit/s at 50 ms round-trip time and 400 Mbit/s at 150 ms, more connections together more, as far as the CPUs allow. [docs/PERFORMANCE.md](docs/PERFORMANCE.md) has the measurements. Two settings make a difference:
+
+- **UDP buffers:** PortRedirect asks the operating system for 4 MiB socket buffers, so datagrams that arrive in bursts aren't lost. Linux allows only 208 KiB by default, and PortRedirect logs a hint then. On fast links, allow more on both machines, and make it permanent in `/etc/sysctl.d/`:
+
+  ```sh
+  sudo sysctl -w net.core.rmem_max=4194304 net.core.wmem_max=4194304
+  ```
+
+- **Packet loss:** the default congestion controller, CUBIC, takes every lost packet for congestion, like TCP: with 1 % loss, the tunnel slows down to a few Mbit/s. On links that lose packets for other reasons, e.g. wireless or long-distance ones, use `--congestion-control bbr` on the server and the client, which kept hundreds of Mbit/s in the same conditions. quinn, the QUIC implementation, marks BBR experimental.
 
 ### PSK Best Practices
 
