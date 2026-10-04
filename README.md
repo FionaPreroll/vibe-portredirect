@@ -244,6 +244,7 @@ Each client names itself with `--client-name`, or `client-name` in its configura
 A client can only use its own ports, so it can't take over another client's port, e.g. while that client reconnects.
 
 - **Standby:** Clients may share ports on purpose, like `web` and `web-standby` above, e.g. for a second machine that takes over when the first one fails. Whichever client connects first gets a port; the other one keeps trying to connect (see [Reconnects and Exit Codes](#reconnects-and-exit-codes)) and gets the port once it is free. The server logs which clients share which ports when it starts, so an overlap by mistake doesn't go unnoticed.
+- **Adding a client:** Add it to the server's configuration file and restart the server, which reads the file only when it starts. Until then, the server doesn't know the client's name and rejects it, and repeated attempts get the client's address blocked, see [Troubleshooting](#the-server-refuses-new-connections).
 - **Changing a PSK:** A client can have two PSK files while its PSK changes, like `mail` above. Add the new PSK file on the server and restart it, switch the client to the new PSK, then remove the old file from the server's configuration.
 - **Logs:** The server's log messages name the client of each connection.
 
@@ -379,6 +380,57 @@ Both programs accept the PSK from one of these sources:
 - **`--psk <PSK>`**: Avoid this outside of testing. Command-line arguments are visible to every local user in the process list (`ps`, `/proc/<pid>/cmdline`) and end up in shell histories, so PortRedirect warns when it is used.
 
 A PSK given on the command line or in the environment takes precedence over the configuration file.
+
+## Troubleshooting
+
+Both programs log at the `info` level by default. `--log-level debug`, or `RUST_LOG=debug`, logs more details, e.g. why the server refused a connection, and the [metrics](#metrics) count most problems, too.
+
+### The Server Refuses New Connections
+
+New clients, or clients that connect again, e.g. after a restart, can't connect, while tunnels that are up keep working. The client logs this, and keeps trying with growing delays:
+
+```
+WARN … Disconnected from the server: failed to connect: aborted by peer: the server refused to accept a new connection. Reconnecting in 1.1s
+```
+
+The server refuses a connection before the TLS handshake, for one of these reasons:
+
+| Reason                                | When                                                                              | Until                                          | Metric label                |
+| ------------------------------------- | --------------------------------------------------------------------------------- | ---------------------------------------------- | --------------------------- |
+| The address is blocked                | 5 failed handshakes or authentication attempts from the address within 10 minutes | 10 minutes have passed, or the server restarts | `reason="blocked"`          |
+| Too many connections from the address | 8 QUIC connections from the address, including ones that aren't authenticated yet | one of them ends                               | `reason="address_limit"`    |
+| Too many connections                  | `--max-quic-connections`, 64 by default                                           | one of them ends                               | `reason="connection_limit"` |
+| The server shuts down                 | e.g. for an update                                                                | it is back                                     | `reason="shutting_down"`    |
+
+Addresses count per IPv4 address and per IPv6 /64 network, so clients behind the same NAT share them: a single client that fails to authenticate gets the address blocked for all of them.
+A client that crashed keeps its connection until the server notices, after 30 seconds without a sign of life.
+
+These count as failed attempts:
+
+- **A client name the server doesn't know**, e.g. of a new client that isn't in the server's configuration file yet. The server reads its configuration only when it starts, so restart it after adding a client.
+- **A wrong PSK.**
+- **A failed TLS handshake**, e.g. because the client doesn't trust the server's certificate, or speaks another protocol version.
+- **A handshake or authentication that doesn't finish**, within 10 seconds or because the client breaks it off.
+
+A client that the server rejects exits with code 1, see [Reconnects and Exit Codes](#reconnects-and-exit-codes). Docker, or a service manager, that restarts it makes it try again, so a wrong setting gets the address blocked within minutes.
+
+To find the reason:
+
+- **Server log:** The server warns about each failed attempt, and when it blocks an address:
+  ```
+  WARN … Incoming connection dropped: failed to authenticate PR QUIC client from 198.51.100.7:50710: authentication rejected: unknown client name "office"
+  WARN … Blocking 198.51.100.7 for 600s after 5 failed handshakes or authentication attempts
+  ```
+  It also warns when it reaches `--max-quic-connections`, at most once a minute. The refusals themselves, with their reasons, are only logged at the `debug` level.
+- **Client log:** The rejected client only learns that its authentication failed, not whether its name or its PSK is wrong; the server's log says which:
+  ```
+  ERROR … connecting again would fail the same way, giving up: tunnel failed: failed to authenticate against PR QUIC server: failed to receive acceptance: connection lost: closed by peer: authentication failed (code 1)
+  ```
+- **Metrics:** `portredirect_server_quic_connections_refused_total` counts the refused connections by the reasons above, `portredirect_server_authentication_failures_total` the failed attempts.
+
+To recover, correct the setting, e.g. add the client to the server's configuration file and restart the server.
+A restart also lifts all blocks, as the server keeps them only in memory, and its clients connect again. Otherwise, a block ends after 10 minutes.
+[docs/PROTOCOL.md](docs/PROTOCOL.md#limits) lists all limits.
 
 ## Authentication & Certificate Verification
 

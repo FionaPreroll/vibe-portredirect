@@ -26,6 +26,7 @@ Versions 0.4.0 to 0.7.0 were not published on crates.io; the latest published ve
 - `--congestion-control bbr`, for both programs and in their configuration files: BBR instead of CUBIC decides how fast a side sends. On links that lose packets for other reasons than congestion, it is much faster: with 1 % loss, the tunnel kept 176 to 1300 Mbit/s instead of less than 4. Set it on both sides; quinn marks BBR experimental.
 - [docs/PERFORMANCE.md](docs/PERFORMANCE.md): measurements over links with 50 and 150 ms round-trip time and 1 % loss, and the chosen values. `examples/link_emulator.rs` emulates such links without privileges, `utils/link_benchmark.py` runs the measurements, and a BATS test checks that data crosses such a link unchanged.
 - Prebuilt binaries for Linux on x86_64, 64-bit ARM and 32-bit ARM (ARMv7) of the latest commit on `main`, in the pre-release `latest`: by default for glibc 2.17 or newer, and linked statically with musl for any distribution. For each commit, CI builds them, runs the tests for their architecture and replaces the previous ones, with checksums and build provenance attestations. See the README.
+- A troubleshooting section in the README, starting with why the server refuses new connections: an address blocked after failed attempts, e.g. of a client the server doesn't know yet, or too many connections.
 
 ### Changed
 
