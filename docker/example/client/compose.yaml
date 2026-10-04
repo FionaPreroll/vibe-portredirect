@@ -22,6 +22,24 @@ services:
       PORTREDIRECT_QUIC_REMOTE_PORT: 4433
       PORTREDIRECT_QUIC_CERT_FINGERPRINT: ${PORTREDIRECT_QUIC_CERT_FINGERPRINT:?set the fingerprint of the server's certificate in .env}
       PORTREDIRECT_PSK: ${PORTREDIRECT_PSK:?set PORTREDIRECT_PSK in .env}
+      # The other settings, with their defaults; portredirect_client --help describes them.
+      # The name must be one the server knows: one of the clients in its configuration file, or
+      # default for a server with a single PSK. Otherwise the server rejects the client, Docker
+      # restarts it, and after 5 attempts the server blocks the address, also for other clients
+      # that connect from it. See the README's section Troubleshooting.
+      # PORTREDIRECT_CLIENT_NAME: default
+      # PORTREDIRECT_PSK_FILE: /run/secrets/portredirect_psk  # instead of PORTREDIRECT_PSK
+      # PORTREDIRECT_MAX_CONNECTIONS: 512
+      # PORTREDIRECT_CONGESTION_CONTROL: cubic
+      # PORTREDIRECT_SHUTDOWN_TIMEOUT: 5
+      # PORTREDIRECT_LOG_LEVEL: info
+      # PORTREDIRECT_PROVIDE_METRICS: "false"
+      # PORTREDIRECT_METRICS_LISTEN: 127.0.0.1:9898  # 0.0.0.0:9898 for other containers
+      # PORTREDIRECT_QUIC_LOCAL_HOST: 0.0.0.0
+      # PORTREDIRECT_QUIC_LOCAL_PORT: 0
+      # With a copy of the server's cert.der instead of PORTREDIRECT_QUIC_CERT_FINGERPRINT:
+      # PORTREDIRECT_CONFIG_DIR: /etc/portredirect
+      # PORTREDIRECT_QUIC_CERT_HOSTNAME: tunnel.example.com
     # Or with the configuration file client.toml instead of the settings above. The PSK stays in
     # the environment, which takes precedence over the file.
     # environment:
