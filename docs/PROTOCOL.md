@@ -38,7 +38,7 @@ Version 5 is designed to stay compatible:
 
 - PortRedirect 1.x will speak version 5, and every 1.x client will work with every 1.x server, whichever is newer.
   Until 1.0 is released, every incompatible change still gets a new identifier.
-- New optional features are negotiated as [extensions](#extensions). Receivers skip [parameters](#parameters) they don't know, treat unknown [close codes](#close-codes) like code 8 (connect again) and unknown [stream error codes](#aborted-connections) like code 1 (aborted).
+- New optional features are negotiated as [extensions](#5-extensions). Receivers skip [parameters](#parameters) they don't know, treat unknown [close codes](#close-codes) like code 8 (connect again) and unknown [stream error codes](#aborted-connections) like code 1 (aborted).
 - An incompatible change requires PortRedirect 2.0 and a new identifier. A 2.x server will also speak version 5 and handle each connection according to the version the TLS handshake chose, so the server can be updated first and its clients later.
 
 ## Transport
@@ -145,7 +145,7 @@ The payload has at most 1024 bytes.
 |    5 | `DRAIN`   | either           | empty                       | The sender starts no new forwarded connections, running ones may finish.                    |
 
 An unknown type or a longer payload is a protocol violation (code 3).
-A side sends new message types only after the other side announced the [extension](#extensions) they belong to.
+A side sends new message types only after the other side announced the [extension](#5-extensions) they belong to.
 Receivers ignore a payload of `PING`, `PONG` and `DRAIN`.
 
 #### Parameters
@@ -164,7 +164,7 @@ Receivers skip parameters with unknown IDs; a missing required parameter, an ID 
 | 1          | `software`    | `HELLO`, `WELCOME`    | The sender's software and version as UTF-8, at most 64 bytes, e.g. `portredirect_client 0.7.0`. Optional, only for logs. |
 | 2          | `listen_port` | `HELLO`, `WELCOME`    | u16: the port the server should listen on (`HELLO`), or listens on (`WELCOME`). Required.    |
 | 3          | `peer`        | data stream header    | The external client's address: `<family: u8>` (4 or 6), `<address: [4] or [16]>`, `<port: u16>`. IPv4-mapped IPv6 addresses are sent as IPv4. Required. |
-| from 0x100 | extensions    | `HELLO`, `WELCOME`    | See [Extensions](#extensions).                                                                  |
+| from 0x100 | extensions    | `HELLO`, `WELCOME`    | See [Extensions](#5-extensions).                                                                  |
 
 ### 3. Setting up the tunnel
 
@@ -274,6 +274,7 @@ Addresses are counted per IPv4 address and per IPv6 /64 network, because a singl
 Handshake and authentication timeouts count as failed attempts, and so do unknown client names.
 Each connection's handshake runs on its own, so a client that stalls it doesn't hold up others.
 A successful authentication clears the address's failed attempts, unless it is blocked.
+A reload of the server's configuration lifts all blocks, as it may fix their cause, e.g. a client the server didn't know yet.
 Refusing a QUIC connection happens before the TLS handshake and closes it with the QUIC transport error `CONNECTION_REFUSED`.
 
 ## Close codes
@@ -292,7 +293,7 @@ Both sides close the QUIC connection with one of these application error codes a
 |    7 | Keepalive failed.                                                                         | both    | yes                   |
 |    8 | Internal error, e.g. a failure to send a message.                                        | both    | yes                   |
 |    9 | Replaced: a new connection of the same client took over the port.                         | server  | no                    |
-|   10 | Unsupported: the peer lacks an [extension](#extensions) this side requires.               | both    | no                    |
+|   10 | Unsupported: the peer lacks an [extension](#5-extensions) this side requires.               | both    | no                    |
 
 Clients treat unknown codes like code 8.
 A client whose connection is replaced (code 9) doesn't connect again: two running instances with the same name would otherwise take the port from each other in turns.

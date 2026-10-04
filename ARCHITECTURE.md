@@ -22,6 +22,8 @@ The `missing_docs` lint fails the lint check if a module becomes public by accid
 | `src/host_port.rs`     | Hosts given by name or address, which are looked up when they are used: the client's destination and server, and the addresses to listen on. |
 | `src/net.rs`           | IPv4 and IPv6 on the same socket: sockets on `::` that receive IPv4, too, and IPv4 addresses written as such, not IPv4-mapped. |
 | `src/forward.rs`       | Copies data in both directions between a TCP connection and a QUIC stream, passes on aborts, closes idle connections. |
+| `src/app_data.rs`      | What the connections of each program share: the server's clients and limits, which a reload can change, and which client holds which port; the client's name, PSK, destination and port. |
+| `src/bi_stream.rs`     | A QUIC stream's receiving and sending halves as one stream, e.g. for the control stream. |
 | `src/metrics.rs`       | Prometheus endpoint and helpers for the metrics, shared by both binaries.                                    |
 | `src/config.rs`        | Configuration files: reading them, their precedence and values, shared by both binaries.                     |
 | `src/psk.rs`           | Command-line options for the pre-shared key and loading it, shared by both binaries.                         |
@@ -41,19 +43,48 @@ The `missing_docs` lint fails the lint check if a module becomes public by accid
 
 ## Call Hierarchy
 
-These graphs should help see which part of the codebase does what.
-Full resolution graphs/source files are located in `./docs/*.drawio`.
-
-> **Note:** The graphs are not up to date:
->
-> - After authentication, the client's `handle_quic_server_connection` sends `HELLO` with `protocol::control::request_listen_port`, and the server's `handle_quic_client_connection` reads it with `receive_hello`, takes the port from the `PortRegistry` and answers with `send_welcome`.
-> - Both sides forward data streams with `forward::forward_tcp_and_quic`.
-> - The client's `run_client` connects in a loop: `run_connection` connects with `QuicClient::connect` and calls `handle_quic_server_connection`; `reconnect::is_permanent_error` decides whether to connect again.
+Which function calls which on the way from a program's start to a forwarded connection, as [Mermaid](https://mermaid.js.org) diagrams, which GitHub shows as graphics.
+Dashed arrows are optional or run beside the main path; the labels say when a call happens.
+[docs/cargo-mods-lib.svg](docs/cargo-mods-lib.svg) shows the modules, `make docs` generates it.
 
 ### Server
 
-![Server call diagram](./docs/prserver_call_hierarchy.png)
+```mermaid
+flowchart LR
+    main["server/main.rs<br/>main"] --> run["quic/server.rs<br/>run_quic_server<br/><i>accepts QUIC connections,<br/>refuses those over the limits</i>"]
+    main -. "on SIGHUP" .-> reload["server/reload.rs<br/>Reloader::reload_on_sighup"]
+    main -. "metrics enabled" .-> metrics["metrics.rs<br/>serve_metrics"]
+    run -- "each connection" --> handle["server/client_handler.rs<br/>handle_quic_client_connection"]
+    handle -- "1. authenticate" --> auth["server/auth.rs<br/>authenticate_quic_client"]
+    auth --> pauth["protocol/auth.rs<br/>server_authenticate"]
+    handle -- "2. set up the tunnel" --> serve["server/client_handler.rs<br/>serve_client"]
+    serve -- "HELLO, WELCOME" --> control["protocol/control.rs<br/>receive_hello, send_welcome"]
+    serve -- "take the port" --> registry["server/port_registry.rs<br/>PortRegistry::acquire"]
+    serve -- "spawn" --> listener["server/tcp_listener.rs<br/>handle_tcp_listener"]
+    serve -- "until the tunnel ends" --> keepalive["protocol/keepalive.rs<br/>run_control_channel_loop"]
+    serve -- "or a reload revokes it" --> revocation["app_data.rs<br/>ServerAppData::revocation"]
+    reload -- "new settings" --> revocation
+    listener -- "each external connection:<br/>open a data stream" --> header["protocol/data_stream.rs<br/>send_connection_header"]
+    listener --> sfwd["server/tcp_forwarder.rs<br/>forward_tcp_to_quic_stream"]
+    sfwd --> forward["forward.rs<br/>forward_tcp_and_quic"]
+```
 
 ### Client
 
-![Client call diagram](./docs/prclient_call_hierarchy.png)
+```mermaid
+flowchart LR
+    main["client/main.rs<br/>main"] --> run["client/run_client.rs<br/>run_client<br/><i>connects again with backoff</i>"]
+    run -. "metrics enabled" .-> metrics["metrics.rs<br/>serve_metrics"]
+    run -- "each attempt" --> attempt["client/run_client.rs<br/>run_connection"]
+    attempt --> connect["quic/client.rs<br/>QuicClient::connect"]
+    attempt --> handle["client/server_handler.rs<br/>handle_quic_server_connection"]
+    run -- "after the connection ends" --> permanent["client/reconnect.rs<br/>is_permanent_error"]
+    handle -- "1. authenticate" --> auth["client/auth.rs<br/>handle_quic_auth_client_side"]
+    auth --> pauth["protocol/auth.rs<br/>client_authenticate"]
+    handle -- "2. HELLO, WELCOME" --> control["protocol/control.rs<br/>request_listen_port"]
+    handle -- "3. spawn" --> keepalive["protocol/keepalive.rs<br/>run_keepalive_client_loop"]
+    handle -- "4. each data stream: spawn" --> cfwd["client/tcp_forwarder.rs<br/>forward_tcp_to_quic_stream"]
+    cfwd --> header["protocol/data_stream.rs<br/>receive_connection_header"]
+    cfwd -- "connect to the destination" --> tcp["tokio::net::TcpStream::connect"]
+    cfwd --> forward["forward.rs<br/>forward_tcp_and_quic"]
+```

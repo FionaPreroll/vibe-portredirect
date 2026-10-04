@@ -45,7 +45,9 @@ digraph {
     "portredirect::forward" [label="pub(crate) mod|forward", fillcolor="#f8c04c"]; // "mod" node
     "portredirect::host_port" [label="pub(crate) mod|host_port", fillcolor="#f8c04c"]; // "mod" node
     "portredirect::limits" [label="pub(crate) mod|limits", fillcolor="#f8c04c"]; // "mod" node
+    "portredirect::logging" [label="pub(crate) mod|logging", fillcolor="#f8c04c"]; // "mod" node
     "portredirect::metrics" [label="pub(crate) mod|metrics", fillcolor="#f8c04c"]; // "mod" node
+    "portredirect::net" [label="pub(crate) mod|net", fillcolor="#f8c04c"]; // "mod" node
     "portredirect::private_files" [label="pub(crate) mod|private_files", fillcolor="#f8c04c"]; // "mod" node
     "portredirect::protocol" [label="pub(crate) mod|protocol", fillcolor="#f8c04c"]; // "mod" node
     "portredirect::protocol::auth" [label="pub(crate) mod|protocol::auth", fillcolor="#f8c04c"]; // "mod" node
@@ -68,6 +70,7 @@ digraph {
     "portredirect::server::main" [label="pub(crate) mod|server::main", fillcolor="#f8c04c"]; // "mod" node
     "portredirect::server::metrics" [label="pub(crate) mod|server::metrics", fillcolor="#f8c04c"]; // "mod" node
     "portredirect::server::port_registry" [label="pub(crate) mod|server::port_registry", fillcolor="#f8c04c"]; // "mod" node
+    "portredirect::server::reload" [label="pub(crate) mod|server::reload", fillcolor="#f8c04c"]; // "mod" node
     "portredirect::server::tcp_forwarder" [label="pub(crate) mod|server::tcp_forwarder", fillcolor="#f8c04c"]; // "mod" node
     "portredirect::server::tcp_listener" [label="pub(crate) mod|server::tcp_listener", fillcolor="#f8c04c"]; // "mod" node
     "portredirect::shutdown" [label="pub(crate) mod|shutdown", fillcolor="#f8c04c"]; // "mod" node
@@ -79,7 +82,9 @@ digraph {
     "portredirect" -> "portredirect::forward" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge
     "portredirect" -> "portredirect::host_port" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge
     "portredirect" -> "portredirect::limits" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge
+    "portredirect" -> "portredirect::logging" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge
     "portredirect" -> "portredirect::metrics" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge
+    "portredirect" -> "portredirect::net" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge
     "portredirect" -> "portredirect::private_files" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge
     "portredirect" -> "portredirect::protocol" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge
     "portredirect" -> "portredirect::psk" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge
@@ -111,6 +116,7 @@ digraph {
     "portredirect::server" -> "portredirect::server::main" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge
     "portredirect::server" -> "portredirect::server::metrics" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge
     "portredirect::server" -> "portredirect::server::port_registry" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge
+    "portredirect::server" -> "portredirect::server::reload" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge
     "portredirect::server" -> "portredirect::server::tcp_forwarder" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge
     "portredirect::server" -> "portredirect::server::tcp_listener" [label="owns", color="#000000", style="solid"] [constraint=true]; // "owns" edge
 
