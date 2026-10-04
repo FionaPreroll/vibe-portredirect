@@ -70,7 +70,7 @@ In `PortRedirectProtocol` (`src/lib.rs`), for both sides:
   ```
 
 - **Lossy links:** on links that lose packets for other reasons than congestion, e.g. wireless or long-distance ones, use `--congestion-control bbr` on both the server and the client. Each side's option decides how fast it sends. Keep in mind that quinn marks its BBR implementation experimental, and that BBR can take more than its share of a bottleneck from CUBIC connections.
-- **Prebuilt binaries:** they are linked statically with musl, so they run on any distribution, but are a little slower where the CPU limits the throughput: over localhost, the x86_64 binary reached 11 to 15 % less than a build with glibc, with one and with ten connections. Over most real links, the link limits the throughput first. To get the most out of a machine's CPUs, build from source.
+- **Prebuilt binaries:** use the default ones, for glibc. The `-musl` ones are linked statically, so they run on any distribution, but are a little slower where the CPU limits the throughput: over localhost, the x86_64 binary reached 11 to 15 % less than with glibc, with one and with ten connections. Over most real links, the link limits the throughput first.
 
 ## How It Was Measured
 
