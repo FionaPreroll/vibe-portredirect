@@ -27,6 +27,9 @@ jobs:
           echo "this is a CI run. delete this file if not. ./.github/workflows and ./tests are using this file." > .ci
           cargo build --release --locked --bins --example link_emulator
       - name: Run BATS test(s)
+        env:
+          # The runners have IPv6, so its test must not be skipped.
+          PORTREDIRECT_TEST_IPV6: required
         run: bats --print-output-on-failure --gather-test-outputs-in ./bats-logs tests/full_e2e_netcat_checksum.bats tests/full_e2e_lossy_link.bats
       - name: Show Log Files
         if: always()

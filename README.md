@@ -77,7 +77,7 @@ The client fits into a Docker Compose stack: it forwards the connections that th
 2. In `docker/example/client`: copy `example.env` to `.env` and set the server's address, the fingerprint and the same PSK in it. Run `docker compose up -d`.
 3. nginx answers on the server's port 80.
 
-- **Ports:** The server's container publishes the ports clients may ask for, e.g. 80, and the QUIC port, 4433/udp. Docker passes on the external clients' IPv4 addresses, which the server's limits per address need. IPv6 clients arrive from Docker's own address unless IPv6 is enabled in Docker.
+- **Ports:** The server's container publishes the ports clients may ask for, e.g. 80, and the QUIC port, 4433/udp. Docker passes on the external clients' IPv4 addresses, which the server's limits per address need. IPv6 clients arrive from Docker's own address unless IPv6 is enabled in Docker; then let the server listen on `::`, for IPv6 and IPv4.
 - **UDP buffers:** Containers get the host's limits, so set them on the hosts, see [Performance](#performance).
 
 ### From Source
@@ -109,9 +109,9 @@ portredirect_server \
 
 **Parameters:**
 
-- **`--listen-host`:** Where to listen for incoming TCP connections.
+- **`--listen-host`:** Where to listen for incoming TCP connections, e.g. `0.0.0.0` for every IPv4 address, or `::` for every IPv6 and IPv4 address.
 - **`--allowed-client-ports`:** TCP ports clients may ask the server to listen on, e.g. `443` or `80,443,8000-8100`.
-- **`--quic-listen-host` & `--quic-listen-port`:** Where to listen for the QUIC tunnel (UDP).
+- **`--quic-listen-host` & `--quic-listen-port`:** Where to listen for the QUIC tunnel (UDP), by default `127.0.0.1` and `4433`. `::` is every IPv6 and IPv4 address, as for `--listen-host`.
 - **`--quic-cert-hostname`:** IP address or DNS name the generated certificate is issued for, the client verifies it. Only used when the certificate is generated on first start (default `127.0.0.1`).
 - **`--psk-file`:** File containing the pre-shared key, see [PSK Best Practices](#psk-best-practices).
 - **`--config-file`:** TOML file with settings, e.g. a list of clients, see [Configuration File](#configuration-file).
@@ -151,7 +151,8 @@ portredirect_client \
 
 - **`--destination-host` & `--destination-port`:** The target TCP service. A name is looked up for each forwarded connection, and each of its addresses is tried, so the client follows changes, e.g. of a container that was created again.
 - **`--remote-listen-port`:** The TCP port the server should listen on for you. Must be one of the server's `--allowed-client-ports`.
-- **`--quic-remote-host` & `--quic-remote-port`:** The QUIC server’s address. A name is looked up for each connection attempt, e.g. for a server with a dynamic address.
+- **`--quic-remote-host` & `--quic-remote-port`:** The QUIC server’s address. A name is looked up for each connection attempt, e.g. for a server with a dynamic address. If it has IPv4 and IPv6 addresses, the client connects to an IPv4 address, see `--quic-local-host`.
+- **`--quic-local-host` & `--quic-local-port`** (optional): Address and UDP port to send to the server from. By default any address, of IPv6 and IPv4, or only of IPv4 on a system without IPv6, and any port. With an IPv6 address such as `::`, the client prefers the server's IPv6 addresses; with an IPv4 address such as `0.0.0.0`, it only connects over IPv4.
 - **`--quic-cert-fingerprint`** (recommended): Trust the server's certificate by its fingerprint instead of a copy of `cert.der`, see [Server Certificate](#server-certificate). Give it several times to trust several certificates, e.g. while the server's certificate changes.
 - **`--quic-cert-hostname`** (optional): Name the server's certificate must be issued for, if it differs from `--quic-remote-host`. Must match the server's `--quic-cert-hostname`. Not checked with `--quic-cert-fingerprint`.
 - **`--psk-file`:** File containing the pre-shared key, must match the server’s PSK.
@@ -471,6 +472,7 @@ make test
 ```
 
 The Cargo tests include end-to-end tests of a complete tunnel in `src/tests/tunnel_end_to_end.rs` and tests of the two programs in `tests/cli.rs`.
+Tests of IPv6 need the loopback address `::1`. On a machine without it, they skip their checks of IPv6, unless the environment variable `PORTREDIRECT_TEST_IPV6` is `required`, as in CI: then they fail. The same holds for the BATS tests.
 
 To see which code the Cargo tests cover, install [cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov) and run `make coverage`.
 It prints a summary per file and writes an HTML report with the covered lines to `target/llvm-cov/html`.
@@ -529,7 +531,7 @@ Both programs print their version with `--version`. For a complete list of optio
 
 PortRedirect is ideal for simple TCP-to-QUIC tunneling setups:
 
-- **Protocol Support:** Currently supports IPv4 and TCP.
+- **Protocol Support:** TCP, over IPv4 and IPv6: between client and server, from external clients and to destinations. Options take IPv6 addresses with or without brackets, e.g. `::1` or `[::1]`.
 - **Connection Model:** Each client gets its own TCP port on the server. Several clients can share a server, each with its own PSK and ports, and clients can share a port as standby, see [Several Clients and Standby](#several-clients-and-standby).
 - **Scalability:** Not yet optimized for extremely high concurrency, a client forwards at most 512 connections at the same time by default.
 - **Reliability:** The client reconnects on its own, see [Reconnects and Exit Codes](#reconnects-and-exit-codes). Aborted connections are passed on: if one side resets its TCP connection, or the tunnel breaks down, the other side's connection is reset, too, so truncated transfers don't look complete.

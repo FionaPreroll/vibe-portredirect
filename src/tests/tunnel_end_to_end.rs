@@ -7,7 +7,7 @@ use anyhow::{anyhow, Result};
 use secrecy::SecretString;
 use std::future::Future;
 use std::io::ErrorKind;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -26,6 +26,7 @@ use crate::client::reconnect::{Backoff, REFUSED_HINT};
 use crate::client::run_client::{run_client, ClientSettings};
 use crate::client::server_handler::handle_quic_server_connection;
 use crate::forward::forward_tcp_and_quic;
+use crate::host_port::HostPort;
 use crate::limits::{BlockingPolicy, QuicAdmission};
 use crate::metrics::DummyCounter;
 use crate::protocol::auth::{client_authenticate, session_binding, ClientName};
@@ -33,7 +34,7 @@ use crate::protocol::close::CloseCode;
 use crate::protocol::control::{receive_hello, send_welcome, SERVER_SOFTWARE};
 use crate::protocol::control::{request_listen_port, Greeting, CLIENT_SOFTWARE};
 use crate::protocol::message::{read_message, write_message, Message, MessageType};
-use crate::quic::client::{run_quic_client, ClientConfig, QuicClient};
+use crate::quic::client::{run_quic_client, ClientConfig, LocalAddress, QuicClient};
 use crate::quic::fingerprint::CertFingerprint;
 use crate::quic::server::{
     load_or_generate_quic_cert, raise_receive_window, run_quic_server, ServerConfig,
@@ -45,7 +46,8 @@ use crate::server::clients::{ClientEntry, ClientList};
 use crate::server::metrics::{ClientMetrics, METRICS};
 use crate::server::{ForwardingLimits, PortSpec};
 use crate::shutdown::Shutdown;
-use crate::tests::{capture_logs, collect_logs, free_tcp_port, free_udp_port};
+use crate::tests::{capture_logs, collect_logs, ipv6_available, CollectedLogs};
+use crate::tests::{free_tcp_port, free_udp_port};
 use crate::PortRedirectProtocol;
 
 const TEST_PSK: &str = "integration-test-psk";
@@ -54,6 +56,10 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn localhost(port: u16) -> SocketAddr {
     SocketAddr::from((Ipv4Addr::LOCALHOST, port))
+}
+
+fn ipv6_localhost(port: u16) -> SocketAddr {
+    SocketAddr::from((Ipv6Addr::LOCALHOST, port))
 }
 
 /// Deterministic test data, different for each seed.
@@ -146,12 +152,25 @@ fn server_config(
     allowed_ports: Vec<PortSpec>,
     limits: ForwardingLimits,
 ) -> ServerConfig<ServerAppData> {
-    let app_data = ServerAppData::new(TEST_PSK.into(), "127.0.0.1".into(), allowed_ports)
+    let quic = localhost(quic_port);
+    server_config_on(config_dir, quic, "127.0.0.1", allowed_ports, limits)
+}
+
+/// Like [`server_config`], for a server that listens on `quic` for QUIC connections and on
+/// `listen_host` for external ones.
+fn server_config_on(
+    config_dir: &Path,
+    quic: SocketAddr,
+    listen_host: &str,
+    allowed_ports: Vec<PortSpec>,
+    limits: ForwardingLimits,
+) -> ServerConfig<ServerAppData> {
+    let app_data = ServerAppData::new(TEST_PSK.into(), listen_host.into(), allowed_ports)
         .with_forwarding_limits(limits);
     ServerConfig::create_default_config(
         config_dir.to_path_buf(),
         CERT_HOSTNAME.into(),
-        localhost(quic_port),
+        quic,
         None,
         app_data,
     )
@@ -263,7 +282,7 @@ fn client_settings(
     ClientSettings {
         app_data: ClientAppData::new(psk.into(), destination, remote_listen_port),
         config_dir: config_dir.to_path_buf(),
-        quic_local_addr: localhost(0),
+        quic_local: localhost(0).into(),
         quic_remote: localhost(quic_port).into(),
         quic_cert_hostname: Some(CERT_HOSTNAME.into()),
         cert_fingerprints: Vec::new(),
@@ -417,12 +436,17 @@ async fn wait_until_closed(port: u16) -> Result<()> {
 
 /// Connects to the server's external TCP port, retrying until the tunnel is up.
 async fn connect_through_tunnel(port: u16) -> Result<TcpStream> {
+    connect_through_tunnel_at(localhost(port)).await
+}
+
+/// Like [`connect_through_tunnel`], to the server's `address`.
+async fn connect_through_tunnel_at(address: SocketAddr) -> Result<TcpStream> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        match TcpStream::connect(localhost(port)).await {
+        match TcpStream::connect(address).await {
             Ok(stream) => return Ok(stream),
             Err(e) if Instant::now() > deadline => {
-                return Err(anyhow!("tunnel did not come up on port {}: {}", port, e))
+                return Err(anyhow!("tunnel did not come up on {}: {}", address, e))
             }
             Err(_) => sleep(Duration::from_millis(50)).await,
         }
@@ -1950,6 +1974,17 @@ async fn unreachable_destination_resets_the_external_connection() -> Result<()> 
     .await
 }
 
+/// Waits until `log` has `count` lines, and returns them.
+async fn wait_for_lines(log: &CollectedLogs, count: usize) -> Vec<String> {
+    loop {
+        let lines = log.lines();
+        if lines.len() >= count {
+            return lines;
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+}
+
 #[tokio::test]
 async fn client_logs_forwarded_connections() -> Result<()> {
     let (config_dir, _logs) = setup();
@@ -1974,17 +2009,6 @@ async fn client_logs_forwarded_connections() -> Result<()> {
         listen_port,
     );
 
-    /// Waits until the connection log has `count` lines.
-    async fn lines(log: &crate::tests::CollectedLogs, count: usize) -> Vec<String> {
-        loop {
-            let lines = log.lines();
-            if lines.len() >= count {
-                return lines;
-            }
-            sleep(Duration::from_millis(10)).await;
-        }
-    }
-
     with_timeout(async {
         // A connection the client can't forward.
         let mut stream = connect_through_tunnel(listen_port).await?;
@@ -1993,7 +2017,7 @@ async fn client_logs_forwarded_connections() -> Result<()> {
             tcp_end(&mut stream, Duration::from_secs(5)).await,
             TcpEnd::Reset
         );
-        let aborted = lines(&connection_log, 2).await;
+        let aborted = wait_for_lines(&connection_log, 2).await;
         let connection = format!("external_client={} destination={}", external, destination);
         assert!(
             aborted[0].ends_with(&format!("Connection opened {}", connection)),
@@ -2013,7 +2037,7 @@ async fn client_logs_forwarded_connections() -> Result<()> {
         let stream = connect_through_tunnel(listen_port).await?;
         let external = stream.local_addr()?;
         assert_eq!(echo_roundtrip(stream, b"hello".to_vec()).await?, b"hello");
-        let closed = lines(&connection_log, 4).await;
+        let closed = wait_for_lines(&connection_log, 4).await;
         let connection = format!("external_client={} destination={}", external, destination);
         assert!(closed[2].ends_with(&format!("Connection opened {}", connection)));
         assert!(
@@ -2022,6 +2046,125 @@ async fn client_logs_forwarded_connections() -> Result<()> {
             "{}",
             closed[3]
         );
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn tunnel_works_over_ipv6() -> Result<()> {
+    if !ipv6_available() {
+        return Ok(());
+    }
+    let (config_dir, _logs) = setup();
+    let (connection_log, _connection_log) = collect_logs("portredirect::connections=info");
+    let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
+    let destination = TcpListener::bind(ipv6_localhost(0)).await?;
+    let destination_addr = destination.local_addr()?;
+    tokio::spawn(serve_echo(destination));
+
+    // The server only listens on ::1, for QUIC and for external connections.
+    let ports = vec![PortSpec::Single(listen_port)];
+    let quic = ipv6_localhost(quic_port);
+    let limits = ForwardingLimits::default();
+    let config = server_config_on(config_dir.path(), quic, "::1", ports, limits);
+    let _server = spawn_server_with_handler(config, handle_quic_client_connection);
+    // The client sends from any address, to the server's address in brackets, as in URLs.
+    let mut settings = client_settings(
+        config_dir.path(),
+        quic_port,
+        TEST_PSK,
+        destination_addr,
+        listen_port,
+    );
+    settings.quic_local = LocalAddress::Any { port: 0 };
+    settings.quic_remote = HostPort::new("[::1]", quic_port);
+    let _client = spawn_client(settings);
+
+    with_timeout(async {
+        let stream = connect_through_tunnel_at(ipv6_localhost(listen_port)).await?;
+        let external = stream.local_addr()?;
+        let echoed = echo_roundtrip(stream, b"over IPv6".to_vec()).await?;
+        assert_eq!(echoed, b"over IPv6");
+        // The client learns the external client's IPv6 address.
+        let opened = wait_for_lines(&connection_log, 1).await;
+        let expected = format!(
+            "Connection opened external_client={} destination={}",
+            external, destination_addr
+        );
+        assert!(opened[0].ends_with(&expected), "{}", opened[0]);
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn server_on_any_ipv6_address_accepts_ipv4_too() -> Result<()> {
+    if !ipv6_available() {
+        return Ok(());
+    }
+    let (config_dir, _logs) = setup();
+    // The server's messages, with its peers' addresses, and the client's connection log.
+    let (logs, _collected) = collect_logs("portredirect=debug,portredirect::connections=info");
+    let (quic_port, listen_port) = (free_udp_port(), free_tcp_port());
+    let echo_addr = start_echo_server().await;
+
+    // The server listens on ::, for QUIC and for external connections, and forwards a single
+    // connection per address at a time.
+    let ports = vec![PortSpec::Single(listen_port)];
+    let quic = SocketAddr::from((Ipv6Addr::UNSPECIFIED, quic_port));
+    let limits = ForwardingLimits {
+        max_connections_per_ip: 1,
+        ..ForwardingLimits::default()
+    };
+    let config = server_config_on(config_dir.path(), quic, "::", ports, limits);
+    let _server = spawn_server_with_handler(config, handle_quic_client_connection);
+    // The client connects over IPv4, to 127.0.0.1.
+    let _client = start_client(
+        config_dir.path(),
+        quic_port,
+        TEST_PSK,
+        echo_addr,
+        listen_port,
+    );
+
+    with_timeout(async {
+        let ready = connect_through_tunnel(listen_port).await?;
+        assert_eq!(echo_roundtrip(ready, b"ready".to_vec()).await?, b"ready");
+
+        // External clients over IPv4 count under their IPv4 addresses: while one connection of
+        // 127.0.0.2 is forwarded, the server closes a second one, but not one of 127.0.0.3. Under
+        // their IPv4-mapped IPv6 addresses, they would share a /64 network.
+        let (busy_host, other_host) = (Ipv4Addr::new(127, 0, 0, 2), Ipv4Addr::new(127, 0, 0, 3));
+        let mut first = connect_from(busy_host, listen_port).await?;
+        echo_once(&mut first, b"first").await?;
+        let mut second = connect_from(busy_host, listen_port).await?;
+        assert!(closed_by_peer(&mut second, Duration::from_secs(5)).await);
+        let mut other = connect_from(other_host, listen_port).await?;
+        echo_once(&mut other, b"other").await?;
+        // External clients over IPv6.
+        let mut over_ipv6 = TcpStream::connect(ipv6_localhost(listen_port)).await?;
+        echo_once(&mut over_ipv6, b"over IPv6").await?;
+
+        // The logs write IPv4 addresses as such, not as IPv4-mapped IPv6 addresses.
+        let lines = logs.lines();
+        for external in [
+            first.local_addr()?,
+            other.local_addr()?,
+            over_ipv6.local_addr()?,
+        ] {
+            let opened = format!("Connection opened external_client={} ", external);
+            assert!(
+                lines.iter().any(|line| line.contains(&opened)),
+                "{:#?}",
+                lines
+            );
+        }
+        let mapped: Vec<_> = lines
+            .iter()
+            .filter(|line| line.contains("::ffff:"))
+            .collect();
+        assert!(mapped.is_empty(), "{:#?}", mapped);
         Ok(())
     })
     .await

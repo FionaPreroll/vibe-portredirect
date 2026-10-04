@@ -30,6 +30,7 @@ mod host_port;
 mod limits;
 mod logging;
 mod metrics;
+mod net;
 mod private_files;
 mod protocol;
 mod psk;

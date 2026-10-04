@@ -10,7 +10,8 @@ services:
     image: ghcr.io/fionapreroll/portredirect-server:latest
     restart: unless-stopped
     environment:
-      # In the container: Docker forwards the published ports below to it.
+      # In the container: Docker forwards the published ports below to it. With IPv6 enabled in
+      # Docker, :: listens for IPv6, too.
       PORTREDIRECT_LISTEN_HOST: 0.0.0.0
       PORTREDIRECT_ALLOWED_CLIENT_PORTS: 80
       PORTREDIRECT_QUIC_LISTEN_HOST: 0.0.0.0

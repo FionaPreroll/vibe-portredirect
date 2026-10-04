@@ -19,7 +19,8 @@ The `missing_docs` lint fails the lint check if a module becomes public by accid
 | `src/protocol/`        | Messages on the control stream: authentication (`auth.rs`), message and parameter format (`message.rs`), `HELLO`/`WELCOME` (`control.rs`), keepalive and `DRAIN` (`keepalive.rs`). Header and error codes of data streams (`data_stream.rs`), codes for closing connections (`close.rs`). |
 | `src/quic/`            | QUIC endpoints of both sides, certificate loading and generation, trusting the server's certificate by fingerprint (`fingerprint.rs`), protocol versions (ALPN) and transport settings, admission of new connections on the server. |
 | `src/limits.rs`        | Connection limits per address, how fast an address may open connections, blocking of addresses after failed authentication attempts. |
-| `src/host_port.rs`     | Hosts given by name or address, which are looked up when they are used: the client's destination and server. |
+| `src/host_port.rs`     | Hosts given by name or address, which are looked up when they are used: the client's destination and server, and the addresses to listen on. |
+| `src/net.rs`           | IPv4 and IPv6 on the same socket: sockets on `::` that receive IPv4, too, and IPv4 addresses written as such, not IPv4-mapped. |
 | `src/forward.rs`       | Copies data in both directions between a TCP connection and a QUIC stream, passes on aborts, closes idle connections. |
 | `src/metrics.rs`       | Prometheus endpoint and helpers for the metrics, shared by both binaries.                                    |
 | `src/config.rs`        | Configuration files: reading them, their precedence and values, shared by both binaries.                     |

@@ -643,7 +643,7 @@ async fn client_looks_up_names_when_it_uses_them() -> Result<()> {
         Program::start(CLIENT, &args, &[("PORTREDIRECT_PSK", PSK)])
     };
 
-    // By name: the client takes an address of its socket's family, IPv4, for the server, and
+    // By name: the client takes an IPv4 address of the server, which only listens on IPv4, and
     // tries each address of the destination, which accepts connections on IPv4 only.
     let mut client = start_client("localhost", "localhost");
     client.wait_for_output("Tunnel established").await?;
@@ -680,6 +680,38 @@ async fn client_looks_up_names_when_it_uses_them() -> Result<()> {
 
     server.terminate();
     assert_eq!(server.exit_code().await?, 0, "{}", server.output());
+    Ok(())
+}
+
+#[tokio::test]
+async fn programs_exit_with_code_1_without_an_address_of_their_own() -> Result<()> {
+    let config_dir = tempfile::tempdir()?;
+    // The name is reserved for invalid names, RFC 2606.
+    let mut server = Program::start(
+        SERVER,
+        &[
+            "--config-dir",
+            path_str(config_dir.path()),
+            "--listen-host",
+            "127.0.0.1",
+            "--allowed-client-ports",
+            "443",
+            "--quic-listen-host",
+            "nonexistent.invalid",
+        ],
+        &[("PORTREDIRECT_PSK", PSK)],
+    );
+    assert_eq!(server.exit_code().await?, 1, "{}", server.output());
+    let error = "Failed to resolve the QUIC listen address nonexistent.invalid:4433";
+    assert!(server.output().contains(error), "{}", server.output());
+
+    let mut args = client_args(config_dir.path(), free_udp_port(), 1, free_tcp_port());
+    args.extend(["--quic-local-host", "nonexistent.invalid"].map(String::from));
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let mut client = Program::start(CLIENT, &args, &[("PORTREDIRECT_PSK", PSK)]);
+    assert_eq!(client.exit_code().await?, 1, "{}", client.output());
+    let error = "failed to resolve the QUIC local address nonexistent.invalid";
+    assert!(client.output().contains(error), "{}", client.output());
     Ok(())
 }
 

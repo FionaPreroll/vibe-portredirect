@@ -30,6 +30,19 @@ stop_processes() {
     return 1
 }
 
+require_ipv6() {
+    # Skips the test on a machine without IPv6, i.e. without the loopback address ::1, unless
+    # PORTREDIRECT_TEST_IPV6 is "required", as in CI: then the test fails.
+    if grep -qs '^00000000000000000000000000000001 ' /proc/net/if_inet6; then
+        return 0
+    fi
+    if [ "${PORTREDIRECT_TEST_IPV6:-}" = required ]; then
+        echo "PORTREDIRECT_TEST_IPV6 requires IPv6, but there is no ::1"
+        return 1
+    fi
+    skip "no IPv6 on this machine"
+}
+
 wait_for_listener() {
     # Wait until a process listens on TCP port $1, at most 10 seconds. Unlike a test connection,
     # this doesn't use up a listener that accepts a single connection, like nc -l.

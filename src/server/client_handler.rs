@@ -2,7 +2,10 @@
 //
 // License: GPL-3.0-only
 
+use crate::app_data::ServerAppData;
+use crate::host_port::HostPort;
 use crate::metrics::Active;
+use crate::net::canonical;
 use crate::protocol::auth::ClientName;
 use crate::protocol::close::CloseCode;
 use crate::protocol::control::{receive_hello, send_welcome, Greeting, SERVER_SOFTWARE};
@@ -11,16 +14,15 @@ use crate::quic::server::ServerConfig;
 use crate::quic::ProtocolVersion;
 use crate::server::metrics::METRICS;
 use crate::server::port_registry::PortTaken;
+use crate::server::tcp_listener::{bind_tcp_listener, handle_tcp_listener};
 use crate::server::AllowedPorts;
 use crate::PortRedirectProtocol;
-use crate::{app_data::ServerAppData, server::tcp_listener::handle_tcp_listener};
 
 use super::auth::authenticate_quic_client;
 
 use anyhow::{anyhow, bail, Context, Result};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::TcpListener;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, info_span, Instrument};
@@ -32,7 +34,7 @@ pub async fn handle_quic_client_connection(
     config: Arc<ServerConfig<ServerAppData>>,
     quic_conn: quinn::Connection,
 ) -> Result<()> {
-    let remote = quic_conn.remote_address();
+    let remote = canonical(quic_conn.remote_address());
     debug!("Handling QUIC client connection from {}", remote);
 
     // QUIC requires the TLS handshake to agree on one of the protocol versions we offer (ALPN).
@@ -76,7 +78,7 @@ pub(crate) async fn serve_client<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let remote = quic_conn.remote_address();
+    let remote = canonical(quic_conn.remote_address());
 
     // 2. Receive the client's HELLO.
     let hello = match timeout(
@@ -140,8 +142,8 @@ where
     };
 
     // 4. Create the TCP listener.
-    let tcp_addr = format!("{}:{}", config.app_data.local_bind_ip, port);
-    let listener = match TcpListener::bind(&tcp_addr).await {
+    let tcp_addr = HostPort::new(&config.app_data.local_bind_ip, port);
+    let listener = match bind_tcp_listener(&tcp_addr).await {
         Ok(listener) => listener,
         Err(err) => {
             // Terminate the connection upon failure to bind the TCP listener.

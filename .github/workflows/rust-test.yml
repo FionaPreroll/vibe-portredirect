@@ -8,6 +8,8 @@ permissions:
   contents: read
 env:
   CARGO_TERM_COLOR: always
+  # The runners have IPv6, so its tests must not be skipped.
+  PORTREDIRECT_TEST_IPV6: required
 jobs:
   test_cargo:
     runs-on: ubuntu-latest

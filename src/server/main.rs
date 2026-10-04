@@ -2,12 +2,12 @@
 //
 // License: GPL-3.0-only
 
-use anyhow::{anyhow, Context, Result};
-use std::net::{SocketAddr, ToSocketAddrs};
+use anyhow::{Context, Result};
 use tracing::{error, info, span, Level};
 
 use crate::app_data::ServerAppData;
 use crate::get_config_dir;
+use crate::host_port::HostPort;
 use crate::logging::init_logging;
 use crate::metrics::{print_metrics_loop, serve_metrics};
 use crate::quic::server::{
@@ -52,11 +52,11 @@ pub async fn main() -> Result<()> {
     info!("Configuration directory: {:?}", config_dir);
 
     // Parse QUIC server listener address.
-    let quic_addr = resolve_socket_addr(&format!(
-        "{}:{}",
-        config.quic_listen_host, config.quic_listen_port
-    ))
-    .context("Failed to resolve QUIC bind address")?;
+    let quic_listen = HostPort::new(&config.quic_listen_host, config.quic_listen_port);
+    let quic_addr = quic_listen
+        .first_address()
+        .await
+        .with_context(|| format!("Failed to resolve the QUIC listen address {}", quic_listen))?;
 
     // Set up QUIC server configuration.
     let app_data = ServerAppData::with_clients(clients, config.listen_host)
@@ -106,11 +106,4 @@ fn print_fingerprint(config: CertificateConfig) -> Result<()> {
     // logging them.
     println!("{}", server_fingerprint(&config_dir)?);
     Ok(())
-}
-
-/// Resolves a socket address from a string.
-fn resolve_socket_addr(addr: &str) -> Result<SocketAddr> {
-    addr.to_socket_addrs()?
-        .next()
-        .ok_or_else(|| anyhow!("Unable to resolve address: {}", addr))
 }
