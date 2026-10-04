@@ -69,8 +69,10 @@ The release notes describe how to check a download with `SHA256SUMS` and the att
 Images of both programs with the [prebuilt binaries](#prebuilt-binaries), for amd64, arm64 and armv7:
 
 - `ghcr.io/fionapreroll/portredirect-server` and `ghcr.io/fionapreroll/portredirect-client`
-- `<version>`, e.g. `1.0.0-rc.1`: of a [release](#prebuilt-binaries), on Debian with glibc; `<version>-alpine`: on Alpine with musl.
-- `latest` and `alpine`: of the latest commit on `main`; `sha-<commit>` and `sha-<commit>-alpine`: of an earlier commit.
+- On Debian with glibc, or with the suffix `-alpine` on Alpine with musl:
+  - `latest` and `alpine`: the newest [release](#prebuilt-binaries) that isn't a pre-release. Until 1.0.0 is released, the latest commit on `main`.
+  - `<version>`, e.g. `1.0.0-rc.1` and `1.0.0-rc.1-alpine`: a release, also a pre-release.
+  - `edge` and `edge-alpine`: the latest commit on `main`; `sha-<commit>` and `sha-<commit>-alpine`: an earlier commit.
 
 They run as an unprivileged user, are configured with [environment variables](#environment-variables) or a [configuration file](#configuration-file), and keep their configuration directory, e.g. the server's certificate and private key, in `/etc/portredirect`.
 
@@ -534,7 +536,7 @@ bats tests/<test_file.bats>
    git tag --annotate v1.0.0-rc.1 --message "PortRedirect 1.0.0-rc.1" <commit>
    git push origin v1.0.0-rc.1
    ```
-3. The workflow `release.yml` builds and tests the binaries for the tag, checks that it matches the version in `Cargo.toml` and is on `main`, and publishes the release: the binaries with the version's section of the changelog as notes, and Docker images tagged with the version. A version with a suffix, e.g. `-rc.1`, becomes a pre-release.
+3. The workflow `release.yml` builds and tests the binaries for the tag, checks that it matches the version in `Cargo.toml` and is on `main`, and publishes the release: the binaries with the version's section of the changelog as notes, and Docker images tagged with the version, and with `latest` if it is the newest release. A version with a suffix, e.g. `-rc.1`, becomes a pre-release, which `latest` doesn't point to.
 
 If publishing fails, run the workflow again: it completes the draft of the release it left. It doesn't change a published release.
 

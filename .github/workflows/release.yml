@@ -5,10 +5,11 @@ name: Release binaries and Docker images
 # whose tag moves to that commit. A version tag, e.g. v1.0.0-rc.1, publishes them as the release
 # of that version, with the version's section of CHANGELOG.md as notes, see Releasing in the
 # README. Docker images of both programs with these binaries, tested with the examples in
-# docker/example, become ghcr.io/<owner>/portredirect-server and portredirect-client: for main
-# :latest on Debian with glibc, :alpine with musl, and :sha-<commit> and :sha-<commit>-alpine;
-# for a version tag :<version> and :<version>-alpine, e.g. :1.0.0-rc.1. Pull requests only build
-# and test them, so a change that breaks them shows before it is merged.
+# docker/example, become ghcr.io/<owner>/portredirect-server and portredirect-client, on Debian
+# with glibc and, with the suffix -alpine, on Alpine with musl: for main :edge and :sha-<commit>,
+# for a version tag :<version>, e.g. :1.0.0-rc.1. :latest and :alpine are the newest release
+# that isn't a pre-release, or main as long as there is none. Pull requests only build and test
+# them, so a change that breaks them shows before it is merged.
 #
 # The pre-release "snapshot" changes, so release immutability must stay off (Settings, General,
 # Releases). An immutable release takes no new files, its tag doesn't move, and GitHub never lets
@@ -416,8 +417,19 @@ jobs:
               echo "::notice::Not published: main is at $head now, its run publishes it."
               exit 0
             fi
-            tags=(latest "sha-$short")
+            tags=(edge "sha-$short")
             version=$version+$short
+          fi
+          # :latest is the newest release that isn't a pre-release, or main as long as there is
+          # none, i.e. before 1.0.0.
+          newest=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq '.[] | select((.draft or .prerelease) | not) | .tag_name' | sort -V | tail -n 1)
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            if [ "$GITHUB_REF_NAME" = "$newest" ]; then
+              tags+=(latest)
+            fi
+          elif [ -z "$newest" ]; then
+            tags+=(latest)
           fi
           for base in debian alpine; do
             for program in server client; do

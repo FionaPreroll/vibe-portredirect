@@ -13,6 +13,16 @@ keywords = ["tcp", "quic", "networking", "port-forwarding"]
 categories = ["network-programming", "command-line-utilities"]
 
 authors = ["Fiona <fipreroll+app@gmail.com>"]
+# Only what builds and tests the programs, and their documentation: not CI, Docker, the
+# benchmark tools or the BATS tests.
+include = [
+    "/src/**/*.rs",
+    "/tests/*.rs",
+    "/examples/*.toml",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/LICENSE",
+]
 
 [dependencies]
 anyhow = "1.0.97"
