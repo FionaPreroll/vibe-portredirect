@@ -11,7 +11,7 @@
 #   docker buildx build --file docker/Dockerfile --target client --build-arg BASE=alpine \
 #     --platform linux/amd64,linux/arm64,linux/arm/v7 <context directory>
 #
-# The archives come from the pre-release "latest" or from the release workflow's run.
+# The archives come from the pre-release "snapshot" or from the release workflow's run.
 set -euo pipefail
 
 archives=$1
