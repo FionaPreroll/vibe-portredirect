@@ -338,6 +338,7 @@ It applies what can change while it runs, without touching the tunnels that the 
 - **Blocked addresses:** The server lifts the blocks of addresses after failed attempts, see [Troubleshooting](#the-server-refuses-new-connections), as the new configuration may fix their cause, e.g. a client the server didn't know yet.
 
 The other settings, e.g. the listen addresses and the configuration directory, take effect when the server restarts; the server warns about those that changed.
+So does a new certificate, see [Changing the Server Certificate](#changing-the-server-certificate).
 If the new configuration is invalid, e.g. a PSK file is missing, the server logs why and goes on with the current one: nothing of the new one applies.
 Options on the command line or in the environment still take precedence over the file.
 
