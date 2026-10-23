@@ -424,7 +424,12 @@ where
                 "Requiring connection from {} to validate its address",
                 remote
             );
-            incoming.retry().unwrap();
+            // quinn allows a retry for every address that isn't validated yet. Should that
+            // change, refusing the connection keeps the server accepting the others.
+            if let Err(e) = incoming.retry() {
+                warn!("Can't ask {} to validate its address, refusing it", remote);
+                e.into_incoming().refuse();
+            }
         } else {
             // Limit the connections per address. The address is validated at this point.
             let Some(address_slot) = config.admission.try_acquire(remote.ip()) else {
