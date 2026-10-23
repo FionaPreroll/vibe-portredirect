@@ -85,7 +85,7 @@ It doesn't replace a review by someone outside the project, which #29 asks for, 
 
 - **What:** the reload read the configuration file and the PSK files with blocking calls in an async task.
 - **Impact:** while a file was slow to read, e.g. on a network file system, one of the runtime's threads did nothing else. Only the administrator triggers a reload, so this isn't an attack path.
-- **Fix:** the reload runs in `spawn_blocking`.
+- **Fix:** the reload runs in `block_in_place`, so the runtime moves its other tasks to other threads meanwhile.
 
 ### 8. Removed clients stayed labels of the metrics
 
