@@ -50,9 +50,12 @@ impl Shutdown {
 
     /// Returns a shutdown that the process's signals request: the first SIGINT or SIGTERM drains,
     /// the second one stops.
+    ///
+    /// Listens right away, not only once the spawned task runs, so a signal that arrives soon
+    /// after the start also shuts down gracefully instead of ending the program.
     pub fn on_signals(timeout: Duration) -> Self {
         let shutdown = Self::new(timeout);
-        tokio::spawn(request_on_signals(shutdown.clone()));
+        tokio::spawn(request_on_signals(Signals::new(), shutdown.clone()));
         shutdown
     }
 
@@ -134,8 +137,7 @@ impl Shutdown {
 }
 
 /// Requests `shutdown` to drain on the first SIGINT or SIGTERM, and to stop on the second.
-async fn request_on_signals(shutdown: Shutdown) {
-    let mut signals = Signals::new();
+async fn request_on_signals(mut signals: Signals, shutdown: Shutdown) {
     let (signal, timeout) = (signals.recv().await, shutdown.timeout());
     info!(
         "Received {}, shutting down: running connections may finish within {:?}, another signal closes them right away",
