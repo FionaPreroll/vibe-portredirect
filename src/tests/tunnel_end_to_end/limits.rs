@@ -402,6 +402,7 @@ async fn stalled_handshakes_time_out_and_count_as_failed_attempts() -> Result<()
         ForwardingLimits::default(),
     );
     config.handshake_timeout = Duration::from_millis(500);
+    let admission = Arc::clone(&config.admission);
     let _server = spawn_server_with_handler(config, handle_quic_client_connection);
 
     with_timeout(async {
@@ -412,8 +413,16 @@ async fn stalled_handshakes_time_out_and_count_as_failed_attempts() -> Result<()
         }
 
         // The server gives up on them after its handshake timeout, while they still stall, and
-        // counts each as a failed attempt, so the address is blocked now.
-        sleep(Duration::from_millis(1500)).await;
+        // counts each as a failed attempt, so the address is blocked then. Waiting for that
+        // instead of a fixed time keeps the test reliable on slow machines.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while admission.blocked_for(Ipv4Addr::LOCALHOST.into()).is_none() {
+            anyhow::ensure!(
+                Instant::now() < deadline,
+                "the stalled handshakes didn't block the address"
+            );
+            sleep(Duration::from_millis(50)).await;
+        }
         let result = connect_raw(config_dir.path(), quic_port).await;
         assert!(refused(&result), "unexpected result: {:?}", result.err());
 

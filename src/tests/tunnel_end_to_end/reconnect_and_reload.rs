@@ -100,7 +100,13 @@ async fn server_metrics_count_per_client() -> Result<()> {
 
         // An external client that resets its connection aborts it.
         let reset = TcpStream::connect(localhost(listen_port)).await?;
-        sleep(Duration::from_millis(200)).await;
+        // Once the server forwards it, not after a fixed time, which a slow machine may need.
+        wait_for_metric(
+            || a.forwarded_connections_active.get(),
+            1,
+            "running connections",
+        )
+        .await?;
         reset.set_zero_linger()?;
         drop(reset);
         wait_for_metric(
