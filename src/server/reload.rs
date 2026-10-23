@@ -271,7 +271,25 @@ impl Reloader {
                 tokio::spawn(async move {
                     while hangups.recv().await.is_some() {
                         info!("Received SIGHUP, reloading the configuration");
-                        if let Err(e) = self.reload() {
+                        // Reading the files blocks, e.g. on a slow network file system, so it
+                        // doesn't run on a thread of the runtime.
+                        let reloaded = tokio::task::spawn_blocking(move || {
+                            let result = self.reload();
+                            (self, result)
+                        })
+                        .await;
+                        let result;
+                        (self, result) = match reloaded {
+                            Ok(reloaded) => reloaded,
+                            Err(e) => {
+                                tracing::error!(
+                                    "Reloading the configuration failed, not reloading it again: {}",
+                                    e
+                                );
+                                return;
+                            }
+                        };
+                        if let Err(e) = result {
                             tracing::error!(
                                 "Failed to reload the configuration, the current one stays in effect: {:#}",
                                 e
