@@ -25,7 +25,7 @@ use crate::shutdown::Shutdown;
 pub async fn main() -> Result<()> {
     // Right away, so a SIGHUP while the server starts, e.g. from a service manager that reloads
     // it, doesn't end it.
-    let hangups = Hangups::listen();
+    let hangups = Hangups::listen()?;
 
     // Read the command line, the environment and the configuration file.
     let (command, matches) = Command::from_command_line();

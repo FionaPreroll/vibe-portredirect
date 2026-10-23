@@ -298,7 +298,8 @@ impl Reloader {
     /// Reloads the configuration on each SIGHUP that `hangups` receives, until the program ends.
     pub fn reload_on(mut self, hangups: Hangups) {
         #[cfg(unix)]
-        if let Some(mut hangups) = hangups.0 {
+        {
+            let mut hangups = hangups.0;
             tokio::spawn(async move {
                 while hangups.recv().await.is_some() {
                     info!("Received SIGHUP, reloading the configuration");
@@ -320,23 +321,21 @@ impl Reloader {
 }
 
 /// The SIGHUPs the process receives, see [`Reloader::reload_on`].
-pub struct Hangups(#[cfg(unix)] Option<tokio::signal::unix::Signal>);
+pub struct Hangups(#[cfg(unix)] tokio::signal::unix::Signal);
 
 impl Hangups {
     /// Starts listening for SIGHUP. Until then, a SIGHUP ends the program, so the server listens
     /// right after it starts, before it e.g. looks up names, and handles them once it runs.
-    pub fn listen() -> Self {
+    /// Fails only if the runtime can't handle signals at all.
+    pub fn listen() -> Result<Self> {
         #[cfg(unix)]
         {
             use tokio::signal::unix::{signal, SignalKind};
-            Self(
-                signal(SignalKind::hangup())
-                    .inspect_err(|e| warn!("Can't reload the configuration on SIGHUP: {}", e))
-                    .ok(),
-            )
+            let hangups = signal(SignalKind::hangup()).context("can't listen for SIGHUP")?;
+            Ok(Self(hangups))
         }
         #[cfg(not(unix))]
-        Self()
+        Ok(Self())
     }
 }
 
