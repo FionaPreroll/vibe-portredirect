@@ -5,6 +5,7 @@
 //
 // License: GPL-3.0-only
 
+mod compatibility;
 mod quic_end_to_end_minimal;
 mod quic_end_to_end_multiple_clients;
 mod tunnel_end_to_end;

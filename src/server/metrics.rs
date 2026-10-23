@@ -192,6 +192,35 @@ impl ServerMetrics {
     }
 }
 
+impl ServerMetrics {
+    /// Stops listing the metrics of the client named `client`, e.g. after a reload removed it, so
+    /// the names of former clients don't pile up. Handles of its metrics that are still in use,
+    /// e.g. by its closing tunnel, keep working but are no longer listed.
+    pub fn remove_client(&self, client: &ClientName) {
+        let label = [client.as_str()];
+        for counters in [
+            &self.tunnels,
+            &self.keepalive_failures,
+            &self.forwarded_connections,
+            &self.forwarded_connections_failed,
+            &self.forwarded_connections_aborted,
+            &self.accept_errors,
+            &self.bytes_from_external,
+            &self.bytes_to_external,
+        ] {
+            let _ = counters.remove_label_values(&label);
+        }
+        for gauges in [&self.tunnels_active, &self.forwarded_connections_active] {
+            let _ = gauges.remove_label_values(&label);
+        }
+        for reason in ["address_limit", "rate_limit"] {
+            let _ = self
+                .forwarded_connections_refused
+                .remove_label_values(&[client.as_str(), reason]);
+        }
+    }
+}
+
 /// The server's metrics of one client, see [`ServerMetrics`] for their meaning.
 #[derive(Clone, Debug)]
 pub struct ClientMetrics {
@@ -268,5 +297,27 @@ mod tests {
         ] {
             assert!(text.contains(line), "no {:?} in:\n{}", line, text);
         }
+    }
+
+    #[test]
+    fn test_metrics_of_removed_clients_are_no_longer_listed() {
+        let metrics = ServerMetrics::new();
+        let office: ClientName = "office".parse().unwrap();
+        metrics.client(&"home".parse().unwrap());
+        let tunnel = metrics.client(&office);
+        metrics.remove_client(&office);
+        // The closing tunnel can still count.
+        tunnel.forwarded_connections.inc();
+
+        let mut text = Vec::new();
+        prometheus::Encoder::encode(
+            &prometheus::TextEncoder::new(),
+            &metrics.registry.gather(),
+            &mut text,
+        )
+        .unwrap();
+        let text = String::from_utf8(text).unwrap();
+        assert!(text.contains("client=\"home\""), "{}", text);
+        assert!(!text.contains("office"), "{}", text);
     }
 }

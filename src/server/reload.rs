@@ -110,22 +110,56 @@ pub struct RestartSettings {
 
 impl RestartSettings {
     pub fn of(config: &Config) -> Self {
+        // Without `..`, a new setting doesn't compile until it is sorted in here: either it
+        // changes with a reload, or a reload names it when it changed.
+        let Config {
+            // The same file each time, as the command line names it.
+            config_file: _,
+            config_dir,
+            listen_host,
+            quic_listen_host,
+            quic_listen_port,
+            quic_cert_hostname,
+            // A reload changes these, see Reloader::reload.
+            clients: _,
+            max_quic_connections: _,
+            forwarding_limits: _,
+            log_level: _,
+            congestion_control,
+            print_metrics,
+            metrics_addr,
+            shutdown_timeout,
+            log_format,
+        } = config;
         Self {
-            config_dir: config.config_dir.clone(),
-            listen_host: config.listen_host.clone(),
-            quic_listen_host: config.quic_listen_host.clone(),
-            quic_listen_port: config.quic_listen_port,
-            quic_cert_hostname: config.quic_cert_hostname.clone(),
-            congestion_control: config.congestion_control,
-            print_metrics: config.print_metrics,
-            metrics_addr: config.metrics_addr,
-            shutdown_timeout: config.shutdown_timeout,
-            log_format: config.log_format,
+            config_dir: config_dir.clone(),
+            listen_host: listen_host.clone(),
+            quic_listen_host: quic_listen_host.clone(),
+            quic_listen_port: *quic_listen_port,
+            quic_cert_hostname: quic_cert_hostname.clone(),
+            congestion_control: *congestion_control,
+            print_metrics: *print_metrics,
+            metrics_addr: *metrics_addr,
+            shutdown_timeout: *shutdown_timeout,
+            log_format: *log_format,
         }
     }
 
-    /// Returns the options whose settings differ in `new`.
+    /// Returns the options whose settings differ in `new`. Each field of `RestartSettings` must
+    /// be compared here; the destructuring makes a new field fail to compile until it is.
     fn changes(&self, new: &Self) -> Vec<&'static str> {
+        let Self {
+            config_dir: _,
+            listen_host: _,
+            quic_listen_host: _,
+            quic_listen_port: _,
+            quic_cert_hostname: _,
+            congestion_control: _,
+            print_metrics: _,
+            metrics_addr: _,
+            shutdown_timeout: _,
+            log_format: _,
+        } = self;
         let mut changed = Vec::new();
         if self.config_dir != new.config_dir {
             changed.push("config-dir");
@@ -214,6 +248,18 @@ impl Reloader {
             // So the metrics of new clients are listed before they connect, too.
             METRICS.client(name);
         }
+        // The log level first, so what the new settings cause, e.g. tunnels that end, is logged
+        // at the new level. The tunnels react to the new settings right away, on other threads.
+        if config.log_level != self.log_level {
+            self.log_level = config.log_level;
+            match logging::set_log_level(config.log_level, false) {
+                Ok(()) => info!(
+                    "Logging messages up to the level {} from now on",
+                    config.log_level
+                ),
+                Err(e) => warn!("Not changing the log level: {}", e),
+            }
+        }
         let old = self.app_data.update(new.clone());
         log_changes(&old, &new);
 
@@ -224,16 +270,6 @@ impl Reloader {
                 "At most {} QUIC connections from now on (--max-quic-connections)",
                 max_quic_connections
             );
-        }
-        if config.log_level != self.log_level {
-            self.log_level = config.log_level;
-            match logging::set_log_level(config.log_level, false) {
-                Ok(()) => info!(
-                    "Logging messages up to the level {} from now on",
-                    config.log_level
-                ),
-                Err(e) => warn!("Not changing the log level: {}", e),
-            }
         }
 
         // E.g. after a client failed to authenticate because the server didn't know it yet.
@@ -259,30 +295,47 @@ impl Reloader {
         Ok(())
     }
 
-    /// Reloads the configuration on each SIGHUP from now on, until the program ends.
-    pub fn reload_on_sighup(mut self) {
+    /// Reloads the configuration on each SIGHUP that `hangups` receives, until the program ends.
+    pub fn reload_on(mut self, hangups: Hangups) {
+        #[cfg(unix)]
+        {
+            let mut hangups = hangups.0;
+            tokio::spawn(async move {
+                while hangups.recv().await.is_some() {
+                    info!("Received SIGHUP, reloading the configuration");
+                    // Reading the files blocks, e.g. on a slow network file system, so the
+                    // runtime moves its other tasks to other threads meanwhile. The server's
+                    // runtime has several threads, which this needs.
+                    if let Err(e) = tokio::task::block_in_place(|| self.reload()) {
+                        tracing::error!(
+                            "Failed to reload the configuration, the current one stays in effect: {:#}",
+                            e
+                        );
+                    }
+                }
+            });
+        }
+        #[cfg(not(unix))]
+        let _ = (&mut self, hangups);
+    }
+}
+
+/// The SIGHUPs the process receives, see [`Reloader::reload_on`].
+pub struct Hangups(#[cfg(unix)] tokio::signal::unix::Signal);
+
+impl Hangups {
+    /// Starts listening for SIGHUP. Until then, a SIGHUP ends the program, so the server listens
+    /// right after it starts, before it e.g. looks up names, and handles them once it runs.
+    /// Fails only if the runtime can't handle signals at all.
+    pub fn listen() -> Result<Self> {
         #[cfg(unix)]
         {
             use tokio::signal::unix::{signal, SignalKind};
-            // Listening right away, a SIGHUP doesn't end the program any more.
-            let hangups = signal(SignalKind::hangup())
-                .inspect_err(|e| warn!("Can't reload the configuration on SIGHUP: {}", e));
-            if let Ok(mut hangups) = hangups {
-                tokio::spawn(async move {
-                    while hangups.recv().await.is_some() {
-                        info!("Received SIGHUP, reloading the configuration");
-                        if let Err(e) = self.reload() {
-                            tracing::error!(
-                                "Failed to reload the configuration, the current one stays in effect: {:#}",
-                                e
-                            );
-                        }
-                    }
-                });
-            }
+            let hangups = signal(SignalKind::hangup()).context("can't listen for SIGHUP")?;
+            Ok(Self(hangups))
         }
         #[cfg(not(unix))]
-        let _ = &mut self;
+        Ok(Self())
     }
 }
 
@@ -312,6 +365,7 @@ fn log_changes(old: &Settings, new: &Settings) {
     for name in old.clients.names() {
         if new.clients.get(name).is_none() {
             info!("Removed client {:?}", name.as_str());
+            METRICS.remove_client(name);
         }
     }
     let limits = new.forwarding_limits;

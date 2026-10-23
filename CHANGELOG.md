@@ -12,13 +12,23 @@ Versions 0.4.0 to 0.7.0 and the release candidates of 1.0.0 were not published o
 
 ## [1.0.0-rc.2] - 2026-10-23
 
-The second release candidate of 1.0.0. 1.0.0-rc.1 ran in real use without problems; this one only has newer dependencies, so they are in real use before 1.0.0, too. Protocol version 5 (`pr-5`), as in 1.0.0-rc.1.
+The second release candidate of 1.0.0. 1.0.0-rc.1 ran in real use without problems; this one has newer dependencies and the fixes of a review of the changes since the security review, so they are in real use before 1.0.0, too. Protocol version 5 (`pr-5`), as in 1.0.0-rc.1.
 
 ### Changed
 
-- Updated dependencies: rustls 0.23.46 and rustls-webpki 0.103.16 for the advisories RUSTSEC-2026-0346 to RUSTSEC-2026-0349 and RUSTSEC-2026-0382, tokio 1.53.2, tokio-util 0.7.20, hyper 1.12.0, toml 1.1.8, and the Debian base image of the Docker images.
+- Updated dependencies: rustls 0.23.46 and rustls-webpki 0.103.16 for the advisories RUSTSEC-2026-0346 to RUSTSEC-2026-0349 and RUSTSEC-2026-0382, tokio 1.53.3 for its advisory about `AsyncFd`, which PortRedirect doesn't use, tokio-util 0.7.20, hyper 1.12.0, toml 1.1.8, and the Debian base image of the Docker images.
 - The README's examples forward to port 8443 instead of 4433, the server's default QUIC port, which they could be mistaken for.
 - ARCHITECTURE.md describes how server and client call each other in Mermaid diagrams of the current code.
+- A reload of the server's configuration no longer lists the metrics of the clients it removed.
+- A reload applies its log level before its other settings, so what they cause, e.g. tunnels that end, is logged at the new level.
+- [docs/SECURITY-REVIEW.md](docs/SECURITY-REVIEW.md) also covers IPv6, the JSON and connection logs, and the reload, with findings 6 to 8.
+- For developers: `make version VERSION=…` prepares a release, and Dependabot groups its updates into one pull request per ecosystem.
+
+### Fixed
+
+- A `SIGHUP` while the server started, e.g. a reload right after the start, ended it; now the server listens for it first thing and reloads once it runs. Likewise, a `SIGINT` or `SIGTERM` right after the start ended either program without shutting down gracefully.
+- The server could stop accepting clients if quinn refused to ask a client to validate its address; it now refuses that one connection.
+- A reload read the configuration file and the PSK files on a thread of the runtime, which could hold up other work while a file was slow to read.
 
 ## [1.0.0-rc.1] - 2026-10-04
 
