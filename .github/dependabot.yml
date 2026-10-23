@@ -1,26 +1,38 @@
-# To get started with Dependabot version updates, you'll need to specify which
-# package ecosystems to update and where the package manifests are located.
-# Please see the documentation for all configuration options:
+# Dependabot version updates, once a week. Each ecosystem's updates come in one pull request,
+# as the Cargo updates all change Cargo.lock and would conflict with each other, and all steps
+# of the CodeQL workflow must use the same version of codeql-action.
 # https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
 
 version: 2
 updates:
-  - package-ecosystem: "cargo" # See documentation for possible values
-    directory: "/" # Location of package manifests
+  - package-ecosystem: "cargo"
+    directory: "/"
     schedule:
       interval: "weekly"
+    groups:
+      cargo:
+        patterns:
+          - "*"
 
   # The fuzz targets have a workspace and a Cargo.lock of their own.
   - package-ecosystem: "cargo"
     directory: "/fuzz"
     schedule:
       interval: "weekly"
+    groups:
+      cargo-fuzz:
+        patterns:
+          - "*"
 
   # Keeps the digest-pinned base images in docker/Dockerfile up to date.
   - package-ecosystem: "docker"
     directory: "/docker"
     schedule:
       interval: "weekly"
+    groups:
+      docker:
+        patterns:
+          - "*"
 
   # Keeps the SHA-pinned GitHub Actions in .github/workflows up to date.
   - package-ecosystem: "github-actions"
@@ -28,7 +40,6 @@ updates:
     schedule:
       interval: "weekly"
     groups:
-      # All steps of the CodeQL workflow must use the same version of codeql-action.
-      codeql-action:
+      github-actions:
         patterns:
-          - "github/codeql-action*"
+          - "*"
