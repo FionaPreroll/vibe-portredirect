@@ -110,22 +110,56 @@ pub struct RestartSettings {
 
 impl RestartSettings {
     pub fn of(config: &Config) -> Self {
+        // Without `..`, a new setting doesn't compile until it is sorted in here: either it
+        // changes with a reload, or a reload names it when it changed.
+        let Config {
+            // The same file each time, as the command line names it.
+            config_file: _,
+            config_dir,
+            listen_host,
+            quic_listen_host,
+            quic_listen_port,
+            quic_cert_hostname,
+            // A reload changes these, see Reloader::reload.
+            clients: _,
+            max_quic_connections: _,
+            forwarding_limits: _,
+            log_level: _,
+            congestion_control,
+            print_metrics,
+            metrics_addr,
+            shutdown_timeout,
+            log_format,
+        } = config;
         Self {
-            config_dir: config.config_dir.clone(),
-            listen_host: config.listen_host.clone(),
-            quic_listen_host: config.quic_listen_host.clone(),
-            quic_listen_port: config.quic_listen_port,
-            quic_cert_hostname: config.quic_cert_hostname.clone(),
-            congestion_control: config.congestion_control,
-            print_metrics: config.print_metrics,
-            metrics_addr: config.metrics_addr,
-            shutdown_timeout: config.shutdown_timeout,
-            log_format: config.log_format,
+            config_dir: config_dir.clone(),
+            listen_host: listen_host.clone(),
+            quic_listen_host: quic_listen_host.clone(),
+            quic_listen_port: *quic_listen_port,
+            quic_cert_hostname: quic_cert_hostname.clone(),
+            congestion_control: *congestion_control,
+            print_metrics: *print_metrics,
+            metrics_addr: *metrics_addr,
+            shutdown_timeout: *shutdown_timeout,
+            log_format: *log_format,
         }
     }
 
-    /// Returns the options whose settings differ in `new`.
+    /// Returns the options whose settings differ in `new`. Each field of `RestartSettings` must
+    /// be compared here; the destructuring makes a new field fail to compile until it is.
     fn changes(&self, new: &Self) -> Vec<&'static str> {
+        let Self {
+            config_dir: _,
+            listen_host: _,
+            quic_listen_host: _,
+            quic_listen_port: _,
+            quic_cert_hostname: _,
+            congestion_control: _,
+            print_metrics: _,
+            metrics_addr: _,
+            shutdown_timeout: _,
+            log_format: _,
+        } = self;
         let mut changed = Vec::new();
         if self.config_dir != new.config_dir {
             changed.push("config-dir");
