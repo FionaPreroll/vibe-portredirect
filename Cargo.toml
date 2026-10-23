@@ -39,7 +39,7 @@ prometheus = { version = "0.14.0", default-features = false }
 quinn = { version = "0.11.12", default-features = false, features = ["bloom", "futures-io", "log", "runtime-tokio", "rustls-ring"] }
 rcgen = { version = "0.14.10", features = ["pem", "crypto"] }
 ring = "0.17.14"
-rustls = { version = "0.23.45", default-features = false, features = ["logging", "ring", "std"] }
+rustls = { version = "0.23.46", default-features = false, features = ["logging", "ring", "std"] }
 secrecy = "0.10.3"
 serde = { version = "1.0.229", features = ["derive"] }
 socket2 = "0.6.5"

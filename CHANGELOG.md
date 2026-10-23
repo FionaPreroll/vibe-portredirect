@@ -16,7 +16,7 @@ The second release candidate of 1.0.0. 1.0.0-rc.1 ran in real use without proble
 
 ### Changed
 
-- Updated dependencies: tokio 1.53.2, tokio-util 0.7.20, hyper 1.12.0, toml 1.1.8, and the Debian base image of the Docker images.
+- Updated dependencies: rustls 0.23.46 and rustls-webpki 0.103.16 for the advisories RUSTSEC-2026-0346 to RUSTSEC-2026-0349 and RUSTSEC-2026-0382, tokio 1.53.2, tokio-util 0.7.20, hyper 1.12.0, toml 1.1.8, and the Debian base image of the Docker images.
 - The README's examples forward to port 8443 instead of 4433, the server's default QUIC port, which they could be mistaken for.
 - ARCHITECTURE.md describes how server and client call each other in Mermaid diagrams of the current code.
 
