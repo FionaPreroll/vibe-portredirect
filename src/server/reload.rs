@@ -248,6 +248,18 @@ impl Reloader {
             // So the metrics of new clients are listed before they connect, too.
             METRICS.client(name);
         }
+        // The log level first, so what the new settings cause, e.g. tunnels that end, is logged
+        // at the new level. The tunnels react to the new settings right away, on other threads.
+        if config.log_level != self.log_level {
+            self.log_level = config.log_level;
+            match logging::set_log_level(config.log_level, false) {
+                Ok(()) => info!(
+                    "Logging messages up to the level {} from now on",
+                    config.log_level
+                ),
+                Err(e) => warn!("Not changing the log level: {}", e),
+            }
+        }
         let old = self.app_data.update(new.clone());
         log_changes(&old, &new);
 
@@ -258,16 +270,6 @@ impl Reloader {
                 "At most {} QUIC connections from now on (--max-quic-connections)",
                 max_quic_connections
             );
-        }
-        if config.log_level != self.log_level {
-            self.log_level = config.log_level;
-            match logging::set_log_level(config.log_level, false) {
-                Ok(()) => info!(
-                    "Logging messages up to the level {} from now on",
-                    config.log_level
-                ),
-                Err(e) => warn!("Not changing the log level: {}", e),
-            }
         }
 
         // E.g. after a client failed to authenticate because the server didn't know it yet.
