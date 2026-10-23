@@ -530,7 +530,7 @@ bats tests/<test_file.bats>
 
 ### Releasing
 
-1. In a pull request, set the version in `Cargo.toml`, e.g. `1.0.0-rc.1`, update `Cargo.lock` and `fuzz/Cargo.lock` with `cargo update --workspace` and `cargo update --workspace --manifest-path fuzz/Cargo.toml`, and turn the section `[Unreleased]` of [CHANGELOG.md](CHANGELOG.md) into one for the version, with the date.
+1. In a pull request, run `make version VERSION=1.0.0`, with the new version. It sets the version in `Cargo.toml`, updates `Cargo.lock` and `fuzz/Cargo.lock`, and turns the section `[Unreleased]` of [CHANGELOG.md](CHANGELOG.md) into one for the version, with today's date. Describe the version at the start of its section.
 2. Once it is merged, tag the merge commit with `v` and the version, and push the tag:
    ```sh
    git tag --annotate v1.0.0-rc.1 --message "PortRedirect 1.0.0-rc.1" <commit>

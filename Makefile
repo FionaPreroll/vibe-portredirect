@@ -16,6 +16,7 @@
 #   deny          : Check the dependencies' advisories, licenses and sources (needs cargo-deny).
 #   fuzz          : Run each fuzz target for FUZZ_SECONDS seconds (needs nightly Rust and cargo-fuzz).
 #   clean         : Clean build artifacts using Cargo's built-in clean command.
+#   version       : Prepare a release: set VERSION in Cargo.toml, both lock files and CHANGELOG.md.
 #   run_server    : Run the 'portredirect_server' binary with extra arguments. Pass args via the ARGS variable.
 #   run_client    : Run the 'portredirect_client' binary with extra arguments. Pass args via the ARGS variable.
 #
@@ -48,7 +49,7 @@
 #       Runs the client binary with additional arguments.
 #############################################
 
-.PHONY: all docs build release lint lint_fix test test_bats test_cargo test_cargo_debug test_python coverage deny fuzz clean run_server run_client
+.PHONY: all docs build release lint lint_fix test test_bats test_cargo test_cargo_debug test_python coverage deny fuzz clean version run_server run_client
 
 # Seconds to run each fuzz target for, see the fuzz target.
 FUZZ_SECONDS ?= 60
@@ -158,6 +159,10 @@ fuzz:
 		echo "Fuzzing $$target for $(FUZZ_SECONDS) seconds..."; \
 		cargo +nightly fuzz run $$target -- -max_total_time=$(FUZZ_SECONDS) -dict=portredirect.dict || exit 1; \
 	done
+
+# Prepare a release, e.g. make version VERSION=1.0.0, see Releasing in the README.
+version:
+	@./utils/set-version.sh "$(VERSION)"
 
 # Run Python unit tests.
 # * (This target is called by CI as well.)
