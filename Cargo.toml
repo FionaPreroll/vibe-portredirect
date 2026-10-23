@@ -17,6 +17,8 @@ authors = ["Fiona <fipreroll+app@gmail.com>"]
 # benchmark tools or the BATS tests.
 include = [
     "/src/**/*.rs",
+    # The interface of 1.0, which src/tests/compatibility.rs checks.
+    "/src/tests/compatibility/*",
     "/tests/*.rs",
     "/examples/*.toml",
     "/README.md",
