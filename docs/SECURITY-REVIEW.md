@@ -8,7 +8,7 @@ It doesn't replace a review by someone outside the project, which #29 asks for, 
 ## Scope
 
 - **Version:** 0.7.0 with the changes up to this review: the rate limit for new forwarded connections (#25) and certificate fingerprints (#30).
-  Later changes up to 1.0.0-rc.1 weren't reviewed this way. They include IPv6 (#26), JSON logs and the client's connection log (#28), and reloading the server's configuration on `SIGHUP` (#37). Their tests run in CI, and the fuzz targets still cover all parsers of input from the peer.
+  The later changes up to 1.0.0-rc.1 were reviewed for 1.0.0-rc.2, with findings 6 to 8: IPv6 (#26), JSON logs and the client's connection log (#28), and reloading the server's configuration on `SIGHUP` (#37).
 - **Protocol:** authentication, setting up the tunnel, control messages, data streams, close codes and limits.
 - **Code:** everything in `src/` that handles input from the network, configuration files, PSKs, keys and certificates, logs and metrics.
 - **Dependencies:** their features, licenses, sources and known advisories.
@@ -40,6 +40,9 @@ It doesn't replace a review by someone outside the project, which #29 asks for, 
 | 3 | 23 unused crates through a default feature of quinn | Informational | Fixed |
 | 4 | Nothing ruled out unsafe code | Informational | Fixed |
 | 5 | Before authentication, a client can fill the control stream's receive window | Low | Fixed by #27 |
+| 6 | A `SIGHUP` while the server started ended it | Low | Fixed |
+| 7 | A reload read the PSK files on a thread of the runtime | Informational | Fixed |
+| 8 | Removed clients stayed labels of the metrics | Informational | Fixed |
 
 ### 1. Peers could add lines to the other side's log
 
@@ -71,7 +74,40 @@ It doesn't replace a review by someone outside the project, which #29 asks for, 
 - **Impact:** up to 1.25 MB per connection before authentication, 80 MB with the default limit of 64 QUIC connections. The limits per address (8 QUIC connections by default) and the timeouts (10 seconds each for the TLS handshake and the authentication) keep it short and spread out.
 - **Status:** fixed by [#27](https://github.com/FionaPreroll/vibe-portredirect/issues/27), which made the stream windows larger for throughput: 8 MiB, which would have made this worse. Until the client has authenticated, the server's receive window for the whole connection is now 64 KiB; then it grows to the full 32 MiB. Tests check both, with the server's authentication.
 
+### 6. A `SIGHUP` while the server started ended it
+
+- **What:** the server listened for `SIGHUP` only after it had looked up its addresses and loaded or generated its certificate. Until then, `SIGHUP` had its default action and ended the program. The same held for `SIGINT` and `SIGTERM` in both programs until the task that listens for them first ran.
+- **Who:** whoever may send the server signals, e.g. a service manager that reloads it right after it started. Not a remote attacker.
+- **Impact:** the server ended instead of reloading, and a configuration with `Restart=on-failure` restarted it.
+- **Fix:** the server listens for `SIGHUP` first thing, and both programs register for `SIGINT` and `SIGTERM` before they spawn the task that handles them.
+
+### 7. A reload read the PSK files on a thread of the runtime
+
+- **What:** the reload read the configuration file and the PSK files with blocking calls in an async task.
+- **Impact:** while a file was slow to read, e.g. on a network file system, one of the runtime's threads did nothing else. Only the administrator triggers a reload, so this isn't an attack path.
+- **Fix:** the reload runs in `spawn_blocking`.
+
+### 8. Removed clients stayed labels of the metrics
+
+- **What:** the server lists metrics with the label `client` for every configured client. A reload that removed a client kept its metrics.
+- **Impact:** labels accumulate with each renamed client until the server restarts. Only the administrator chooses the names, so a client can't add labels.
+- **Fix:** a reload removes the metrics of removed clients.
+
 ## Checked without Findings
+
+- **Reloading the configuration** (`src/server/reload.rs`, #37):
+  - Everything that can fail is read and checked first, the configuration file and all PSK files; an invalid configuration changes nothing.
+  - Tunnels subscribe to the settings, and check them right when they subscribe, so a reload between a client's authentication and its subscription still ends its tunnel if it no longer accepts it.
+  - A tunnel whose client, PSK or port was removed ends with a permanent close code, so its client doesn't reconnect.
+  - PSK files are checked for other users' access again, as at the start.
+  - A reload lifts the blocks of addresses after failed attempts. Only whoever may signal the server can trigger it.
+  - A reload compares the PSK a tunnel authenticated with to the configured ones without constant time. That is no timing leak: the client doesn't choose when the comparison runs, and its PSK was already verified.
+- **IPv6** (#26):
+  - Addresses are made canonical before the limits look at them, so a client can't use an IPv4-mapped IPv6 address to get a second set of limits.
+  - The limits per address and the blocking apply per /64 network, the usual size of one site's network.
+- **Logs** (#28):
+  - JSON logs escape control characters in strings themselves, text logs with `escaping_fields`, see finding 1.
+  - The client's connection log has the external client's address, the destination, the duration and the byte counts, no text from the peer.
 
 - **Authentication** (`src/protocol/auth.rs`):
   - The proofs are HMAC-SHA256 tags keyed with the PSK, over a label, keying material exported from the TLS session, a 32-byte nonce from the operating system's random number generator, and the client's name.
@@ -117,7 +153,7 @@ It doesn't replace a review by someone outside the project, which #29 asks for, 
 These remain as described in [SECURITY.md](../SECURITY.md):
 
 - **A leaked private key and a weak PSK:** whoever has the server's private key gets the clients' proofs, and could guess a weak PSK offline.
-- **Distributed attacks:** limits apply per address, so many addresses add up.
+- **Distributed attacks:** limits apply per address, so many addresses add up. The rate limit and the blocking track at most 65,536 addresses (IPv6: /64 networks); beyond that, new addresses aren't limited or blocked, rather than using more memory.
 - **No access control on the metrics endpoints:** they rely on listening on `127.0.0.1`.
 
 ## For the External Review
