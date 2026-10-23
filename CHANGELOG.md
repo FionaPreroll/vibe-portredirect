@@ -10,6 +10,16 @@ Versions 0.4.0 to 0.7.0 and the release candidates of 1.0.0 were not published o
 
 ## [Unreleased]
 
+## [1.0.0-rc.2] - 2026-10-23
+
+The second release candidate of 1.0.0. 1.0.0-rc.1 ran in real use without problems; this one only has newer dependencies, so they are in real use before 1.0.0, too. Protocol version 5 (`pr-5`), as in 1.0.0-rc.1.
+
+### Changed
+
+- Updated dependencies: tokio 1.53.2, tokio-util 0.7.20, hyper 1.12.0, toml 1.1.8, and the Debian base image of the Docker images.
+- The README's examples forward to port 8443 instead of 4433, the server's default QUIC port, which they could be mistaken for.
+- ARCHITECTURE.md describes how server and client call each other in Mermaid diagrams of the current code.
+
 ## [1.0.0-rc.1] - 2026-10-04
 
 The first release candidate of 1.0.0, to run in real use before 1.0.0 is published on crates.io. From 1.0.0 on, the protocol, the command line, the environment variables, the configuration file and the metric names stay compatible in all 1.x versions. Protocol version 5 (`pr-5`), as in 0.7.0.
