@@ -312,6 +312,7 @@ fn log_changes(old: &Settings, new: &Settings) {
     for name in old.clients.names() {
         if new.clients.get(name).is_none() {
             info!("Removed client {:?}", name.as_str());
+            METRICS.remove_client(name);
         }
     }
     let limits = new.forwarding_limits;

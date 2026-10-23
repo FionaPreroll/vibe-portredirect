@@ -353,7 +353,7 @@ The client reads its configuration only when it starts, so restart it after a ch
 ### Metrics
 
 With `--provide-metrics`, both programs serve [Prometheus](https://prometheus.io) metrics at `/metrics`: the client on `127.0.0.1:9898` by default, the server on `127.0.0.1:9899`.
-All metrics are listed from the start, with 0. Metrics of the server's clients have the label `client` with the client's name; they are listed for all configured clients.
+All metrics are listed from the start, with 0. Metrics of the server's clients have the label `client` with the client's name; they are listed for all configured clients. When a reload of the configuration removes a client, its metrics are no longer listed.
 
 | Server metric (`portredirect_server_…`)           | Type    | Labels   | Meaning                                                                                       |
 | ------------------------------------------------- | ------- | -------- | --------------------------------------------------------------------------------------------- |
