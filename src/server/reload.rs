@@ -293,48 +293,63 @@ impl Reloader {
         Ok(())
     }
 
-    /// Reloads the configuration on each SIGHUP from now on, until the program ends.
-    pub fn reload_on_sighup(mut self) {
+    /// Reloads the configuration on each SIGHUP that `hangups` receives, until the program ends.
+    pub fn reload_on(mut self, hangups: Hangups) {
+        #[cfg(unix)]
+        if let Some(mut hangups) = hangups.0 {
+            tokio::spawn(async move {
+                while hangups.recv().await.is_some() {
+                    info!("Received SIGHUP, reloading the configuration");
+                    // Reading the files blocks, e.g. on a slow network file system, so it
+                    // doesn't run on a thread of the runtime.
+                    let reloaded = tokio::task::spawn_blocking(move || {
+                        let result = self.reload();
+                        (self, result)
+                    })
+                    .await;
+                    let result;
+                    (self, result) = match reloaded {
+                        Ok(reloaded) => reloaded,
+                        Err(e) => {
+                            tracing::error!(
+                                "Reloading the configuration failed, not reloading it again: {}",
+                                e
+                            );
+                            return;
+                        }
+                    };
+                    if let Err(e) = result {
+                        tracing::error!(
+                            "Failed to reload the configuration, the current one stays in effect: {:#}",
+                            e
+                        );
+                    }
+                }
+            });
+        }
+        #[cfg(not(unix))]
+        let _ = (&mut self, hangups);
+    }
+}
+
+/// The SIGHUPs the process receives, see [`Reloader::reload_on`].
+pub struct Hangups(#[cfg(unix)] Option<tokio::signal::unix::Signal>);
+
+impl Hangups {
+    /// Starts listening for SIGHUP. Until then, a SIGHUP ends the program, so the server listens
+    /// right after it starts, before it e.g. looks up names, and handles them once it runs.
+    pub fn listen() -> Self {
         #[cfg(unix)]
         {
             use tokio::signal::unix::{signal, SignalKind};
-            // Listening right away, a SIGHUP doesn't end the program any more.
-            let hangups = signal(SignalKind::hangup())
-                .inspect_err(|e| warn!("Can't reload the configuration on SIGHUP: {}", e));
-            if let Ok(mut hangups) = hangups {
-                tokio::spawn(async move {
-                    while hangups.recv().await.is_some() {
-                        info!("Received SIGHUP, reloading the configuration");
-                        // Reading the files blocks, e.g. on a slow network file system, so it
-                        // doesn't run on a thread of the runtime.
-                        let reloaded = tokio::task::spawn_blocking(move || {
-                            let result = self.reload();
-                            (self, result)
-                        })
-                        .await;
-                        let result;
-                        (self, result) = match reloaded {
-                            Ok(reloaded) => reloaded,
-                            Err(e) => {
-                                tracing::error!(
-                                    "Reloading the configuration failed, not reloading it again: {}",
-                                    e
-                                );
-                                return;
-                            }
-                        };
-                        if let Err(e) = result {
-                            tracing::error!(
-                                "Failed to reload the configuration, the current one stays in effect: {:#}",
-                                e
-                            );
-                        }
-                    }
-                });
-            }
+            Self(
+                signal(SignalKind::hangup())
+                    .inspect_err(|e| warn!("Can't reload the configuration on SIGHUP: {}", e))
+                    .ok(),
+            )
         }
         #[cfg(not(unix))]
-        let _ = &mut self;
+        Self()
     }
 }
 

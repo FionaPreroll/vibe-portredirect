@@ -17,12 +17,16 @@ use crate::quic::server::{
 use crate::server::client_handler::handle_quic_client_connection;
 use crate::server::config::{CertificateConfig, Command};
 use crate::server::metrics::{METRICS, PREFIX};
-use crate::server::reload::{Reloader, RestartSettings};
+use crate::server::reload::{Hangups, Reloader, RestartSettings};
 use crate::shutdown::Shutdown;
 
 /// Runs the server program, `portredirect_server`, until a shutdown signal arrives.
 #[tokio::main]
 pub async fn main() -> Result<()> {
+    // Right away, so a SIGHUP while the server starts, e.g. from a service manager that reloads
+    // it, doesn't end it.
+    let hangups = Hangups::listen();
+
     // Read the command line, the environment and the configuration file.
     let (command, matches) = Command::from_command_line();
     let config = match command {
@@ -86,7 +90,7 @@ pub async fn main() -> Result<()> {
         quic_config.connection_limit.clone(),
         Arc::clone(&quic_config.admission),
     )
-    .reload_on_sighup();
+    .reload_on(hangups);
 
     // Spawn the metrics printer task.
     if config.print_metrics {
