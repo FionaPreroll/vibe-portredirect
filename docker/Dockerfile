@@ -10,7 +10,7 @@
 ARG BASE=debian
 
 FROM debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f AS debian
-FROM alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6 AS alpine
+FROM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a AS alpine
 
 FROM ${BASE} AS base
 LABEL org.opencontainers.image.source="https://github.com/FionaPreroll/vibe-portredirect" \
