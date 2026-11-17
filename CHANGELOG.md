@@ -10,6 +10,10 @@ Versions 0.4.0 to 0.7.0 and the release candidates of 1.0.0 were not published o
 
 ## [Unreleased]
 
+### Changed
+
+- `--print-metrics` writes the time of each line in UTC, like the log lines, e.g. `2026-11-17T13:08:17Z`, instead of in local time. So PortRedirect no longer depends on chrono, which is unmaintained (RUSTSEC-2026-0543).
+
 ## [1.0.0-rc.2] - 2026-10-23
 
 The second release candidate of 1.0.0. 1.0.0-rc.1 ran in real use without problems; this one has newer dependencies and the fixes of a review of the changes since the security review, so they are in real use before 1.0.0, too. Protocol version 5 (`pr-5`), as in 1.0.0-rc.1.
