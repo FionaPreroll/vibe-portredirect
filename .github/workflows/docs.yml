@@ -10,7 +10,7 @@ env:
   CARGO_TERM_COLOR: always
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -19,10 +19,12 @@ jobs:
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: stable
+      # Ubuntu 26.04 packages Graphviz's layouts other than dot separately, and the module graph
+      # uses neato.
       - name: Install Ubuntu dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y graphviz
+          sudo apt-get install -y graphviz libgvplugin-neato-layout8
       # The version is pinned: another one may write the module graph differently, which would
       # look like a stale graph. Update it here and run make docs when updating it.
       - name: Install cargo-modules
