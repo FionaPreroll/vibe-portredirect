@@ -24,6 +24,8 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
 use tokio::net::TcpListener;
 use tracing::{debug, info, warn};
 
@@ -273,6 +275,13 @@ pub fn summary(registry: &Registry, prefix: &str) -> String {
         .join(" | ")
 }
 
+/// Writes the time of a summary to the second in UTC, as in RFC 3339, like the log lines.
+fn summary_time(time: OffsetDateTime) -> String {
+    let time = time.to_offset(time::UtcOffset::UTC).truncate_to_second();
+    time.format(&Rfc3339)
+        .expect("RFC 3339 has every year from 0 to 9999")
+}
+
 /// Prints [`summary`] to stderr every second, if it changed.
 pub async fn print_metrics_loop(registry: Registry, prefix: &str) {
     let mut tick = tokio::time::interval(Duration::from_secs(1));
@@ -281,8 +290,7 @@ pub async fn print_metrics_loop(registry: Registry, prefix: &str) {
         tick.tick().await;
         let current = summary(&registry, prefix);
         if current != previous {
-            let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-            eprintln!("{} | {}", timestamp, current);
+            eprintln!("{} | {}", summary_time(OffsetDateTime::now_utc()), current);
             previous = current;
         }
     }
@@ -293,6 +301,14 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
+
+    #[test]
+    fn test_summary_time_is_utc_to_the_second() {
+        let time = OffsetDateTime::from_unix_timestamp_nanos(1_763_384_558_987_654_321)
+            .unwrap()
+            .to_offset(time::UtcOffset::from_hms(2, 0, 0).unwrap());
+        assert_eq!(summary_time(time), "2025-11-17T13:02:38Z");
+    }
 
     fn registry() -> (Registry, IntCounter) {
         let registry = Registry::new();

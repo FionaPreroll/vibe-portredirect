@@ -545,10 +545,20 @@ async fn programs_forward_and_exit_cleanly_on_sigterm() -> Result<()> {
     assert_eq!(client.exit_code().await?, 0, "{}", client.output());
     wait_until_closed(listen_port).await?;
 
-    // The server prints its metrics: the tunnel was set up and is down again.
-    server
-        .wait_for_output("tunnels_active: 0 | tunnels_total: 1")
-        .await?;
+    // The server prints its metrics: the tunnel was set up and is down again. Each summary
+    // starts with the time in UTC, to the second.
+    let summary = "tunnels_active: 0 | tunnels_total: 1";
+    server.wait_for_output(summary).await?;
+    let output = server.output();
+    let line = output.lines().find(|line| line.contains(summary)).unwrap();
+    let (time, _) = line.split_once(" | ").unwrap();
+    let pattern = "0000-00-00T00:00:00Z";
+    let in_utc = time.len() == pattern.len()
+        && time.chars().zip(pattern.chars()).all(|(c, p)| match p {
+            '0' => c.is_ascii_digit(),
+            _ => c == p,
+        });
+    assert!(in_utc, "{}", line);
 
     server.terminate();
     assert_eq!(server.exit_code().await?, 0, "{}", server.output());

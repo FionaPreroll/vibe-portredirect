@@ -125,7 +125,7 @@ portredirect_server \
 - **`--config-dir`:** Where the certificate and private key are stored (default `~/.config/portredirect`). If only one of them is there, the server doesn't start, instead of generating a new pair that clients wouldn't trust.
 - **`--print-quic-cert-fingerprint`:** Print the fingerprint of the certificate, for the clients' `--quic-cert-fingerprint`, and exit, see [Server Certificate](#server-certificate). If there is no certificate yet, generates it first.
 - **`--provide-metrics`:** Serve Prometheus metrics at `http://127.0.0.1:9899/metrics`, or at the address given with `--metrics-listen`, see [Metrics](#metrics). The endpoint has no authentication, only make it reachable from trusted networks.
-- **`--print-metrics`:** Print the metrics to stderr when they change, each summed over all clients.
+- **`--print-metrics`:** Print the metrics to stderr when they change, each summed over all clients, with the time in UTC.
 - **`--shutdown-timeout`:** Seconds that running forwarded connections may take to finish when the server shuts down (default 5), see [Shutting Down](#shutting-down).
 - **`--log-level`:** `off`, `error`, `warn`, `info` (default), `debug` or `trace`. Logs go to stderr. The `RUST_LOG` environment variable, if set, takes precedence and can set levels per module, e.g. `RUST_LOG=info,portredirect::forward=debug`.
 - **`--log-format`:** `text` (default) or `json`: one JSON object per line, with the fields of each message, e.g. for log collectors.
