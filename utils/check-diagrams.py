@@ -22,8 +22,9 @@ def texts(svg: str) -> list[str]:
 def main(sources: list[str]) -> int:
     stale = []
     for source in map(Path, sources):
+        # dot's errors, e.g. about a missing layout plugin, go to the log.
         rendered = subprocess.run(
-            ["dot", "-Tsvg", str(source)], capture_output=True, text=True, check=True
+            ["dot", "-Tsvg", str(source)], stdout=subprocess.PIPE, text=True, check=True
         ).stdout
         svg = source.with_suffix(".svg")
         if not svg.exists() or texts(svg.read_text()) != texts(rendered):
